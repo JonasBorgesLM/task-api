@@ -55,7 +55,7 @@ cp .env.example .env
 
 `.env` is read automatically on startup (see [Configuration](#configuration) below). It is listed in `.gitignore` and must **never** be committed — `.env.example` is the only env file that belongs in version control, and it must only ever contain non-sensitive placeholder values.
 
-If you don't create a `.env` file, the application falls back to its built-in defaults (`APP_PORT=8080`, `APP_SHUTDOWN_TIMEOUT=10s`).
+If you don't create a `.env` file, the application falls back to its built-in defaults (`HTTP_ADDR=:8080`, 5s/10s/60s read/write/idle timeouts, `HTTP_SHUTDOWN_TIMEOUT=10s`).
 
 ### Run
 
@@ -74,7 +74,7 @@ The server starts on port `8080` by default:
 Environment variables already set in the shell always take precedence over `.env` — use this to override a value for a single run without editing the file:
 
 ```bash
-APP_PORT=9090 APP_SHUTDOWN_TIMEOUT=30s go run ./cmd/api
+HTTP_ADDR=:9090 HTTP_SHUTDOWN_TIMEOUT=30s go run ./cmd/api
 ```
 
 ### Build
@@ -102,13 +102,16 @@ On startup, the application loads `.env` from the working directory (if present)
 
 | Variable | Description | Default | Example |
 |---|---|---|---|
-| `APP_PORT` | TCP port the HTTP server listens on | `8080` | `APP_PORT=9090` |
-| `APP_SHUTDOWN_TIMEOUT` | Maximum time to wait for in-flight requests during shutdown | `10s` | `APP_SHUTDOWN_TIMEOUT=30s` |
+| `HTTP_ADDR` | TCP address the HTTP server listens on (`host:port`) | `:8080` | `HTTP_ADDR=:9090` |
+| `HTTP_READ_TIMEOUT` | `http.Server.ReadTimeout` | `5s` | `HTTP_READ_TIMEOUT=10s` |
+| `HTTP_WRITE_TIMEOUT` | `http.Server.WriteTimeout` | `10s` | `HTTP_WRITE_TIMEOUT=15s` |
+| `HTTP_IDLE_TIMEOUT` | `http.Server.IdleTimeout` | `60s` | `HTTP_IDLE_TIMEOUT=120s` |
+| `HTTP_SHUTDOWN_TIMEOUT` | Maximum time to wait for in-flight requests during shutdown | `10s` | `HTTP_SHUTDOWN_TIMEOUT=30s` |
 
 **Validation rules:**
 
-- `APP_PORT` must be an integer between 1 and 65535. Port 0 is rejected.
-- `APP_SHUTDOWN_TIMEOUT` must be a valid Go duration string (e.g. `10s`, `1m`, `500ms`) and must be positive.
+- `HTTP_ADDR` must be a syntactically valid `host:port` address (per `net.SplitHostPort`) with a numeric port between 1 and 65535. Port 0 is rejected.
+- All `HTTP_*_TIMEOUT` variables must be a valid Go duration string (e.g. `10s`, `1m`, `500ms`) and must be strictly positive.
 
 ## API
 
@@ -411,7 +414,7 @@ Every `Repository` and `Service` method takes `ctx context.Context` as its first
 The server handles `SIGINT` (Ctrl+C) and `SIGTERM` (sent by process managers and container runtimes):
 
 1. The signal is received on a buffered channel via `signal.Notify`.
-2. `http.Server.Shutdown(ctx)` is called with a context bounded by `APP_SHUTDOWN_TIMEOUT`.
+2. `http.Server.Shutdown(ctx)` is called with a context bounded by `HTTP_SHUTDOWN_TIMEOUT`.
 3. The server stops accepting new connections immediately.
 4. In-flight requests are allowed to complete.
 5. If the timeout expires before all requests finish, `Shutdown` returns an error, which is logged and propagates to the process exit code.

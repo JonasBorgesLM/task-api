@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/JonasBorgesLM/task-api/config"
 	"github.com/JonasBorgesLM/task-api/task"
@@ -42,20 +41,20 @@ func run(logger *slog.Logger) error {
 	registerHealthRoute(mux, logger)
 	handler.RegisterRoutes(mux)
 
-	// HTTP server with explicit timeouts.
+	// HTTP server with explicit timeouts, sourced entirely from Config.
 	srv := &http.Server{
-		Addr:         cfg.Addr(),
+		Addr:         cfg.Addr,
 		Handler:      mux,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+		IdleTimeout:  cfg.IdleTimeout,
 	}
 
 	// serverErr receives the result of ListenAndServe from its goroutine.
 	serverErr := make(chan error, 1)
 
 	go func() {
-		logger.Info("server started", "addr", cfg.Addr())
+		logger.Info("server started", "addr", cfg.Addr)
 		serverErr <- srv.ListenAndServe()
 	}()
 
