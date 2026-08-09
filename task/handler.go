@@ -1,21 +1,26 @@
 package task
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 )
 
+// maxRequestBodyBytes caps the size of decoded JSON request bodies to guard
+// against clients sending unbounded payloads.
+const maxRequestBodyBytes = 1 << 20 // 1 MiB
+
 // taskService is the interface the Handler depends on.
 // It allows the Handler to be tested with a fake implementation.
 type taskService interface {
-	CreateTask(title, description string) (Task, error)
-	GetTask(id string) (Task, error)
-	ListTasks() ([]Task, error)
-	UpdateTask(id, title, description string) (Task, error)
-	DeleteTask(id string) error
-	CompleteTask(id string) (Task, error)
+	CreateTask(ctx context.Context, title, description string) (Task, error)
+	GetTask(ctx context.Context, id string) (Task, error)
+	ListTasks(ctx context.Context) ([]Task, error)
+	UpdateTask(ctx context.Context, id, title, description string) (Task, error)
+	DeleteTask(ctx context.Context, id string) error
+	CompleteTask(ctx context.Context, id string) (Task, error)
 }
 
 // Handler exposes the task Service over HTTP.
@@ -53,6 +58,7 @@ type updateTaskRequest struct {
 
 // createTask handles POST /tasks.
 func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	defer r.Body.Close()
 
 	var req createTaskRequest
@@ -61,7 +67,7 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := h.svc.CreateTask(req.Title, req.Description)
+	task, err := h.svc.CreateTask(r.Context(), req.Title, req.Description)
 	if err != nil {
 		h.handleServiceError(w, err)
 		return
@@ -72,7 +78,7 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 
 // listTasks handles GET /tasks.
 func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
-	tasks, err := h.svc.ListTasks()
+	tasks, err := h.svc.ListTasks(r.Context())
 	if err != nil {
 		h.handleServiceError(w, err)
 		return
@@ -90,7 +96,7 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) getTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	task, err := h.svc.GetTask(id)
+	task, err := h.svc.GetTask(r.Context(), id)
 	if err != nil {
 		h.handleServiceError(w, err)
 		return
@@ -101,6 +107,7 @@ func (h *Handler) getTask(w http.ResponseWriter, r *http.Request) {
 
 // updateTask handles PUT /tasks/{id}.
 func (h *Handler) updateTask(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	defer r.Body.Close()
 
 	id := r.PathValue("id")
@@ -111,7 +118,7 @@ func (h *Handler) updateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := h.svc.UpdateTask(id, req.Title, req.Description)
+	task, err := h.svc.UpdateTask(r.Context(), id, req.Title, req.Description)
 	if err != nil {
 		h.handleServiceError(w, err)
 		return
@@ -124,7 +131,7 @@ func (h *Handler) updateTask(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) completeTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	task, err := h.svc.CompleteTask(id)
+	task, err := h.svc.CompleteTask(r.Context(), id)
 	if err != nil {
 		h.handleServiceError(w, err)
 		return
@@ -137,7 +144,7 @@ func (h *Handler) completeTask(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) deleteTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	if err := h.svc.DeleteTask(id); err != nil {
+	if err := h.svc.DeleteTask(r.Context(), id); err != nil {
 		h.handleServiceError(w, err)
 		return
 	}
@@ -153,6 +160,8 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, err error) {
 		h.writeError(w, http.StatusNotFound, "task not found")
 	case errors.Is(err, ErrInvalidInput):
 		h.writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrAlreadyExists):
+		h.writeError(w, http.StatusConflict, "task already exists")
 	default:
 		h.logger.Error("unexpected service error", "error", err)
 		h.writeError(w, http.StatusInternalServerError, "internal server error")

@@ -1,12 +1,9 @@
 package task
 
 import (
-	"errors"
+	"context"
 	"sync"
 )
-
-// errAlreadyExists is returned by Create when a task with the same ID already exists.
-var errAlreadyExists = errors.New("task already exists")
 
 // memoryRepository is an in-memory implementation of Repository.
 type memoryRepository struct {
@@ -21,13 +18,17 @@ func NewMemoryRepository() Repository {
 	}
 }
 
-// Create persists a new task. Returns errAlreadyExists if the ID is already taken.
-func (r *memoryRepository) Create(task Task) error {
+// Create persists a new task. Returns ErrAlreadyExists if the ID is already taken.
+func (r *memoryRepository) Create(ctx context.Context, task Task) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if _, exists := r.store[task.ID]; exists {
-		return errAlreadyExists
+		return ErrAlreadyExists
 	}
 
 	r.store[task.ID] = task
@@ -35,7 +36,11 @@ func (r *memoryRepository) Create(task Task) error {
 }
 
 // FindByID returns the task with the given ID. Returns ErrNotFound if absent.
-func (r *memoryRepository) FindByID(id string) (Task, error) {
+func (r *memoryRepository) FindByID(ctx context.Context, id string) (Task, error) {
+	if err := ctx.Err(); err != nil {
+		return Task{}, err
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -48,7 +53,11 @@ func (r *memoryRepository) FindByID(id string) (Task, error) {
 }
 
 // FindAll returns a snapshot of all tasks as a new slice.
-func (r *memoryRepository) FindAll() ([]Task, error) {
+func (r *memoryRepository) FindAll(ctx context.Context) ([]Task, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -61,7 +70,11 @@ func (r *memoryRepository) FindAll() ([]Task, error) {
 }
 
 // Update replaces an existing task. Returns ErrNotFound if the ID does not exist.
-func (r *memoryRepository) Update(task Task) error {
+func (r *memoryRepository) Update(ctx context.Context, task Task) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -74,7 +87,11 @@ func (r *memoryRepository) Update(task Task) error {
 }
 
 // Delete removes the task with the given ID. Returns ErrNotFound if absent.
-func (r *memoryRepository) Delete(id string) error {
+func (r *memoryRepository) Delete(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

@@ -122,12 +122,12 @@ Creates a new task.
 
 ```json
 {
-  "ID": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "Title": "Buy groceries",
-  "Description": "Milk, eggs, bread",
-  "Status": "pending",
-  "CreatedAt": "2026-08-08T12:00:00Z",
-  "UpdatedAt": "2026-08-08T12:00:00Z"
+  "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "title": "Buy groceries",
+  "description": "Milk, eggs, bread",
+  "status": "pending",
+  "created_at": "2026-08-08T12:00:00Z",
+  "updated_at": "2026-08-08T12:00:00Z"
 }
 ```
 
@@ -137,6 +137,7 @@ Creates a new task.
 |---|---|
 | `201` | Task created successfully |
 | `400` | Missing or empty title, or malformed JSON |
+| `409` | A task with the generated ID already exists (practically unreachable — IDs are server-generated UUIDv4) |
 | `500` | Unexpected server error |
 
 ---
@@ -150,12 +151,12 @@ Returns all tasks. Returns an empty array when no tasks exist.
 ```json
 [
   {
-    "ID": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    "Title": "Buy groceries",
-    "Description": "Milk, eggs, bread",
-    "Status": "pending",
-    "CreatedAt": "2026-08-08T12:00:00Z",
-    "UpdatedAt": "2026-08-08T12:00:00Z"
+    "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "title": "Buy groceries",
+    "description": "Milk, eggs, bread",
+    "status": "pending",
+    "created_at": "2026-08-08T12:00:00Z",
+    "updated_at": "2026-08-08T12:00:00Z"
   }
 ]
 ```
@@ -177,12 +178,12 @@ Returns a single task by ID.
 
 ```json
 {
-  "ID": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "Title": "Buy groceries",
-  "Description": "Milk, eggs, bread",
-  "Status": "pending",
-  "CreatedAt": "2026-08-08T12:00:00Z",
-  "UpdatedAt": "2026-08-08T12:00:00Z"
+  "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "title": "Buy groceries",
+  "description": "Milk, eggs, bread",
+  "status": "pending",
+  "created_at": "2026-08-08T12:00:00Z",
+  "updated_at": "2026-08-08T12:00:00Z"
 }
 ```
 
@@ -232,12 +233,12 @@ No request body required.
 
 ```json
 {
-  "ID": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "Title": "Buy groceries",
-  "Description": "Milk, eggs, bread",
-  "Status": "done",
-  "CreatedAt": "2026-08-08T12:00:00Z",
-  "UpdatedAt": "2026-08-08T12:05:00Z"
+  "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "title": "Buy groceries",
+  "description": "Milk, eggs, bread",
+  "status": "done",
+  "created_at": "2026-08-08T12:00:00Z",
+  "updated_at": "2026-08-08T12:05:00Z"
 }
 ```
 
@@ -299,6 +300,7 @@ All error responses use the same JSON envelope:
 |---|---|
 | `400 Bad Request` | Invalid input — malformed JSON or failed business rule validation (e.g. empty title). The error message describes the specific problem. |
 | `404 Not Found` | The requested task ID does not exist. |
+| `409 Conflict` | A task with the generated ID already exists. Practically unreachable in normal operation, since IDs are server-generated UUIDv4. |
 | `500 Internal Server Error` | An unexpected server-side failure. The response body contains a generic message; details are logged server-side and never exposed to the client. |
 
 ## Development
@@ -371,10 +373,19 @@ Calling `PATCH /tasks/{id}/done` on a task that is already `done` returns the cu
 The in-memory store uses `sync.RWMutex`. Multiple concurrent reads are allowed; writes are exclusive. All methods are safe to call from concurrent goroutines.
 
 **Domain errors are translated at the Handler layer**
-`ErrNotFound` becomes HTTP 404. `ErrInvalidInput` becomes HTTP 400 with the original message. All other errors become HTTP 500 with a generic message, and the original error is logged server-side.
+`ErrNotFound` becomes HTTP 404. `ErrInvalidInput` becomes HTTP 400 with the original message. `ErrAlreadyExists` becomes HTTP 409 (practically unreachable, since IDs are server-generated UUIDv4). All other errors become HTTP 500 with a generic message, and the original error is logged server-side.
 
 **Structured logging with `log/slog`**
 The application uses `log/slog` (Go standard library) with a JSON handler. The logger is created in `main.go` and injected into the `Handler`. No global mutable logger exists.
+
+**`context.Context` propagates from the HTTP request through Service and Repository**
+Every `Repository` and `Service` method takes `ctx context.Context` as its first parameter, sourced from `r.Context()` in the `Handler`. The in-memory `Repository` checks `ctx.Err()` before each operation; this has no practical effect today, but it means a future database-backed `Repository` can honor request cancellation and timeouts without changing any method signature.
+
+**Request bodies are capped at 1 MiB**
+`POST /tasks` and `PUT /tasks/{id}` wrap the request body in `http.MaxBytesReader` before decoding JSON, so an oversized payload is rejected instead of being fully buffered into memory.
+
+**No optimistic concurrency control on updates**
+`UpdateTask` and `CompleteTask` perform a read-modify-write against the `Repository` (`FindByID` then `Update`) with no version check. Two concurrent requests updating the same task ID can race: both read the same starting state, and whichever `Update` call completes last silently overwrites the other's changes (a "lost update"). This is a known, accepted limitation for the current single-writer-per-task usage pattern — closing it would require a version field on `Task` and a conditional (compare-and-swap) `Update` in `Repository`.
 
 ## Graceful Shutdown
 

@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -26,11 +27,11 @@ func TestCreateAndFindByID(t *testing.T) {
 	repo := NewMemoryRepository()
 	task := newTestTask("1", "Buy groceries")
 
-	if err := repo.Create(task); err != nil {
+	if err := repo.Create(context.Background(), task); err != nil {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	got, err := repo.FindByID("1")
+	got, err := repo.FindByID(context.Background(), "1")
 	if err != nil {
 		t.Fatalf("FindByID() unexpected error: %v", err)
 	}
@@ -44,7 +45,7 @@ func TestCreateAndFindByID(t *testing.T) {
 func TestFindByID_NotFound(t *testing.T) {
 	repo := NewMemoryRepository()
 
-	_, err := repo.FindByID("nonexistent")
+	_, err := repo.FindByID(context.Background(), "nonexistent")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("FindByID() error = %v, want ErrNotFound", err)
 	}
@@ -61,12 +62,12 @@ func TestFindAll(t *testing.T) {
 	}
 
 	for _, task := range tasks {
-		if err := repo.Create(task); err != nil {
+		if err := repo.Create(context.Background(), task); err != nil {
 			t.Fatalf("Create() unexpected error: %v", err)
 		}
 	}
 
-	got, err := repo.FindAll()
+	got, err := repo.FindAll(context.Background())
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -81,18 +82,18 @@ func TestUpdate(t *testing.T) {
 	repo := NewMemoryRepository()
 	task := newTestTask("1", "Original title")
 
-	if err := repo.Create(task); err != nil {
+	if err := repo.Create(context.Background(), task); err != nil {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
 	task.Title = "Updated title"
 	task.Status = StatusDone
 
-	if err := repo.Update(task); err != nil {
+	if err := repo.Update(context.Background(), task); err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
 
-	got, err := repo.FindByID("1")
+	got, err := repo.FindByID(context.Background(), "1")
 	if err != nil {
 		t.Fatalf("FindByID() unexpected error: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestUpdate_NotFound(t *testing.T) {
 	repo := NewMemoryRepository()
 	task := newTestTask("nonexistent", "Ghost task")
 
-	err := repo.Update(task)
+	err := repo.Update(context.Background(), task)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Update() error = %v, want ErrNotFound", err)
 	}
@@ -122,15 +123,15 @@ func TestDelete(t *testing.T) {
 	repo := NewMemoryRepository()
 	task := newTestTask("1", "To be deleted")
 
-	if err := repo.Create(task); err != nil {
+	if err := repo.Create(context.Background(), task); err != nil {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	if err := repo.Delete("1"); err != nil {
+	if err := repo.Delete(context.Background(), "1"); err != nil {
 		t.Fatalf("Delete() unexpected error: %v", err)
 	}
 
-	_, err := repo.FindByID("1")
+	_, err := repo.FindByID(context.Background(), "1")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("FindByID() after Delete() error = %v, want ErrNotFound", err)
 	}
@@ -140,7 +141,7 @@ func TestDelete(t *testing.T) {
 func TestDelete_NotFound(t *testing.T) {
 	repo := NewMemoryRepository()
 
-	err := repo.Delete("nonexistent")
+	err := repo.Delete(context.Background(), "nonexistent")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Delete() error = %v, want ErrNotFound", err)
 	}
@@ -151,18 +152,18 @@ func TestCreate_DuplicateID(t *testing.T) {
 	repo := NewMemoryRepository()
 	task := newTestTask("1", "First")
 
-	if err := repo.Create(task); err != nil {
+	if err := repo.Create(context.Background(), task); err != nil {
 		t.Fatalf("Create() unexpected error on first create: %v", err)
 	}
 
 	duplicate := newTestTask("1", "Duplicate")
-	err := repo.Create(duplicate)
-	if !errors.Is(err, errAlreadyExists) {
-		t.Errorf("Create() duplicate error = %v, want errAlreadyExists", err)
+	err := repo.Create(context.Background(), duplicate)
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Errorf("Create() duplicate error = %v, want ErrAlreadyExists", err)
 	}
 
 	// Confirm the original task was not overwritten.
-	got, _ := repo.FindByID("1")
+	got, _ := repo.FindByID(context.Background(), "1")
 	if got.Title != "First" {
 		t.Errorf("Create() duplicate overwrote original: got title %q, want %q", got.Title, "First")
 	}
@@ -174,15 +175,15 @@ func TestFindByID_IsolatesInternalState(t *testing.T) {
 	repo := NewMemoryRepository()
 	task := newTestTask("1", "Original")
 
-	if err := repo.Create(task); err != nil {
+	if err := repo.Create(context.Background(), task); err != nil {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	got, _ := repo.FindByID("1")
+	got, _ := repo.FindByID(context.Background(), "1")
 	got.Title = "Mutated"
 	got.Status = StatusDone
 
-	stored, _ := repo.FindByID("1")
+	stored, _ := repo.FindByID(context.Background(), "1")
 	if stored.Title != "Original" {
 		t.Errorf("FindByID() isolation failed: stored title = %q, want %q", stored.Title, "Original")
 	}
@@ -198,15 +199,15 @@ func TestFindAll_IsolatesInternalState(t *testing.T) {
 	repo := NewMemoryRepository()
 	task := newTestTask("1", "Original")
 
-	if err := repo.Create(task); err != nil {
+	if err := repo.Create(context.Background(), task); err != nil {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	all, _ := repo.FindAll()
+	all, _ := repo.FindAll(context.Background())
 	all[0].Title = "Mutated"
 	all[0].Status = StatusDone
 
-	stored, _ := repo.FindByID("1")
+	stored, _ := repo.FindByID(context.Background(), "1")
 	if stored.Title != "Original" {
 		t.Errorf("FindAll() isolation failed: stored title = %q, want %q", stored.Title, "Original")
 	}
@@ -224,7 +225,7 @@ func TestConcurrentAccess(t *testing.T) {
 
 	// Pre-populate with a known task.
 	seed := newTestTask("seed", "Seed task")
-	if err := repo.Create(seed); err != nil {
+	if err := repo.Create(context.Background(), seed); err != nil {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
@@ -242,7 +243,7 @@ func TestConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			task := newTestTask(fmt.Sprintf("task-%d", i), "concurrent task")
-			if err := repo.Create(task); err != nil {
+			if err := repo.Create(context.Background(), task); err != nil {
 				mu.Lock()
 				errs = append(errs, err)
 				mu.Unlock()
@@ -258,7 +259,7 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	// All 50 concurrent tasks plus the seed must be present.
-	all, err := repo.FindAll()
+	all, err := repo.FindAll(context.Background())
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}

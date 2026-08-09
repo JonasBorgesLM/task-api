@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -24,26 +25,26 @@ type fakeRepository struct {
 	updatedTask  Task
 }
 
-func (f *fakeRepository) Create(task Task) error {
+func (f *fakeRepository) Create(_ context.Context, task Task) error {
 	f.savedTask = task
 	return f.createErr
 }
 
-func (f *fakeRepository) FindByID(_ string) (Task, error) {
+func (f *fakeRepository) FindByID(_ context.Context, _ string) (Task, error) {
 	return f.findByIDTask, f.findByIDErr
 }
 
-func (f *fakeRepository) FindAll() ([]Task, error) {
+func (f *fakeRepository) FindAll(_ context.Context) ([]Task, error) {
 	return f.findAllTasks, f.findAllErr
 }
 
-func (f *fakeRepository) Update(task Task) error {
+func (f *fakeRepository) Update(_ context.Context, task Task) error {
 	f.updateCalled = true
 	f.updatedTask = task
 	return f.updateErr
 }
 
-func (f *fakeRepository) Delete(_ string) error {
+func (f *fakeRepository) Delete(_ context.Context, _ string) error {
 	return f.deleteErr
 }
 
@@ -66,7 +67,7 @@ func TestCreateTask_ValidTitle(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	got, err := svc.CreateTask("Buy groceries", "at the market")
+	got, err := svc.CreateTask(context.Background(), "Buy groceries", "at the market")
 	if err != nil {
 		t.Fatalf("CreateTask() unexpected error: %v", err)
 	}
@@ -114,7 +115,7 @@ func TestCreateTask_ValidTitle(t *testing.T) {
 func TestCreateTask_EmptyTitle(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.CreateTask("", "description")
+	_, err := svc.CreateTask(context.Background(), "", "description")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("CreateTask() empty title error = %v, want ErrInvalidInput", err)
 	}
@@ -123,7 +124,7 @@ func TestCreateTask_EmptyTitle(t *testing.T) {
 func TestCreateTask_WhitespaceTitle(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.CreateTask("   ", "description")
+	_, err := svc.CreateTask(context.Background(), "   ", "description")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("CreateTask() whitespace title error = %v, want ErrInvalidInput", err)
 	}
@@ -133,7 +134,7 @@ func TestCreateTask_RepositoryError(t *testing.T) {
 	repoErr := errors.New("storage failure")
 	svc := NewService(&fakeRepository{createErr: repoErr})
 
-	_, err := svc.CreateTask("Valid title", "")
+	_, err := svc.CreateTask(context.Background(), "Valid title", "")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("CreateTask() repository error = %v, want %v", err, repoErr)
 	}
@@ -145,7 +146,7 @@ func TestGetTask_Delegates(t *testing.T) {
 	task := newFakeTask(StatusPending)
 	svc := NewService(&fakeRepository{findByIDTask: task})
 
-	got, err := svc.GetTask("fake-id")
+	got, err := svc.GetTask(context.Background(), "fake-id")
 	if err != nil {
 		t.Fatalf("GetTask() unexpected error: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestGetTask_Delegates(t *testing.T) {
 func TestGetTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{findByIDErr: ErrNotFound})
 
-	_, err := svc.GetTask("nonexistent")
+	_, err := svc.GetTask(context.Background(), "nonexistent")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("GetTask() error = %v, want ErrNotFound", err)
 	}
@@ -169,7 +170,7 @@ func TestListTasks_Delegates(t *testing.T) {
 	tasks := []Task{newFakeTask(StatusPending), newFakeTask(StatusDone)}
 	svc := NewService(&fakeRepository{findAllTasks: tasks})
 
-	got, err := svc.ListTasks()
+	got, err := svc.ListTasks(context.Background())
 	if err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
@@ -185,7 +186,7 @@ func TestUpdateTask_ValidTitle(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.UpdateTask("fake-id", "New title", "New description")
+	got, err := svc.UpdateTask(context.Background(), "fake-id", "New title", "New description")
 	if err != nil {
 		t.Fatalf("UpdateTask() unexpected error: %v", err)
 	}
@@ -214,7 +215,7 @@ func TestUpdateTask_EmptyTitle(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask("fake-id", "", "desc")
+	_, err := svc.UpdateTask(context.Background(), "fake-id", "", "desc")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("UpdateTask() empty title error = %v, want ErrInvalidInput", err)
 	}
@@ -227,7 +228,7 @@ func TestUpdateTask_WhitespaceTitle(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask("fake-id", "   ", "desc")
+	_, err := svc.UpdateTask(context.Background(), "fake-id", "   ", "desc")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("UpdateTask() whitespace title error = %v, want ErrInvalidInput", err)
 	}
@@ -239,7 +240,7 @@ func TestUpdateTask_WhitespaceTitle(t *testing.T) {
 func TestUpdateTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{findByIDErr: ErrNotFound})
 
-	_, err := svc.UpdateTask("nonexistent", "Title", "")
+	_, err := svc.UpdateTask(context.Background(), "nonexistent", "Title", "")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("UpdateTask() error = %v, want ErrNotFound", err)
 	}
@@ -253,7 +254,7 @@ func TestUpdateTask_RepositoryUpdateError(t *testing.T) {
 	}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask("fake-id", "Title", "")
+	_, err := svc.UpdateTask(context.Background(), "fake-id", "Title", "")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("UpdateTask() repository error = %v, want %v", err, repoErr)
 	}
@@ -264,7 +265,7 @@ func TestUpdateTask_RepositoryUpdateError(t *testing.T) {
 func TestDeleteTask_Delegates(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	if err := svc.DeleteTask("fake-id"); err != nil {
+	if err := svc.DeleteTask(context.Background(), "fake-id"); err != nil {
 		t.Errorf("DeleteTask() unexpected error: %v", err)
 	}
 }
@@ -272,7 +273,7 @@ func TestDeleteTask_Delegates(t *testing.T) {
 func TestDeleteTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{deleteErr: ErrNotFound})
 
-	err := svc.DeleteTask("nonexistent")
+	err := svc.DeleteTask(context.Background(), "nonexistent")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("DeleteTask() error = %v, want ErrNotFound", err)
 	}
@@ -282,7 +283,7 @@ func TestDeleteTask_RepositoryError(t *testing.T) {
 	repoErr := errors.New("delete failure")
 	svc := NewService(&fakeRepository{deleteErr: repoErr})
 
-	err := svc.DeleteTask("fake-id")
+	err := svc.DeleteTask(context.Background(), "fake-id")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("DeleteTask() repository error = %v, want %v", err, repoErr)
 	}
@@ -295,7 +296,7 @@ func TestCompleteTask_PendingToDone(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.CompleteTask("fake-id")
+	got, err := svc.CompleteTask(context.Background(), "fake-id")
 	if err != nil {
 		t.Fatalf("CompleteTask() unexpected error: %v", err)
 	}
@@ -315,7 +316,7 @@ func TestCompleteTask_AlreadyDone_Idempotent(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.CompleteTask("fake-id")
+	got, err := svc.CompleteTask(context.Background(), "fake-id")
 	if err != nil {
 		t.Fatalf("CompleteTask() unexpected error: %v", err)
 	}
@@ -333,7 +334,7 @@ func TestCompleteTask_AlreadyDone_Idempotent(t *testing.T) {
 func TestCompleteTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{findByIDErr: ErrNotFound})
 
-	_, err := svc.CompleteTask("nonexistent")
+	_, err := svc.CompleteTask(context.Background(), "nonexistent")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("CompleteTask() error = %v, want ErrNotFound", err)
 	}
@@ -347,7 +348,7 @@ func TestCompleteTask_RepositoryUpdateError(t *testing.T) {
 	}
 	svc := NewService(repo)
 
-	_, err := svc.CompleteTask("fake-id")
+	_, err := svc.CompleteTask(context.Background(), "fake-id")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("CompleteTask() repository error = %v, want %v", err, repoErr)
 	}

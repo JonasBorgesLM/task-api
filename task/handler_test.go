@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +30,7 @@ type fakeService struct {
 	deleteCalledWith   string
 }
 
-func (f *fakeService) CreateTask(title, description string) (Task, error) {
+func (f *fakeService) CreateTask(_ context.Context, title, description string) (Task, error) {
 	f.createCalledWith = [2]string{title, description}
 	if f.createTaskFn != nil {
 		return f.createTaskFn(title, description)
@@ -37,21 +38,21 @@ func (f *fakeService) CreateTask(title, description string) (Task, error) {
 	return Task{}, nil
 }
 
-func (f *fakeService) GetTask(id string) (Task, error) {
+func (f *fakeService) GetTask(_ context.Context, id string) (Task, error) {
 	if f.getTaskFn != nil {
 		return f.getTaskFn(id)
 	}
 	return Task{}, nil
 }
 
-func (f *fakeService) ListTasks() ([]Task, error) {
+func (f *fakeService) ListTasks(_ context.Context) ([]Task, error) {
 	if f.listTasksFn != nil {
 		return f.listTasksFn()
 	}
 	return []Task{}, nil
 }
 
-func (f *fakeService) UpdateTask(id, title, description string) (Task, error) {
+func (f *fakeService) UpdateTask(_ context.Context, id, title, description string) (Task, error) {
 	f.updateCalledWith = [3]string{id, title, description}
 	if f.updateTaskFn != nil {
 		return f.updateTaskFn(id, title, description)
@@ -59,7 +60,7 @@ func (f *fakeService) UpdateTask(id, title, description string) (Task, error) {
 	return Task{}, nil
 }
 
-func (f *fakeService) DeleteTask(id string) error {
+func (f *fakeService) DeleteTask(_ context.Context, id string) error {
 	f.deleteCalledWith = id
 	if f.deleteTaskFn != nil {
 		return f.deleteTaskFn(id)
@@ -67,7 +68,7 @@ func (f *fakeService) DeleteTask(id string) error {
 	return nil
 }
 
-func (f *fakeService) CompleteTask(id string) (Task, error) {
+func (f *fakeService) CompleteTask(_ context.Context, id string) (Task, error) {
 	f.completeCalledWith = id
 	if f.completeTaskFn != nil {
 		return f.completeTaskFn(id)

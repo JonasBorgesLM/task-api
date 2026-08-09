@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -40,7 +41,7 @@ func newID() (string, error) {
 }
 
 // CreateTask validates input, builds a new Task and persists it.
-func (s *Service) CreateTask(title, description string) (Task, error) {
+func (s *Service) CreateTask(ctx context.Context, title, description string) (Task, error) {
 	if strings.TrimSpace(title) == "" {
 		return Task{}, fmt.Errorf("%w: title must not be empty", ErrInvalidInput)
 	}
@@ -60,57 +61,80 @@ func (s *Service) CreateTask(title, description string) (Task, error) {
 		UpdatedAt:   now,
 	}
 
-	if err := s.repo.Create(task); err != nil {
-		return Task{}, err
+	if err := s.repo.Create(ctx, task); err != nil {
+		return Task{}, fmt.Errorf("create task: %w", err)
 	}
 
 	return task, nil
 }
 
 // GetTask retrieves a Task by its ID.
-func (s *Service) GetTask(id string) (Task, error) {
-	return s.repo.FindByID(id)
+func (s *Service) GetTask(ctx context.Context, id string) (Task, error) {
+	task, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return Task{}, fmt.Errorf("get task: %w", err)
+	}
+	return task, nil
 }
 
 // ListTasks returns all stored tasks.
-func (s *Service) ListTasks() ([]Task, error) {
-	return s.repo.FindAll()
+func (s *Service) ListTasks(ctx context.Context) ([]Task, error) {
+	tasks, err := s.repo.FindAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list tasks: %w", err)
+	}
+	return tasks, nil
 }
 
 // UpdateTask updates the title and description of an existing Task.
 // CreatedAt is never modified. UpdatedAt is set to now.
-func (s *Service) UpdateTask(id, title, description string) (Task, error) {
+//
+// UpdateTask performs a read-modify-write against the Repository with no
+// optimistic concurrency control (no version/CAS check). Two concurrent
+// UpdateTask calls for the same id can race: both read the same starting
+// state, and the second Update to complete silently overwrites the first
+// caller's changes ("lost update"). This is acceptable for the current
+// single-writer-per-task usage pattern; a version field and a conditional
+// Update in Repository would be required to close this gap.
+func (s *Service) UpdateTask(ctx context.Context, id, title, description string) (Task, error) {
 	if strings.TrimSpace(title) == "" {
 		return Task{}, fmt.Errorf("%w: title must not be empty", ErrInvalidInput)
 	}
 
-	task, err := s.repo.FindByID(id)
+	task, err := s.repo.FindByID(ctx, id)
 	if err != nil {
-		return Task{}, err
+		return Task{}, fmt.Errorf("update task: %w", err)
 	}
 
 	task.Title = title
 	task.Description = description
 	task.UpdatedAt = time.Now()
 
-	if err := s.repo.Update(task); err != nil {
-		return Task{}, err
+	if err := s.repo.Update(ctx, task); err != nil {
+		return Task{}, fmt.Errorf("update task: %w", err)
 	}
 
 	return task, nil
 }
 
 // DeleteTask removes a Task by its ID.
-func (s *Service) DeleteTask(id string) error {
-	return s.repo.Delete(id)
+func (s *Service) DeleteTask(ctx context.Context, id string) error {
+	if err := s.repo.Delete(ctx, id); err != nil {
+		return fmt.Errorf("delete task: %w", err)
+	}
+	return nil
 }
 
 // CompleteTask marks a Task as done. It is idempotent: if the Task is
 // already Done, it returns the Task unchanged without updating UpdatedAt.
-func (s *Service) CompleteTask(id string) (Task, error) {
-	task, err := s.repo.FindByID(id)
+//
+// Like UpdateTask, this is a read-modify-write with no optimistic
+// concurrency control; see UpdateTask's doc comment for the concurrency
+// caveat that also applies here.
+func (s *Service) CompleteTask(ctx context.Context, id string) (Task, error) {
+	task, err := s.repo.FindByID(ctx, id)
 	if err != nil {
-		return Task{}, err
+		return Task{}, fmt.Errorf("complete task: %w", err)
 	}
 
 	if task.Status == StatusDone {
@@ -120,8 +144,8 @@ func (s *Service) CompleteTask(id string) (Task, error) {
 	task.Status = StatusDone
 	task.UpdatedAt = time.Now()
 
-	if err := s.repo.Update(task); err != nil {
-		return Task{}, err
+	if err := s.repo.Update(ctx, task); err != nil {
+		return Task{}, fmt.Errorf("complete task: %w", err)
 	}
 
 	return task, nil
