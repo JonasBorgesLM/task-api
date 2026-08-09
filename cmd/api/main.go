@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/JonasBorgesLM/task-api/config"
+	"github.com/JonasBorgesLM/task-api/middleware"
 	"github.com/JonasBorgesLM/task-api/task"
 )
 
@@ -48,10 +49,21 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	registerHealthRoute(mux, logger)
 	handler.RegisterRoutes(mux)
 
+	// Cross-cutting HTTP concerns, applied to every route. Order matters:
+	// RequestID must run first so Logging and Recovery can read the
+	// request ID from the request context, and Logging must wrap Recovery
+	// (not the other way around) so it still logs an accurate status code
+	// for requests that panicked and were recovered.
+	rootHandler := middleware.Chain(
+		middleware.RequestID,
+		middleware.Logging(logger),
+		middleware.Recovery(logger),
+	)(mux)
+
 	// HTTP server with explicit timeouts, sourced entirely from Config.
 	srv := &http.Server{
 		Addr:         cfg.Addr,
-		Handler:      mux,
+		Handler:      rootHandler,
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,

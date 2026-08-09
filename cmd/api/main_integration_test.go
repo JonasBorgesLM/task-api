@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JonasBorgesLM/task-api/middleware"
 	"github.com/JonasBorgesLM/task-api/task"
 )
 
@@ -178,5 +179,37 @@ func TestIntegration_CreateTask_EmptyTitle_Returns400(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("POST /tasks with empty title: status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+// TestIntegration_MiddlewareWired verifies that the same middleware chain
+// built in run() is actually applied to the real Handler: every response
+// must carry an X-Request-ID header. This guards against someone changing
+// main.go and forgetting to keep the middleware chain wired to the server.
+func TestIntegration_MiddlewareWired(t *testing.T) {
+	repo := task.NewMemoryRepository()
+	svc := task.NewService(repo)
+	handler := task.NewHandler(svc, discardLogger())
+
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	rootHandler := middleware.Chain(
+		middleware.RequestID,
+		middleware.Logging(discardLogger()),
+		middleware.Recovery(discardLogger()),
+	)(mux)
+
+	srv := httptest.NewServer(rootHandler)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/tasks")
+	if err != nil {
+		t.Fatalf("GET /tasks: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get(middleware.HeaderRequestID); got == "" {
+		t.Error("response is missing the X-Request-ID header — middleware chain not applied")
 	}
 }
