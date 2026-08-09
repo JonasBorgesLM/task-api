@@ -29,7 +29,7 @@ HTTP Request
 └─────────────┘
 ```
 
-The `main.go` acts as the **Composition Root**: it instantiates all concrete types and wires dependencies together. No layer instantiates its own dependencies.
+`cmd/api/main.go` acts as the **Composition Root**: it instantiates all concrete types and wires dependencies together. No layer instantiates its own dependencies.
 
 ## Requirements
 
@@ -60,7 +60,7 @@ If you don't create a `.env` file, the application falls back to its built-in de
 ### Run
 
 ```bash
-go run .
+go run ./cmd/api
 ```
 
 The server starts on port `8080` by default:
@@ -74,13 +74,13 @@ The server starts on port `8080` by default:
 Environment variables already set in the shell always take precedence over `.env` — use this to override a value for a single run without editing the file:
 
 ```bash
-APP_PORT=9090 APP_SHUTDOWN_TIMEOUT=30s go run .
+APP_PORT=9090 APP_SHUTDOWN_TIMEOUT=30s go run ./cmd/api
 ```
 
 ### Build
 
 ```bash
-go build -o task-api .
+go build -o task-api ./cmd/api
 ./task-api
 ```
 
@@ -350,9 +350,12 @@ make check      # fmt + vet + test-race (run before committing)
 
 ```
 task-api/
-├── main.go               # Composition Root: wires dependencies and starts the server
-├── health.go             # GET /health handler
-├── main_test.go          # Tests for server lifecycle and health endpoint
+├── cmd/
+│   └── api/
+│       ├── main.go               # Composition Root: wires dependencies and starts the server
+│       ├── health.go             # GET /health handler
+│       ├── main_test.go          # Tests for server lifecycle and health endpoint
+│       └── main_integration_test.go  # Full-stack (real Repository+Service+Handler) HTTP test
 ├── go.mod
 ├── config/
 │   ├── config.go         # Environment variable loading and validation
@@ -374,7 +377,7 @@ task-api/
 Validation (non-empty title), ID generation, and timestamp management live exclusively in the `Service`. The `Handler` translates HTTP; the `Repository` stores data. Neither layer contains domain logic.
 
 **Repository is interface-based**
-`Repository` is defined as a Go interface. `main.go` injects the concrete `memoryRepository` at startup. Replacing it with a database implementation requires only a new file that satisfies the interface — no other code changes.
+`Repository` is defined as a Go interface. `cmd/api/main.go` injects the concrete `memoryRepository` at startup. Replacing it with a database implementation requires only a new file that satisfies the interface — no other code changes.
 
 **UUID generated in the Service**
 The `Service` generates a UUID v4 using `crypto/rand` from the standard library. The `Repository` receives a fully-formed `Task` and never assigns IDs. This keeps ID generation testable and independent of storage.
@@ -392,7 +395,7 @@ The in-memory store uses `sync.RWMutex`. Multiple concurrent reads are allowed; 
 `ErrNotFound` becomes HTTP 404. `ErrInvalidInput` becomes HTTP 400 with the original message. `ErrAlreadyExists` becomes HTTP 409 (practically unreachable, since IDs are server-generated UUIDv4). All other errors become HTTP 500 with a generic message, and the original error is logged server-side.
 
 **Structured logging with `log/slog`**
-The application uses `log/slog` (Go standard library) with a JSON handler. The logger is created in `main.go` and injected into the `Handler`. No global mutable logger exists.
+The application uses `log/slog` (Go standard library) with a JSON handler. The logger is created in `cmd/api/main.go` and injected into the `Handler`. No global mutable logger exists.
 
 **`context.Context` propagates from the HTTP request through Service and Repository**
 Every `Repository` and `Service` method takes `ctx context.Context` as its first parameter, sourced from `r.Context()` in the `Handler`. The in-memory `Repository` checks `ctx.Err()` before each operation; this has no practical effect today, but it means a future database-backed `Repository` can honor request cancellation and timeouts without changing any method signature.
