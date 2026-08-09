@@ -6,10 +6,20 @@ import (
 	"time"
 )
 
-// Logging returns a Middleware that records one structured log line per
-// request: HTTP method, path, response status code, duration, and the
+// Logging returns a Middleware that records exactly one structured log
+// line per request: HTTP method, path, response status, duration, and the
 // request ID set by RequestID (empty if RequestID is not earlier in the
 // chain).
+//
+// The log level reflects the outcome — Info for 2xx/3xx, Warn for 4xx,
+// Error for 5xx — and an "error" field (the HTTP status text) is added
+// whenever the status indicates a failure. That lets a log pipeline
+// identify failed requests by filtering on level or on the presence of
+// "error", without parsing the numeric status.
+//
+// Request and response bodies are never logged: they may carry task
+// titles/descriptions that a caller wouldn't expect to end up in server
+// logs, and logging them would add far more risk than diagnostic value.
 func Logging(logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -19,13 +29,26 @@ func Logging(logger *slog.Logger) Middleware {
 			next.ServeHTTP(rec, r)
 
 			requestID, _ := RequestIDFromContext(r.Context())
-			logger.Info("http request",
+			attrs := []any{
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", rec.status,
 				"duration", time.Since(start).String(),
 				"request_id", requestID,
-			)
+			}
+
+			level := slog.LevelInfo
+			switch {
+			case rec.status >= http.StatusInternalServerError:
+				level = slog.LevelError
+			case rec.status >= http.StatusBadRequest:
+				level = slog.LevelWarn
+			}
+			if rec.status >= http.StatusBadRequest {
+				attrs = append(attrs, "error", http.StatusText(rec.status))
+			}
+
+			logger.Log(r.Context(), level, "http request", attrs...)
 		})
 	}
 }

@@ -1,6 +1,7 @@
 package task
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/JonasBorgesLM/task-api/middleware"
 )
 
 // fakeService is a test double for taskService.
@@ -94,6 +97,15 @@ func sampleTask() Task {
 func newHandlerWithFake(svc *fakeService) *Handler {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return NewHandler(svc, logger)
+}
+
+// newHandlerWithFakeLogged is like newHandlerWithFake, but wires a JSON
+// logger that writes to the returned buffer instead of discarding output,
+// for tests that need to inspect what Handler itself logged.
+func newHandlerWithFakeLogged(svc *fakeService) (*Handler, *bytes.Buffer) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	return NewHandler(svc, logger), &buf
 }
 
 // do executes an HTTP request against the given handler function
@@ -402,6 +414,192 @@ func TestHandler_UnexpectedError_Returns500(t *testing.T) {
 	// Ensure internal details are not leaked.
 	if strings.Contains(body["error"], "database") {
 		t.Error("500 response must not expose internal error details")
+	}
+}
+
+// --- Observability: what Handler itself logs ---
+
+// TestHandler_UnexpectedError_LogsWithRequestIDMethodAndPath verifies that
+// the one diagnostic log line Handler emits for an unmapped error carries
+// enough context to correlate it with the access log for the same
+// request (request_id) and to diagnose it (method, path, the real error).
+func TestHandler_UnexpectedError_LogsWithRequestIDMethodAndPath(t *testing.T) {
+	svc := &fakeService{
+		getTaskFn: func(_ string) (Task, error) {
+			return Task{}, errors.New("database exploded")
+		},
+	}
+	h, buf := newHandlerWithFakeLogged(svc)
+
+	// RequestID must run first so the Handler can read it back out, same
+	// as in the real middleware chain built in cmd/api/main.go.
+	handler := middleware.RequestID(http.HandlerFunc(h.getTask))
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/tasks/abc-123", nil))
+
+	wantRequestID := w.Header().Get(middleware.HeaderRequestID)
+	if wantRequestID == "" {
+		t.Fatal("test setup: response is missing X-Request-ID")
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("failed to decode Handler log line %q: %v", buf.String(), err)
+	}
+
+	if entry["request_id"] != wantRequestID {
+		t.Errorf("logged request_id = %v, want %v", entry["request_id"], wantRequestID)
+	}
+	if entry["method"] != http.MethodGet {
+		t.Errorf("logged method = %v, want %v", entry["method"], http.MethodGet)
+	}
+	if entry["path"] != "/tasks/abc-123" {
+		t.Errorf("logged path = %v, want %v", entry["path"], "/tasks/abc-123")
+	}
+	if got, _ := entry["error"].(string); !strings.Contains(got, "database exploded") {
+		t.Errorf("logged error = %v, want it to contain the underlying error for diagnosis", entry["error"])
+	}
+}
+
+// TestHandler_UnexpectedError_LogsExactlyOnce guards requirement: "Handler
+// não deve registrar o mesmo erro várias vezes".
+func TestHandler_UnexpectedError_LogsExactlyOnce(t *testing.T) {
+	svc := &fakeService{
+		getTaskFn: func(_ string) (Task, error) {
+			return Task{}, errors.New("boom")
+		},
+	}
+	h, buf := newHandlerWithFakeLogged(svc)
+
+	w := httptest.NewRecorder()
+	h.getTask(w, httptest.NewRequest(http.MethodGet, "/tasks/abc-123", nil))
+
+	if got := strings.Count(buf.String(), "\n"); got != 1 {
+		t.Errorf("Handler logged %d lines for a single failing request, want exactly 1: %q", got, buf.String())
+	}
+}
+
+// TestHandler_ExpectedErrors_DoNotLog verifies that routine, mapped domain
+// errors (404/400/409) are not logged by Handler at all — they are
+// expected outcomes of client input, not failures needing a developer's
+// attention, and the access log (Logging middleware) already records the
+// resulting status for every request regardless.
+func TestHandler_ExpectedErrors_DoNotLog(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"not found", ErrNotFound},
+		{"invalid input", fmt.Errorf("%w: title must not be empty", ErrInvalidInput)},
+		{"already exists", ErrAlreadyExists},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeService{
+				getTaskFn: func(_ string) (Task, error) { return Task{}, tc.err },
+			}
+			h, buf := newHandlerWithFakeLogged(svc)
+
+			w := httptest.NewRecorder()
+			h.getTask(w, httptest.NewRequest(http.MethodGet, "/tasks/abc-123", nil))
+
+			if buf.Len() != 0 {
+				t.Errorf("Handler logged something for an expected/mapped error, want nothing: %q", buf.String())
+			}
+		})
+	}
+}
+
+// --- Observability: the full strategy through the real middleware chain ---
+//
+// These two tests drive Handler through the same RequestID → Logging chain
+// built in cmd/api/main.go, using two separate loggers (one for the access
+// log, one for Handler's own diagnostic log) purely so each side's line
+// count can be asserted independently — in production both are wired to
+// the same *slog.Logger and end up interleaved in the same stream,
+// correlated by request_id.
+
+func TestLoggingStrategy_UnexpectedError_ProducesAccessLogAndDiagnosticLog(t *testing.T) {
+	svc := &fakeService{
+		getTaskFn: func(_ string) (Task, error) { return Task{}, errors.New("db exploded") },
+	}
+	h, handlerBuf := newHandlerWithFakeLogged(svc)
+
+	var accessBuf bytes.Buffer
+	accessLogger := slog.New(slog.NewJSONHandler(&accessBuf, nil))
+
+	chained := middleware.Chain(
+		middleware.RequestID,
+		middleware.Logging(accessLogger),
+	)(http.HandlerFunc(h.getTask))
+
+	w := httptest.NewRecorder()
+	chained.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/tasks/abc-123", nil))
+
+	requestID := w.Header().Get(middleware.HeaderRequestID)
+
+	if got := strings.Count(accessBuf.String(), "\n"); got != 1 {
+		t.Fatalf("access log has %d lines, want exactly 1: %q", got, accessBuf.String())
+	}
+	if got := strings.Count(handlerBuf.String(), "\n"); got != 1 {
+		t.Fatalf("Handler diagnostic log has %d lines, want exactly 1: %q", got, handlerBuf.String())
+	}
+
+	var access map[string]any
+	if err := json.Unmarshal(accessBuf.Bytes(), &access); err != nil {
+		t.Fatalf("decode access log: %v", err)
+	}
+	if access["level"] != "ERROR" {
+		t.Errorf("access log level = %v, want ERROR", access["level"])
+	}
+	if access["request_id"] != requestID {
+		t.Errorf("access log request_id = %v, want %v", access["request_id"], requestID)
+	}
+
+	var diag map[string]any
+	if err := json.Unmarshal(handlerBuf.Bytes(), &diag); err != nil {
+		t.Fatalf("decode diagnostic log: %v", err)
+	}
+	if diag["request_id"] != requestID {
+		t.Errorf("diagnostic log request_id = %v, want %v (must correlate with the access log)", diag["request_id"], requestID)
+	}
+}
+
+func TestLoggingStrategy_NotFound_ProducesOnlyAccessLog(t *testing.T) {
+	svc := &fakeService{
+		getTaskFn: func(_ string) (Task, error) { return Task{}, ErrNotFound },
+	}
+	h, handlerBuf := newHandlerWithFakeLogged(svc)
+
+	var accessBuf bytes.Buffer
+	accessLogger := slog.New(slog.NewJSONHandler(&accessBuf, nil))
+
+	chained := middleware.Chain(
+		middleware.RequestID,
+		middleware.Logging(accessLogger),
+	)(http.HandlerFunc(h.getTask))
+
+	w := httptest.NewRecorder()
+	chained.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/tasks/abc-123", nil))
+
+	if got := strings.Count(accessBuf.String(), "\n"); got != 1 {
+		t.Errorf("access log has %d lines, want exactly 1: %q", got, accessBuf.String())
+	}
+	if handlerBuf.Len() != 0 {
+		t.Errorf("Handler logged something for an expected 404, want nothing: %q", handlerBuf.String())
+	}
+
+	var access map[string]any
+	if err := json.Unmarshal(accessBuf.Bytes(), &access); err != nil {
+		t.Fatalf("decode access log: %v", err)
+	}
+	if access["level"] != "WARN" {
+		t.Errorf("access log level = %v, want WARN", access["level"])
+	}
+	if access["status"] != float64(http.StatusNotFound) {
+		t.Errorf("access log status = %v, want %v", access["status"], http.StatusNotFound)
 	}
 }
 

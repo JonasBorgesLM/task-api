@@ -118,3 +118,46 @@ func TestLogging_RequestIDEmptyWhenNotSet(t *testing.T) {
 		t.Errorf("logged request_id = %v, want empty string when RequestID isn't earlier in the chain", entry["request_id"])
 	}
 }
+
+// --- Level and "error" field, by status class ---
+
+func TestLogging_LevelAndErrorField_ByStatusClass(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    int
+		wantLevel string
+		wantError bool
+	}{
+		{"200 OK", http.StatusOK, "INFO", false},
+		{"201 Created", http.StatusCreated, "INFO", false},
+		{"204 No Content", http.StatusNoContent, "INFO", false},
+		{"400 Bad Request", http.StatusBadRequest, "WARN", true},
+		{"404 Not Found", http.StatusNotFound, "WARN", true},
+		{"409 Conflict", http.StatusConflict, "WARN", true},
+		{"500 Internal Server Error", http.StatusInternalServerError, "ERROR", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, buf := newTestLogger()
+
+			handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+			entry := decodeLogLine(t, buf)
+			if entry["level"] != tc.wantLevel {
+				t.Errorf("logged level = %v, want %v", entry["level"], tc.wantLevel)
+			}
+
+			_, hasError := entry["error"]
+			if hasError != tc.wantError {
+				t.Errorf("logged error field present = %v, want %v (entry: %v)", hasError, tc.wantError, entry)
+			}
+			if tc.wantError && entry["error"] != http.StatusText(tc.status) {
+				t.Errorf("logged error = %v, want %v", entry["error"], http.StatusText(tc.status))
+			}
+		})
+	}
+}
