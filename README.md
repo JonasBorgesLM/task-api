@@ -45,6 +45,18 @@ git clone https://github.com/JonasBorgesLM/task-api.git
 cd task-api
 ```
 
+### Configure
+
+Copy the example env file and adjust it to your local setup:
+
+```bash
+cp .env.example .env
+```
+
+`.env` is read automatically on startup (see [Configuration](#configuration) below). It is listed in `.gitignore` and must **never** be committed — `.env.example` is the only env file that belongs in version control, and it must only ever contain non-sensitive placeholder values.
+
+If you don't create a `.env` file, the application falls back to its built-in defaults (`APP_PORT=8080`, `APP_SHUTDOWN_TIMEOUT=10s`).
+
 ### Run
 
 ```bash
@@ -58,6 +70,8 @@ The server starts on port `8080` by default:
 ```
 
 ### Run with custom configuration
+
+Environment variables already set in the shell always take precedence over `.env` — use this to override a value for a single run without editing the file:
 
 ```bash
 APP_PORT=9090 APP_SHUTDOWN_TIMEOUT=30s go run .
@@ -83,6 +97,8 @@ go test -race ./...
 ## Configuration
 
 All configuration is read from environment variables. If a variable is not set, the default value is used.
+
+On startup, the application loads `.env` from the working directory (if present) and applies any variable defined there that isn't already set in the shell environment — see [Configure](#configure) above. Real environment variables always win over `.env`, which makes `.env` safe to use for local defaults while still letting deployment environments (CI, containers, etc.) override everything explicitly.
 
 | Variable | Description | Default | Example |
 |---|---|---|---|
