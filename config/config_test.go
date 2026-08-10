@@ -211,6 +211,106 @@ func TestLoad_InvalidShutdownTimeout_Zero(t *testing.T) {
 	}
 }
 
+// --- PostgreSQL ---
+
+func TestLoad_DatabaseURL_DefaultsToEmpty(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.DatabaseURL != "" {
+		t.Errorf("Load() DatabaseURL = %q, want empty (falls back to in-memory store)", cfg.DatabaseURL)
+	}
+}
+
+func TestLoad_DatabaseURL_Custom(t *testing.T) {
+	const url = "postgres://user:pass@localhost:5432/task_api?sslmode=disable"
+	t.Setenv("DATABASE_URL", url)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.DatabaseURL != url {
+		t.Errorf("Load() DatabaseURL = %q, want %q", cfg.DatabaseURL, url)
+	}
+}
+
+func TestLoad_DBPoolDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.DBMaxOpenConns != defaultDBMaxOpenConns {
+		t.Errorf("Load() DBMaxOpenConns = %d, want %d", cfg.DBMaxOpenConns, defaultDBMaxOpenConns)
+	}
+	if cfg.DBMaxIdleConns != defaultDBMaxIdleConns {
+		t.Errorf("Load() DBMaxIdleConns = %d, want %d", cfg.DBMaxIdleConns, defaultDBMaxIdleConns)
+	}
+	if cfg.DBConnMaxLifetime != defaultDBConnMaxLife {
+		t.Errorf("Load() DBConnMaxLifetime = %v, want %v", cfg.DBConnMaxLifetime, defaultDBConnMaxLife)
+	}
+	if cfg.DBAutoMigrate != defaultDBAutoMigrate {
+		t.Errorf("Load() DBAutoMigrate = %v, want %v", cfg.DBAutoMigrate, defaultDBAutoMigrate)
+	}
+}
+
+func TestLoad_DBPoolCustom(t *testing.T) {
+	t.Setenv("DB_MAX_OPEN_CONNS", "50")
+	t.Setenv("DB_MAX_IDLE_CONNS", "5")
+	t.Setenv("DB_CONN_MAX_LIFETIME", "15m")
+	t.Setenv("DB_AUTO_MIGRATE", "false")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.DBMaxOpenConns != 50 {
+		t.Errorf("Load() DBMaxOpenConns = %d, want 50", cfg.DBMaxOpenConns)
+	}
+	if cfg.DBMaxIdleConns != 5 {
+		t.Errorf("Load() DBMaxIdleConns = %d, want 5", cfg.DBMaxIdleConns)
+	}
+	if cfg.DBConnMaxLifetime != 15*time.Minute {
+		t.Errorf("Load() DBConnMaxLifetime = %v, want %v", cfg.DBConnMaxLifetime, 15*time.Minute)
+	}
+	if cfg.DBAutoMigrate != false {
+		t.Errorf("Load() DBAutoMigrate = %v, want false", cfg.DBAutoMigrate)
+	}
+}
+
+func TestLoad_InvalidDBMaxOpenConns_NotAnInteger(t *testing.T) {
+	t.Setenv("DB_MAX_OPEN_CONNS", "not-a-number")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for DB_MAX_OPEN_CONNS=not-a-number, got nil")
+	}
+}
+
+func TestLoad_InvalidDBMaxIdleConns_Zero(t *testing.T) {
+	t.Setenv("DB_MAX_IDLE_CONNS", "0")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for DB_MAX_IDLE_CONNS=0, got nil")
+	}
+}
+
+func TestLoad_InvalidDBConnMaxLifetime_NotADuration(t *testing.T) {
+	t.Setenv("DB_CONN_MAX_LIFETIME", "not-a-duration")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for DB_CONN_MAX_LIFETIME=not-a-duration, got nil")
+	}
+}
+
+func TestLoad_InvalidDBAutoMigrate_NotABool(t *testing.T) {
+	t.Setenv("DB_AUTO_MIGRATE", "not-a-bool")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for DB_AUTO_MIGRATE=not-a-bool, got nil")
+	}
+}
+
 // --- LOG_LEVEL ---
 
 func TestLoad_LogLevel(t *testing.T) {

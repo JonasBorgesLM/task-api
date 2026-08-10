@@ -1,0 +1,35 @@
+# Local development/testing stack. Not used by the CI quality gate (it
+# starts a `postgres:` service container directly — see
+# .github/workflows/ci.yml) and not part of the production Dockerfile,
+# which builds a single self-contained binary that expects DATABASE_URL to
+# point at wherever Postgres actually runs in that environment.
+#
+# Usage:
+#
+#   docker compose up -d postgres
+#   TEST_DATABASE_URL="postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable" \
+#       go test ./task/... -run Postgres -v
+#
+# Or to run the API itself against it:
+#
+#   DATABASE_URL="postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable" \
+#       go run ./cmd/api
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: task_api
+      POSTGRES_PASSWORD: task_api
+      POSTGRES_DB: task_api
+    ports:
+      - "5432:5432"
+    volumes:
+      - task-api-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U task_api -d task_api"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  task-api-postgres-data:

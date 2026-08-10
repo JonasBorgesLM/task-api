@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"expvar"
 	"fmt"
@@ -11,10 +12,19 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/JonasBorgesLM/task-api/config"
 	"github.com/JonasBorgesLM/task-api/middleware"
 	"github.com/JonasBorgesLM/task-api/task"
+
+	// Registers the "pgx" driver with database/sql under the name used by
+	// sql.Open below. This is the only file in the module that imports a
+	// PostgreSQL package directly — task.Repository, task.Service and
+	// task.Handler know nothing about PostgreSQL or database/sql; they
+	// depend only on the task.Repository interface (see
+	// buildRepository).
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func main() {
@@ -46,7 +56,20 @@ func run(ctx context.Context, out io.Writer) error {
 
 	logger := slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: cfg.LogLevel}))
 
-	srv := newServer(cfg, logger)
+	srv, closeRepo, err := newServer(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("build server: %w", err)
+	}
+	// Runs last, after the HTTP server has fully stopped serving requests
+	// (Shutdown below, and the serverErr drain that follows it) — closing
+	// the repository (e.g. the PostgreSQL connection pool) out from under
+	// a request still in flight would turn a clean shutdown into request
+	// failures for no reason.
+	defer func() {
+		if err := closeRepo(); err != nil {
+			logger.Error("failed to close repository", "error", err)
+		}
+	}()
 
 	// serverErr receives the result of ListenAndServe from its goroutine.
 	// The server keeps serving requests normally until either it fails on
@@ -98,8 +121,20 @@ func run(ctx context.Context, out io.Writer) error {
 // tests exercise the exact same wiring instead of re-deriving their own
 // copy of it, by tests that need a Handler without going through
 // ListenAndServe/Shutdown.
-func newServer(cfg config.Config, logger *slog.Logger) *http.Server {
-	repo := task.NewMemoryRepository()
+//
+// The returned close function releases whatever resources buildRepository
+// opened (a PostgreSQL connection pool, or nothing for the in-memory
+// store) and must be called exactly once, after the server is done
+// serving requests. newServer returns a non-nil error only if the
+// Repository itself could not be built (e.g. PostgreSQL is configured but
+// unreachable) — in that case both other return values are nil and there
+// is nothing to close.
+func newServer(cfg config.Config, logger *slog.Logger) (*http.Server, func() error, error) {
+	repo, closeRepo, err := buildRepository(cfg, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build repository: %w", err)
+	}
+
 	svc := task.NewService(repo)
 	handler := task.NewHandler(svc, logger)
 
@@ -120,11 +155,70 @@ func newServer(cfg config.Config, logger *slog.Logger) *http.Server {
 	)(mux)
 
 	// HTTP server with explicit timeouts, sourced entirely from Config.
-	return &http.Server{
+	srv := &http.Server{
 		Addr:         cfg.Addr,
 		Handler:      rootHandler,
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,
 	}
+
+	return srv, closeRepo, nil
+}
+
+// buildRepository is the single place that decides which task.Repository
+// implementation backs the application, so that decision never leaks into
+// task.Service or task.Handler — both depend only on the task.Repository
+// interface (see task/repository.go) and are unaware PostgreSQL exists.
+//
+// When cfg.DatabaseURL is empty — the zero value, which is what every
+// existing test that builds a bare config.Config{} gets — it returns the
+// in-memory implementation, unchanged from before PostgreSQL support was
+// added. Otherwise it opens a PostgreSQL connection pool, applies pending
+// migrations (unless cfg.DBAutoMigrate is false), and returns a
+// PostgreSQL-backed Repository.
+//
+// The returned close function must be called exactly once, after the
+// server has stopped serving requests, to release the connection pool (a
+// no-op for the in-memory store).
+func buildRepository(cfg config.Config, logger *slog.Logger) (task.Repository, func() error, error) {
+	if cfg.DatabaseURL == "" {
+		return task.NewMemoryRepository(), func() error { return nil }, nil
+	}
+
+	// "pgx" is the driver name github.com/jackc/pgx/v5/stdlib registers
+	// with database/sql on import — see the blank import at the top of
+	// this file.
+	db, err := sql.Open("pgx", cfg.DatabaseURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open database: %w", err)
+	}
+
+	db.SetMaxOpenConns(cfg.DBMaxOpenConns)
+	db.SetMaxIdleConns(cfg.DBMaxIdleConns)
+	db.SetConnMaxLifetime(cfg.DBConnMaxLifetime)
+
+	// sql.Open never actually dials the database — it only validates the
+	// DSN and prepares the pool lazily. Ping forces a real connection now,
+	// so a misconfigured DATABASE_URL fails startup immediately with a
+	// clear error instead of surfacing later as a mysterious failure on
+	// the first request.
+	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		db.Close()
+		return nil, nil, fmt.Errorf("ping database: %w", err)
+	}
+
+	if cfg.DBAutoMigrate {
+		migrateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := task.RunMigrations(migrateCtx, db); err != nil {
+			db.Close()
+			return nil, nil, fmt.Errorf("run migrations: %w", err)
+		}
+		logger.Info("database migrations applied")
+	}
+
+	return task.NewPostgresRepository(db), db.Close, nil
 }

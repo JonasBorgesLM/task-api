@@ -14,10 +14,8 @@ WORKDIR /src
 
 # Copy just the module files first so `go mod download` is cached in its
 # own layer and only re-runs when dependencies actually change, not on
-# every source edit. go.sum doesn't exist yet (the project currently has
-# no external dependencies), so the glob is written to still work once
-# one is added.
-COPY go.mod go.sum* ./
+# every source edit.
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
@@ -37,9 +35,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 ## ---------------------------------------------------------------------
 ## Runtime stage
 ##
-## `scratch` is literally empty — no shell, no package manager, no libc.
-## The application is a pure stdlib HTTP server that makes no outbound
-## network calls, so it needs nothing else at runtime.
+## `scratch` is literally empty — no shell, no package manager, no libc,
+## no CA certificates. `pgx` (see go.mod) implements the PostgreSQL wire
+## protocol in pure Go, so connecting to PostgreSQL over plain TCP or
+## sslmode=require needs nothing from the image beyond the binary itself.
+## sslmode=verify-full (which validates the server's certificate against
+## a CA) is the one case this image cannot support as-is — it would need
+## a CA bundle added via `COPY --from=builder /etc/ssl/certs/... `.
 ## ---------------------------------------------------------------------
 FROM scratch
 
@@ -58,7 +60,7 @@ COPY --from=builder /out/task-api /task-api
 # time, publish the matching port instead (see .env.example for the full
 # list of supported environment variables — HTTP_ADDR, HTTP_READ_TIMEOUT,
 # HTTP_WRITE_TIMEOUT, HTTP_IDLE_TIMEOUT, HTTP_SHUTDOWN_TIMEOUT, LOG_LEVEL,
-# DOTENV_PATH).
+# DOTENV_PATH, DATABASE_URL and the DB_* pool/migration settings).
 EXPOSE 8080
 
 # Exec form is required (not `ENTRYPOINT /task-api`, the shell form) so
