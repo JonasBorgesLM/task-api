@@ -2,7 +2,7 @@
 
 ## run: start the server (uses environment variables for configuration)
 run:
-	go run .
+	go run ./cmd/api
 
 ## test: run all tests
 test:

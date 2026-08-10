@@ -29,11 +29,11 @@ HTTP Request
 └─────────────┘
 ```
 
-The `main.go` acts as the **Composition Root**: it instantiates all concrete types and wires dependencies together. No layer instantiates its own dependencies.
+`cmd/api/main.go` acts as the **Composition Root**: it instantiates all concrete types and wires dependencies together. No layer instantiates its own dependencies.
 
 ## Requirements
 
-- Go 1.22 or later (uses `http.ServeMux` path parameters and `log/slog`)
+- Go 1.26 or later, matching the version pinned in `go.mod` (the codebase and its tests use `http.ServeMux` path parameters, `log/slog`, range-over-int, and `sync.WaitGroup.Go`)
 - No external dependencies — standard library only
 
 ## Getting Started
@@ -45,10 +45,22 @@ git clone https://github.com/JonasBorgesLM/task-api.git
 cd task-api
 ```
 
+### Configure
+
+Copy the example env file and adjust it to your local setup:
+
+```bash
+cp .env.example .env
+```
+
+`.env` is read automatically on startup (see [Configuration](#configuration) below). It is listed in `.gitignore` and must **never** be committed — `.env.example` is the only env file that belongs in version control, and it must only ever contain non-sensitive placeholder values.
+
+If you don't create a `.env` file, the application falls back to its built-in defaults (`HTTP_ADDR=:8080`, 5s/10s/60s read/write/idle timeouts, `HTTP_SHUTDOWN_TIMEOUT=10s`, `LOG_LEVEL=info`).
+
 ### Run
 
 ```bash
-go run .
+go run ./cmd/api
 ```
 
 The server starts on port `8080` by default:
@@ -59,14 +71,16 @@ The server starts on port `8080` by default:
 
 ### Run with custom configuration
 
+Environment variables already set in the shell always take precedence over `.env` — use this to override a value for a single run without editing the file:
+
 ```bash
-APP_PORT=9090 APP_SHUTDOWN_TIMEOUT=30s go run .
+HTTP_ADDR=:9090 HTTP_SHUTDOWN_TIMEOUT=30s go run ./cmd/api
 ```
 
 ### Build
 
 ```bash
-go build -o task-api .
+go build -o task-api ./cmd/api
 ./task-api
 ```
 
@@ -84,15 +98,23 @@ go test -race ./...
 
 All configuration is read from environment variables. If a variable is not set, the default value is used.
 
+On startup, the application loads `.env` from the working directory (if present) and applies any variable defined there that isn't already set in the shell environment — see [Configure](#configure) above. Real environment variables always win over `.env`, which makes `.env` safe to use for local defaults while still letting deployment environments (CI, containers, etc.) override everything explicitly.
+
 | Variable | Description | Default | Example |
 |---|---|---|---|
-| `APP_PORT` | TCP port the HTTP server listens on | `8080` | `APP_PORT=9090` |
-| `APP_SHUTDOWN_TIMEOUT` | Maximum time to wait for in-flight requests during shutdown | `10s` | `APP_SHUTDOWN_TIMEOUT=30s` |
+| `HTTP_ADDR` | TCP address the HTTP server listens on (`host:port`) | `:8080` | `HTTP_ADDR=:9090` |
+| `HTTP_READ_TIMEOUT` | `http.Server.ReadTimeout` | `5s` | `HTTP_READ_TIMEOUT=10s` |
+| `HTTP_WRITE_TIMEOUT` | `http.Server.WriteTimeout` | `10s` | `HTTP_WRITE_TIMEOUT=15s` |
+| `HTTP_IDLE_TIMEOUT` | `http.Server.IdleTimeout` | `60s` | `HTTP_IDLE_TIMEOUT=120s` |
+| `HTTP_SHUTDOWN_TIMEOUT` | Maximum time to wait for in-flight requests during shutdown | `10s` | `HTTP_SHUTDOWN_TIMEOUT=30s` |
+| `LOG_LEVEL` | Minimum log level: `debug`, `info`, `warn`, or `error` | `info` | `LOG_LEVEL=debug` |
+| `DOTENV_PATH` | Path to the `.env` file `Load` reads before the OS environment | `.env` | `DOTENV_PATH=/etc/task-api/.env` |
 
 **Validation rules:**
 
-- `APP_PORT` must be an integer between 1 and 65535. Port 0 is rejected.
-- `APP_SHUTDOWN_TIMEOUT` must be a valid Go duration string (e.g. `10s`, `1m`, `500ms`) and must be positive.
+- `HTTP_ADDR` must be a syntactically valid `host:port` address (per `net.SplitHostPort`) with a numeric port between 1 and 65535. Port 0 is rejected.
+- All `HTTP_*_TIMEOUT` variables must be a valid Go duration string (e.g. `10s`, `1m`, `500ms`) and must be strictly positive.
+- `LOG_LEVEL` is case-insensitive and must be one of `debug`, `info`, `warn`/`warning`, or `error`.
 
 ## API
 
@@ -115,19 +137,21 @@ Creates a new task.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `title` | string | yes | Task title. Cannot be empty or whitespace-only. |
-| `description` | string | no | Optional task description. |
+| `title` | string | yes | Task title. Cannot be empty or whitespace-only after trimming; at most 200 characters. |
+| `description` | string | no | Optional task description; at most 2000 characters. |
+
+Both fields are trimmed of leading/trailing whitespace before being stored.
 
 **Response** `201 Created`
 
 ```json
 {
-  "ID": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "Title": "Buy groceries",
-  "Description": "Milk, eggs, bread",
-  "Status": "pending",
-  "CreatedAt": "2026-08-08T12:00:00Z",
-  "UpdatedAt": "2026-08-08T12:00:00Z"
+  "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "title": "Buy groceries",
+  "description": "Milk, eggs, bread",
+  "status": "pending",
+  "created_at": "2026-08-08T12:00:00Z",
+  "updated_at": "2026-08-08T12:00:00Z"
 }
 ```
 
@@ -137,25 +161,33 @@ Creates a new task.
 |---|---|
 | `201` | Task created successfully |
 | `400` | Missing or empty title, or malformed JSON |
+| `409` | A task with the generated ID already exists (practically unreachable — IDs are server-generated UUIDv4) |
 | `500` | Unexpected server error |
 
 ---
 
 ### `GET /tasks`
 
-Returns all tasks. Returns an empty array when no tasks exist.
+Returns tasks ordered by `created_at` ascending (oldest first, ties broken by `id`). Returns an empty array when no tasks exist.
+
+**Query parameters** (both optional; omitting both returns everything, unchanged from before pagination existed)
+
+| Parameter | Type | Description |
+|---|---|---|
+| `limit` | integer ≥ 0 | Maximum number of tasks to return. |
+| `offset` | integer ≥ 0 | Number of tasks to skip before collecting `limit` results. |
 
 **Response** `200 OK`
 
 ```json
 [
   {
-    "ID": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    "Title": "Buy groceries",
-    "Description": "Milk, eggs, bread",
-    "Status": "pending",
-    "CreatedAt": "2026-08-08T12:00:00Z",
-    "UpdatedAt": "2026-08-08T12:00:00Z"
+    "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "title": "Buy groceries",
+    "description": "Milk, eggs, bread",
+    "status": "pending",
+    "created_at": "2026-08-08T12:00:00Z",
+    "updated_at": "2026-08-08T12:00:00Z"
   }
 ]
 ```
@@ -164,7 +196,8 @@ Returns all tasks. Returns an empty array when no tasks exist.
 
 | Code | Reason |
 |---|---|
-| `200` | Success (empty array `[]` if no tasks exist) |
+| `200` | Success (empty array `[]` if no tasks exist, or if `offset` is past the end of the list) |
+| `400` | `limit` or `offset` is present but not a non-negative integer |
 | `500` | Unexpected server error |
 
 ---
@@ -177,12 +210,12 @@ Returns a single task by ID.
 
 ```json
 {
-  "ID": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "Title": "Buy groceries",
-  "Description": "Milk, eggs, bread",
-  "Status": "pending",
-  "CreatedAt": "2026-08-08T12:00:00Z",
-  "UpdatedAt": "2026-08-08T12:00:00Z"
+  "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "title": "Buy groceries",
+  "description": "Milk, eggs, bread",
+  "status": "pending",
+  "created_at": "2026-08-08T12:00:00Z",
+  "updated_at": "2026-08-08T12:00:00Z"
 }
 ```
 
@@ -209,6 +242,8 @@ Updates the title and description of an existing task. `CreatedAt`, `Status`, an
 }
 ```
 
+Same field constraints as `POST /tasks` (see above): `title` required, at most 200 characters; `description` optional, at most 2000 characters; both trimmed before being stored.
+
 **Response** `200 OK` — the updated task.
 
 **HTTP status codes**
@@ -216,8 +251,9 @@ Updates the title and description of an existing task. `CreatedAt`, `Status`, an
 | Code | Reason |
 |---|---|
 | `200` | Task updated |
-| `400` | Missing or empty title, or malformed JSON |
+| `400` | Missing/empty/overlong title, overlong description, or malformed JSON |
 | `404` | No task with the given ID |
+| `409` | The task was modified by another request between your read and this write (optimistic concurrency conflict) — re-fetch the task and retry |
 | `500` | Unexpected server error |
 
 ---
@@ -232,12 +268,12 @@ No request body required.
 
 ```json
 {
-  "ID": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "Title": "Buy groceries",
-  "Description": "Milk, eggs, bread",
-  "Status": "done",
-  "CreatedAt": "2026-08-08T12:00:00Z",
-  "UpdatedAt": "2026-08-08T12:05:00Z"
+  "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "title": "Buy groceries",
+  "description": "Milk, eggs, bread",
+  "status": "done",
+  "created_at": "2026-08-08T12:00:00Z",
+  "updated_at": "2026-08-08T12:05:00Z"
 }
 ```
 
@@ -247,6 +283,7 @@ No request body required.
 |---|---|
 | `200` | Task marked as done (or was already done) |
 | `404` | No task with the given ID |
+| `409` | The task was modified by another request between your read and this write (optimistic concurrency conflict) — re-fetch the task and retry. Never returned for a task that was already `done`, since that path never writes. |
 | `500` | Unexpected server error |
 
 ---
@@ -285,6 +322,12 @@ Returns the application health status. Always responds `200 OK` while the server
 |---|---|
 | `200` | Application is healthy |
 
+---
+
+### `GET /debug/vars`
+
+Standard library `expvar` endpoint: exposes baseline runtime observability (command line, memory stats, GC stats, goroutine-related counters) as JSON. Not part of the Task domain API — provided for basic operational visibility without pulling in an external metrics dependency.
+
 ## Error Handling
 
 All error responses use the same JSON envelope:
@@ -297,8 +340,9 @@ All error responses use the same JSON envelope:
 
 | HTTP Code | Meaning |
 |---|---|
-| `400 Bad Request` | Invalid input — malformed JSON or failed business rule validation (e.g. empty title). The error message describes the specific problem. |
+| `400 Bad Request` | Invalid input — malformed JSON, failed business rule validation (e.g. empty or overlong title), or an invalid `limit`/`offset` on `GET /tasks`. The error message describes the specific problem. |
 | `404 Not Found` | The requested task ID does not exist. |
+| `409 Conflict` | Either a task with the generated ID already exists on `POST /tasks` (practically unreachable, since IDs are server-generated UUIDv4), or `PUT /tasks/{id}` / `PATCH /tasks/{id}/done` lost an optimistic concurrency race against another concurrent write to the same task — re-fetch and retry. |
 | `500 Internal Server Error` | An unexpected server-side failure. The response body contains a generic message; details are logged server-side and never exposed to the client. |
 
 ## Development
@@ -332,21 +376,25 @@ make check      # fmt + vet + test-race (run before committing)
 
 ```
 task-api/
-├── main.go               # Composition Root: wires dependencies and starts the server
-├── health.go             # GET /health handler
-├── main_test.go          # Tests for server lifecycle and health endpoint
+├── cmd/
+│   └── api/
+│       ├── main.go               # Composition Root: wires dependencies and starts the server
+│       ├── health.go             # GET /health handler
+│       ├── main_test.go          # Tests for server lifecycle and health endpoint
+│       └── main_integration_test.go  # Full-stack (real Repository+Service+Handler) HTTP test
 ├── go.mod
 ├── config/
 │   ├── config.go         # Environment variable loading and validation
 │   └── config_test.go
 └── task/
     ├── task.go           # Domain model: Task struct and Status type
-    ├── repository.go     # Repository interface and ErrNotFound
-    ├── memory_repository.go      # In-memory implementation of Repository
+    ├── errors.go         # Domain error sentinels (ErrNotFound, ErrInvalidInput, ErrAlreadyExists, ErrConflict)
+    ├── repository.go     # Repository interface
+    ├── memory_repository.go      # In-memory implementation of Repository (with CAS-based optimistic concurrency)
     ├── memory_repository_test.go
-    ├── service.go        # Business logic: validation, ID generation, timestamps
+    ├── service.go        # Business logic: validation, ID generation, timestamps, ordering
     ├── service_test.go
-    ├── handler.go        # HTTP handlers and route registration
+    ├── handler.go        # HTTP handlers, route registration, pagination
     └── handler_test.go
 ```
 
@@ -356,7 +404,7 @@ task-api/
 Validation (non-empty title), ID generation, and timestamp management live exclusively in the `Service`. The `Handler` translates HTTP; the `Repository` stores data. Neither layer contains domain logic.
 
 **Repository is interface-based**
-`Repository` is defined as a Go interface. `main.go` injects the concrete `memoryRepository` at startup. Replacing it with a database implementation requires only a new file that satisfies the interface — no other code changes.
+`Repository` is defined as a Go interface. `cmd/api/main.go` injects the concrete `memoryRepository` at startup. Replacing it with a database implementation requires only a new file that satisfies the interface — no other code changes.
 
 **UUID generated in the Service**
 The `Service` generates a UUID v4 using `crypto/rand` from the standard library. The `Repository` receives a fully-formed `Task` and never assigns IDs. This keeps ID generation testable and independent of storage.
@@ -371,17 +419,29 @@ Calling `PATCH /tasks/{id}/done` on a task that is already `done` returns the cu
 The in-memory store uses `sync.RWMutex`. Multiple concurrent reads are allowed; writes are exclusive. All methods are safe to call from concurrent goroutines.
 
 **Domain errors are translated at the Handler layer**
-`ErrNotFound` becomes HTTP 404. `ErrInvalidInput` becomes HTTP 400 with the original message. All other errors become HTTP 500 with a generic message, and the original error is logged server-side.
+`ErrNotFound` becomes HTTP 404. `ErrInvalidInput` becomes HTTP 400 with the original message. `ErrAlreadyExists` becomes HTTP 409 (practically unreachable, since IDs are server-generated UUIDv4). `ErrConflict` also becomes HTTP 409 (an optimistic concurrency conflict — see below). All other errors become HTTP 500 with a generic message, and the original error is logged server-side.
 
 **Structured logging with `log/slog`**
-The application uses `log/slog` (Go standard library) with a JSON handler. The logger is created in `main.go` and injected into the `Handler`. No global mutable logger exists.
+The application uses `log/slog` (Go standard library) with a JSON handler. The logger is created in `cmd/api/main.go` and injected into the `Handler`. No global mutable logger exists.
+
+**`context.Context` propagates from the HTTP request through Service and Repository**
+Every `Repository` and `Service` method takes `ctx context.Context` as its first parameter, sourced from `r.Context()` in the `Handler`. The in-memory `Repository` checks `ctx.Err()` before each operation; this has no practical effect today, but it means a future database-backed `Repository` can honor request cancellation and timeouts without changing any method signature.
+
+**Request bodies are capped at 1 MiB**
+`POST /tasks` and `PUT /tasks/{id}` wrap the request body in `http.MaxBytesReader` before decoding JSON, so an oversized payload is rejected instead of being fully buffered into memory.
+
+**Optimistic concurrency control on updates**
+`Task` carries an internal `Version` field (`json:"-"`, never exposed on the wire). `UpdateTask` and `CompleteTask` perform a read-modify-write against the `Repository` (`FindByID` then `Update`), passing back the `Version` they read. `memoryRepository.Update` rejects the write with `ErrConflict` (surfaced as HTTP `409`) if the stored `Version` no longer matches — i.e. another writer updated the task in between — instead of silently overwriting it (a "lost update"). `Create` always resets `Version` to `1` regardless of what the caller supplies, and a successful `Update` increments it. Callers that receive a `409` should re-fetch the task and retry.
+
+**`GET /tasks` ordering is deterministic**
+`memoryRepository.FindAll` iterates a Go map, whose iteration order is randomized. `Service.ListTasks` sorts the result by `CreatedAt` ascending (ties broken by `ID`) before returning it, so callers — including paginated ones — see a stable order across requests rather than depending on map iteration.
 
 ## Graceful Shutdown
 
 The server handles `SIGINT` (Ctrl+C) and `SIGTERM` (sent by process managers and container runtimes):
 
 1. The signal is received on a buffered channel via `signal.Notify`.
-2. `http.Server.Shutdown(ctx)` is called with a context bounded by `APP_SHUTDOWN_TIMEOUT`.
+2. `http.Server.Shutdown(ctx)` is called with a context bounded by `HTTP_SHUTDOWN_TIMEOUT`.
 3. The server stops accepting new connections immediately.
 4. In-flight requests are allowed to complete.
 5. If the timeout expires before all requests finish, `Shutdown` returns an error, which is logged and propagates to the process exit code.
@@ -393,10 +453,8 @@ The following are possible improvements not yet implemented:
 
 - **Persistent storage** — replace `MemoryRepository` with a SQL or NoSQL database implementation
 - **Authentication and authorization** — protect endpoints with JWT or API key middleware
-- **Request ID middleware** — attach a unique ID to each request for log correlation
-- **Metrics** — expose Prometheus metrics (request count, latency, error rate)
+- **Application-level metrics** — `GET /debug/vars` exposes baseline Go runtime stats via `expvar`; a richer metrics surface (request count/latency/error-rate per route) would still need dedicated instrumentation, e.g. Prometheus
 - **Distributed tracing** — integrate OpenTelemetry for end-to-end request tracing
-- **Pagination** — add `limit` and `offset` parameters to `GET /tasks`
 - **Task filtering** — filter tasks by status in `GET /tasks`
 - **Docker** — add `Dockerfile` and `docker-compose.yml` for containerized development
 - **CI/CD** — add GitHub Actions workflow for automated testing and building

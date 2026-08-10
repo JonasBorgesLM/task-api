@@ -24,8 +24,10 @@ profile.cov
 go.work
 go.work.sum
 
-# env file
-.env
+# env files — ignore every variant (.env, .env.local, .env.production, ...)
+# except the checked-in template, which must stay tracked.
+.env*
+!.env.example
 
 # Editor/IDE
 # .idea/

@@ -1,0 +1,546 @@
+openapi: 3.0.3
+
+info:
+  title: Task API
+  description: >
+    A small HTTP REST API for task management, built with Go using only the
+    standard library. Each task has a title, an optional description, and a
+    status (`pending` or `done`). The API supports full lifecycle
+    management: create, read, update, complete and delete.
+
+
+    This document describes exactly the behavior implemented in
+    `task/handler.go`, `task/service.go` and `task/repository.go` as of the
+    current codebase — no aspirational or planned behavior is included.
+  version: "1.0.0"
+  license:
+    name: MIT
+    url: https://github.com/JonasBorgesLM/task-api/blob/main/LICENSE
+
+servers:
+  - url: http://localhost:8080
+    description: >
+      Local development server. The actual bind address is controlled by
+      the HTTP_ADDR environment variable (default ":8080"); see the
+      project README.
+
+tags:
+  - name: Tasks
+    description: Task lifecycle management (create, read, update, complete, delete)
+
+paths:
+  /tasks:
+    post:
+      tags: [Tasks]
+      operationId: createTask
+      summary: Create a task
+      description: >
+        Creates a new task with status `pending`. `id`, `status`,
+        `created_at` and `updated_at` are always assigned by the server;
+        if the client includes any of these fields in the request body,
+        or any other field not part of CreateTaskRequest, they are
+        silently ignored — the API never returns a 400 for unknown
+        fields.
+      requestBody:
+        required: true
+        description: >
+          Request bodies larger than 1 MiB are rejected (surfaces as the
+          same 400 "invalid request body" response as malformed JSON).
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTaskRequest'
+            examples:
+              valid:
+                summary: Valid request
+                value:
+                  title: Buy groceries
+                  description: Milk, eggs, bread
+              titleOnly:
+                summary: Description omitted (optional)
+                value:
+                  title: Buy groceries
+      responses:
+        '201':
+          description: Task created successfully.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: f47ac10b-58cc-4372-a567-0e02b2c3d479
+                title: Buy groceries
+                description: Milk, eggs, bread
+                status: pending
+                created_at: "2026-08-08T12:00:00Z"
+                updated_at: "2026-08-08T12:00:00Z"
+        '400':
+          description: >
+            Malformed JSON body; a missing, empty, or whitespace-only
+            `title`; or a `title`/`description` longer than 200/2000
+            characters (after trimming).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                malformedJSON:
+                  summary: Malformed JSON
+                  value:
+                    error: invalid request body
+                emptyTitle:
+                  summary: Empty or whitespace-only title
+                  value:
+                    error: "invalid input: title must not be empty"
+        '409':
+          description: >
+            A task with the server-generated id already exists.
+            Practically unreachable in normal operation: `id` is a
+            UUIDv4 generated internally by the Service and never
+            supplied by the client, so this can only happen on an
+            astronomically unlikely UUID collision. Documented because
+            the code path exists and is reachable in principle, not
+            because it is expected to occur.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: task already exists
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    get:
+      tags: [Tasks]
+      operationId: listTasks
+      summary: List tasks
+      description: >
+        Returns stored tasks ordered by `created_at` ascending (oldest
+        first; ties broken by `id`) — the Service sorts explicitly rather
+        than relying on the underlying map's iteration order. `limit` and
+        `offset` are optional; omitting both returns every task. Returns an
+        empty JSON array, never `null`, when no tasks exist or when
+        `offset` is past the end of the list.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of tasks to return.
+          schema:
+            type: integer
+            minimum: 0
+          example: 20
+        - name: offset
+          in: query
+          required: false
+          description: Number of tasks to skip before collecting `limit` results.
+          schema:
+            type: integer
+            minimum: 0
+          example: 0
+      responses:
+        '200':
+          description: >
+            Success. The array is empty (`[]`) if no tasks exist, or if
+            `offset` is past the end of the list.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Task'
+              examples:
+                withData:
+                  summary: Tasks exist
+                  value:
+                    - id: f47ac10b-58cc-4372-a567-0e02b2c3d479
+                      title: Buy groceries
+                      description: Milk, eggs, bread
+                      status: pending
+                      created_at: "2026-08-08T12:00:00Z"
+                      updated_at: "2026-08-08T12:00:00Z"
+                empty:
+                  summary: No tasks exist
+                  value: []
+        '400':
+          description: '`limit` or `offset` is present but not a non-negative integer.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "invalid input: limit must be a non-negative integer"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /tasks/{id}:
+    get:
+      tags: [Tasks]
+      operationId: getTask
+      summary: Get a task by id
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      responses:
+        '200':
+          description: Task found.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: f47ac10b-58cc-4372-a567-0e02b2c3d479
+                title: Buy groceries
+                description: Milk, eggs, bread
+                status: pending
+                created_at: "2026-08-08T12:00:00Z"
+                updated_at: "2026-08-08T12:00:00Z"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags: [Tasks]
+      operationId: updateTask
+      summary: Update a task's title and description
+      description: >
+        Replaces `title` and `description`. `id`, `status` and
+        `created_at` are never modified by this endpoint — to change
+        `status`, use `PATCH /tasks/{id}/done`. As with creation, any
+        field in the body other than `title`/`description` (e.g. a
+        client-supplied `status` or `id`) is silently ignored.
+        `updated_at` is always refreshed to the current time.
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      requestBody:
+        required: true
+        description: >
+          Request bodies larger than 1 MiB are rejected (surfaces as the
+          same 400 "invalid request body" response as malformed JSON).
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTaskRequest'
+            example:
+              title: Buy groceries and cook dinner
+              description: Don't forget olive oil
+      responses:
+        '200':
+          description: Task updated.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: f47ac10b-58cc-4372-a567-0e02b2c3d479
+                title: Buy groceries and cook dinner
+                description: Don't forget olive oil
+                status: pending
+                created_at: "2026-08-08T12:00:00Z"
+                updated_at: "2026-08-08T12:05:00Z"
+        '400':
+          description: >
+            Malformed JSON body; a missing, empty, or whitespace-only
+            `title`; or a `title`/`description` longer than 200/2000
+            characters (after trimming).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                malformedJSON:
+                  summary: Malformed JSON
+                  value:
+                    error: invalid request body
+                emptyTitle:
+                  summary: Empty or whitespace-only title
+                  value:
+                    error: "invalid input: title must not be empty"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >
+            Optimistic concurrency conflict: another request updated this
+            task between when this request's caller last read it and this
+            write. The caller should re-fetch the task and retry.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: task was modified concurrently, please retry
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags: [Tasks]
+      operationId: deleteTask
+      summary: Delete a task
+      description: Permanently removes a task. No request body.
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      responses:
+        '204':
+          description: Task deleted successfully. No response body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /tasks/{id}/done:
+    patch:
+      tags: [Tasks]
+      operationId: completeTask
+      summary: Mark a task as done
+      description: >
+        Marks the task `done`. No request body is read by this endpoint —
+        any body sent is ignored.
+
+
+        This operation is **idempotent**: calling it on a task that is
+        already `done` returns 200 with the task unchanged, and does
+        *not* refresh `updated_at` or write to the repository. Calling it
+        on a `pending` task sets `status` to `done` and refreshes
+        `updated_at`.
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      responses:
+        '200':
+          description: >
+            Task marked as done, or already was — response shape is the
+            same either way.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: f47ac10b-58cc-4372-a567-0e02b2c3d479
+                title: Buy groceries
+                description: Milk, eggs, bread
+                status: done
+                created_at: "2026-08-08T12:00:00Z"
+                updated_at: "2026-08-08T12:05:00Z"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >
+            Optimistic concurrency conflict: another request updated this
+            task between when this request's caller last read it and this
+            write. Never returned when the task was already `done` — that
+            path is idempotent and never writes. The caller should
+            re-fetch the task and retry.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: task was modified concurrently, please retry
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  parameters:
+    TaskID:
+      name: id
+      in: path
+      required: true
+      description: >
+        Server-generated task identifier (a UUIDv4 as produced by
+        CreateTask). The API does not validate that `id` is a
+        well-formed UUID — any string is accepted and looked up as-is;
+        both a syntactically invalid id and a well-formed but unknown id
+        result in 404, identically.
+      schema:
+        type: string
+      example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+
+  headers:
+    XRequestID:
+      description: >
+        Correlates this response with server-side structured logs
+        (`request_id` field). Echoes the client-supplied `X-Request-Id`
+        request header when it is present and well-formed (non-empty,
+        at most 128 characters, and restricted to `[A-Za-z0-9_-]`);
+        otherwise the server generates a new one. Present on every
+        response from every endpoint, including error responses.
+      schema:
+        type: string
+      example: 7a947bb6436a2e5009efcaa55c42cdf8
+
+  schemas:
+    Status:
+      type: string
+      description: Task lifecycle state. There is no state other than these two.
+      enum: [pending, done]
+
+    Task:
+      type: object
+      description: >
+        The persisted representation of a task, as returned by every
+        endpoint that returns a task body. Field order and JSON keys
+        match the `json` struct tags on task.Task exactly (snake_case).
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: Server-generated UUIDv4. Never accepted from the client.
+          example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+        title:
+          type: string
+          example: Buy groceries
+        description:
+          type: string
+          example: Milk, eggs, bread
+        status:
+          $ref: '#/components/schemas/Status'
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Set once at creation; never modified afterwards.
+          example: "2026-08-08T12:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: >
+            Refreshed on every mutation (PUT, and PATCH .../done when it
+            actually changes the status). Left unchanged by an
+            already-done PATCH .../done call.
+          example: "2026-08-08T12:00:00Z"
+      required:
+        - id
+        - title
+        - description
+        - status
+        - created_at
+        - updated_at
+
+    CreateTaskRequest:
+      type: object
+      description: >
+        Accepted body for POST /tasks. Any additional field beyond
+        `title`/`description` is silently ignored by the server rather
+        than rejected. Both fields are trimmed of leading/trailing
+        whitespace before being stored (length limits below are checked
+        after trimming).
+      properties:
+        title:
+          type: string
+          maxLength: 200
+          description: >
+            Required. Rejected with 400 if empty or made of only
+            whitespace after trimming, or if longer than 200 characters.
+          example: Buy groceries
+        description:
+          type: string
+          maxLength: 2000
+          description: >
+            Optional. Defaults to an empty string if omitted. Rejected
+            with 400 if longer than 2000 characters.
+          example: Milk, eggs, bread
+      required:
+        - title
+
+    UpdateTaskRequest:
+      type: object
+      description: >
+        Accepted body for PUT /tasks/{id}. Same validation as
+        CreateTaskRequest; any additional field (including `status` or
+        `id`) is silently ignored.
+      properties:
+        title:
+          type: string
+          maxLength: 200
+          description: >
+            Required. Rejected with 400 if empty or made of only
+            whitespace after trimming, or if longer than 200 characters.
+          example: Buy groceries and cook dinner
+        description:
+          type: string
+          maxLength: 2000
+          description: >
+            Optional. Defaults to an empty string if omitted. Rejected
+            with 400 if longer than 2000 characters.
+          example: Don't forget olive oil
+      required:
+        - title
+
+    ErrorResponse:
+      type: object
+      description: >
+        The single JSON envelope used by every error response from every
+        endpoint in this API.
+      properties:
+        error:
+          type: string
+          description: Human-readable error message. Never contains internal details.
+          example: task not found
+      required:
+        - error
+
+  responses:
+    NotFound:
+      description: No task exists with the given id.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: task not found
+
+    InternalServerError:
+      description: >
+        An unexpected server-side failure. The response body is always
+        this exact generic message — the underlying error is never
+        exposed to the client, only logged server-side (with the same
+        X-Request-Id, for correlation).
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: internal server error

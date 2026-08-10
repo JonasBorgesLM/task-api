@@ -1,12 +1,9 @@
 package task
 
 import (
-	"errors"
+	"context"
 	"sync"
 )
-
-// errAlreadyExists is returned by Create when a task with the same ID already exists.
-var errAlreadyExists = errors.New("task already exists")
 
 // memoryRepository is an in-memory implementation of Repository.
 type memoryRepository struct {
@@ -21,21 +18,32 @@ func NewMemoryRepository() Repository {
 	}
 }
 
-// Create persists a new task. Returns errAlreadyExists if the ID is already taken.
-func (r *memoryRepository) Create(task Task) error {
+// Create persists a new task. Returns ErrAlreadyExists if the ID is already
+// taken. The stored Version always starts at 1, regardless of what the
+// caller set on task.Version.
+func (r *memoryRepository) Create(ctx context.Context, task Task) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if _, exists := r.store[task.ID]; exists {
-		return errAlreadyExists
+		return ErrAlreadyExists
 	}
 
+	task.Version = 1
 	r.store[task.ID] = task
 	return nil
 }
 
 // FindByID returns the task with the given ID. Returns ErrNotFound if absent.
-func (r *memoryRepository) FindByID(id string) (Task, error) {
+func (r *memoryRepository) FindByID(ctx context.Context, id string) (Task, error) {
+	if err := ctx.Err(); err != nil {
+		return Task{}, err
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -48,7 +56,11 @@ func (r *memoryRepository) FindByID(id string) (Task, error) {
 }
 
 // FindAll returns a snapshot of all tasks as a new slice.
-func (r *memoryRepository) FindAll() ([]Task, error) {
+func (r *memoryRepository) FindAll(ctx context.Context) ([]Task, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -60,21 +72,37 @@ func (r *memoryRepository) FindAll() ([]Task, error) {
 	return tasks, nil
 }
 
-// Update replaces an existing task. Returns ErrNotFound if the ID does not exist.
-func (r *memoryRepository) Update(task Task) error {
+// Update replaces an existing task. Returns ErrNotFound if the ID does not
+// exist, and ErrConflict if task.Version does not match the stored
+// Version — i.e. the task was modified by another writer since task was
+// read. On success the stored Version is incremented.
+func (r *memoryRepository) Update(ctx context.Context, task Task) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, ok := r.store[task.ID]; !ok {
+	stored, ok := r.store[task.ID]
+	if !ok {
 		return ErrNotFound
 	}
+	if task.Version != stored.Version {
+		return ErrConflict
+	}
 
+	task.Version = stored.Version + 1
 	r.store[task.ID] = task
 	return nil
 }
 
 // Delete removes the task with the given ID. Returns ErrNotFound if absent.
-func (r *memoryRepository) Delete(id string) error {
+func (r *memoryRepository) Delete(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
