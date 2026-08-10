@@ -1,16 +1,29 @@
+//go:build integration
+
 package task
 
 // Integration tests for postgresRepository, run against a real PostgreSQL
-// instance. Unlike memory_repository_test.go (which exercises the same
-// Repository contract against an in-memory fake with no external
-// dependency), these tests need a live database and are skipped
-// automatically when one isn't configured — see newPostgresTestRepo.
+// instance. The "integration" build tag above is what keeps these
+// completely separate from the unit test suite (memory_repository_test.go
+// and friends): a plain `go test ./...` never even compiles this file, so
+// it can never accidentally run — or accidentally get skipped and reported
+// as "passing" — as part of the normal unit test run. They only compile
+// and run when explicitly requested with `-tags=integration`.
+//
+// As a second, independent safeguard, newPostgresTestRepo also skips at
+// runtime if TEST_DATABASE_URL isn't set — so even a deliberate
+// `-tags=integration` run degrades to a clean skip instead of a hard
+// failure on a machine with no PostgreSQL available.
 //
 // To run them locally:
 //
-//	docker compose up -d postgres
+//	docker compose up -d postgres          # or: make db-up
+//	make test-integration
+//
+// which is equivalent to:
+//
 //	TEST_DATABASE_URL="postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable" \
-//	    go test ./task/... -run Postgres -v
+//	    go test -tags=integration ./task/... -run Postgres -v
 //
 // CI runs these against a postgres service container — see
 // .github/workflows/ci.yml.

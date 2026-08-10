@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
@@ -11,14 +12,18 @@ import (
 	"strings"
 )
 
-// migrationFiles embeds every "up" migration under task/migrations so the
-// compiled binary carries its own schema and needs no separate migration
-// files deployed alongside it. Only *.up.sql is embedded: the matching
-// *.down.sql files exist on disk for manual rollback (psql, or any
-// migrate-style CLI pointed at the directory) but are not needed at
-// runtime, since RunMigrations only ever applies forward.
+// ErrNoMigrationsToRevert is returned by RunMigrationsDown when
+// schema_migrations records no applied migration to roll back.
+var ErrNoMigrationsToRevert = errors.New("no migrations to revert")
+
+// migrationFiles embeds every migration under task/migrations — both
+// *.up.sql (applied by RunMigrations, automatically on every process
+// startup when DB_AUTO_MIGRATE is enabled) and *.down.sql (applied by
+// RunMigrationsDown, only ever run explicitly via `make migrate-down` /
+// cmd/migrate) — so the compiled binary carries its own schema and needs
+// no separate migration files deployed alongside it.
 //
-//go:embed migrations/*.up.sql
+//go:embed migrations/*.sql
 var migrationFiles embed.FS
 
 // RunMigrations applies every embedded migration that schema_migrations
@@ -57,6 +62,80 @@ func RunMigrations(ctx context.Context, db *sql.DB) error {
 		if err := applyMigration(ctx, db, version, string(stmt)); err != nil {
 			return fmt.Errorf("postgres: apply migration %s: %w", version, err)
 		}
+	}
+
+	return nil
+}
+
+// RunMigrationsDown reverts the single most recently applied migration: it
+// runs that migration's .down.sql and removes its schema_migrations
+// record, both inside one transaction. It returns ErrNoMigrationsToRevert
+// if schema_migrations is empty.
+//
+// This is the counterpart to RunMigrations used for manual rollback (see
+// cmd/migrate and `make migrate-down`). The application itself never
+// calls it — only RunMigrations runs automatically, from
+// cmd/api/main.go's buildRepository.
+func RunMigrationsDown(ctx context.Context, db *sql.DB) error {
+	if err := ensureMigrationsTable(ctx, db); err != nil {
+		return fmt.Errorf("postgres: ensure schema_migrations table: %w", err)
+	}
+
+	version, err := latestAppliedMigration(ctx, db)
+	if err != nil {
+		return fmt.Errorf("postgres: find latest applied migration: %w", err)
+	}
+	if version == "" {
+		return ErrNoMigrationsToRevert
+	}
+
+	stmt, err := migrationFiles.ReadFile("migrations/" + version + ".down.sql")
+	if err != nil {
+		return fmt.Errorf("postgres: read down migration for %s: %w", version, err)
+	}
+
+	if err := revertMigration(ctx, db, version, string(stmt)); err != nil {
+		return fmt.Errorf("postgres: revert migration %s: %w", version, err)
+	}
+
+	return nil
+}
+
+// latestAppliedMigration returns the version of the most recently applied
+// migration (by applied_at), or "" if none has been applied yet.
+func latestAppliedMigration(ctx context.Context, db *sql.DB) (string, error) {
+	var version string
+	err := db.QueryRowContext(ctx,
+		`SELECT version FROM schema_migrations ORDER BY applied_at DESC LIMIT 1`,
+	).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return version, err
+}
+
+// revertMigration runs stmt (a migration's .down.sql) and removes its
+// schema_migrations record, atomically — the same reasoning as
+// applyMigration, in reverse: a crash between the two steps must never
+// leave the schema reverted but still recorded as applied, nor the record
+// removed without the DDL having actually run.
+func revertMigration(ctx context.Context, db *sql.DB, version, stmt string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit has succeeded
+
+	if _, err := tx.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("execute down migration DDL: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version); err != nil {
+		return fmt.Errorf("remove migration record: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
 	}
 
 	return nil

@@ -1,19 +1,25 @@
-# Local development/testing stack. Not used by the CI quality gate (it
-# starts a `postgres:` service container directly — see
-# .github/workflows/ci.yml) and not part of the production Dockerfile,
-# which builds a single self-contained binary that expects DATABASE_URL to
-# point at wherever Postgres actually runs in that environment.
+# Full local development/testing stack: the API and a PostgreSQL instance
+# it talks to over the compose network. Not used by CI (which starts a
+# `postgres:` service container directly and runs the compiled test binary
+# outside Docker — see .github/workflows/ci.yml) and not itself part of
+# the production Dockerfile, which only describes the API image; where
+# that image's PostgreSQL actually runs in a real deployment is up to
+# that environment, addressed purely via DATABASE_URL.
 #
 # Usage:
 #
-#   docker compose up -d postgres
-#   TEST_DATABASE_URL="postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable" \
-#       go test ./task/... -run Postgres -v
+#   docker compose up -d --build     # or: make docker-up
+#   curl http://localhost:8080/health
+#   docker compose down               # or: make docker-down
 #
-# Or to run the API itself against it:
+# To run only PostgreSQL (e.g. because you're running the API with
+# `go run ./cmd/api` on the host instead, for faster edit/rebuild cycles):
 #
-#   DATABASE_URL="postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable" \
-#       go run ./cmd/api
+#   docker compose up -d postgres     # or: make db-up
+#
+# The two services share one PostgreSQL container/volume; there is no
+# separate database for the "api" service's schema versus the "postgres
+# only" workflow above.
 services:
   postgres:
     image: postgres:17-alpine
@@ -30,6 +36,23 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: task-api:latest
+    environment:
+      # "postgres" resolves via Docker's embedded DNS to the postgres
+      # service above — not "localhost", which inside this container
+      # would mean the api container itself.
+      DATABASE_URL: postgres://task_api:task_api@postgres:5432/task_api?sslmode=disable
+      HTTP_ADDR: ":8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   task-api-postgres-data:
