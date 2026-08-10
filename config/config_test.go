@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 )
@@ -27,6 +28,9 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if cfg.ShutdownTimeout != defaultShutdownTimeout {
 		t.Errorf("Load() ShutdownTimeout = %v, want %v", cfg.ShutdownTimeout, defaultShutdownTimeout)
+	}
+	if cfg.LogLevel != defaultLogLevel {
+		t.Errorf("Load() LogLevel = %v, want %v", cfg.LogLevel, defaultLogLevel)
 	}
 }
 
@@ -204,5 +208,73 @@ func TestLoad_InvalidShutdownTimeout_Zero(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatal("Load() expected error for HTTP_SHUTDOWN_TIMEOUT=0s, got nil")
+	}
+}
+
+// --- LOG_LEVEL ---
+
+func TestLoad_LogLevel(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want slog.Level
+	}{
+		{"debug", slog.LevelDebug},
+		{"DEBUG", slog.LevelDebug},
+		{"info", slog.LevelInfo},
+		{"warn", slog.LevelWarn},
+		{"warning", slog.LevelWarn},
+		{"error", slog.LevelError},
+		{"Error", slog.LevelError},
+	}
+
+	for _, tc := range cases {
+		t.Run("level="+tc.raw, func(t *testing.T) {
+			t.Setenv("LOG_LEVEL", tc.raw)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() unexpected error: %v", err)
+			}
+			if cfg.LogLevel != tc.want {
+				t.Errorf("Load() LogLevel = %v, want %v", cfg.LogLevel, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_InvalidLogLevel(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "verbose")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for LOG_LEVEL=verbose, got nil")
+	}
+}
+
+// --- DOTENV_PATH ---
+
+func TestLoad_DotenvPathOverride(t *testing.T) {
+	// HTTP_ADDR is set indirectly by loadDotEnv (via os.Setenv), not by
+	// t.Setenv, so it must be unset manually or it would leak into later
+	// tests in this package.
+	unsetAfterTest(t, "HTTP_ADDR")
+
+	path := writeDotEnv(t, "HTTP_ADDR=:9099\n")
+	t.Setenv("DOTENV_PATH", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.Addr != ":9099" {
+		t.Errorf("Load() Addr = %q, want %q (from DOTENV_PATH file)", cfg.Addr, ":9099")
+	}
+}
+
+func TestLoad_DotenvPath_MissingFileIsNotAnError(t *testing.T) {
+	t.Setenv("DOTENV_PATH", t.TempDir()+"/does-not-exist.env")
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() with a missing DOTENV_PATH file: unexpected error: %v", err)
 	}
 }

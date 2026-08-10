@@ -11,13 +11,19 @@
 //	HTTP_WRITE_TIMEOUT      http.Server.WriteTimeout as a Go duration string (default: 10s)
 //	HTTP_IDLE_TIMEOUT       http.Server.IdleTimeout as a Go duration string (default: 60s)
 //	HTTP_SHUTDOWN_TIMEOUT   Graceful shutdown timeout as a Go duration string (default: 10s)
+//	LOG_LEVEL               Minimum log level: debug, info, warn, or error (default: info)
+//	DOTENV_PATH             Path to the .env file Load reads before the OS
+//	                        environment (default: ".env", relative to the
+//	                        process's current working directory)
 package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -27,6 +33,8 @@ const (
 	defaultWriteTimeout    = 10 * time.Second
 	defaultIdleTimeout     = 60 * time.Second
 	defaultShutdownTimeout = 10 * time.Second
+	defaultLogLevel        = slog.LevelInfo
+	defaultDotenvPath      = ".env"
 )
 
 // Config holds all application configuration values. It is independent of
@@ -49,18 +57,27 @@ type Config struct {
 	// ShutdownTimeout is the maximum duration to wait for in-flight requests
 	// to complete when the server receives a shutdown signal.
 	ShutdownTimeout time.Duration
+
+	// LogLevel is the minimum slog.Level the application logs at.
+	LogLevel slog.Level
 }
 
 // Load reads configuration from environment variables and applies defaults
 // for any variable that is not set. Returns an error if any value has an
 // invalid format.
 //
-// Before reading environment variables, Load calls loadDotEnv(".env") so
-// that a local .env file can supply values. Variables already present in
-// the OS environment take precedence over the .env file.
+// Before reading environment variables, Load calls loadDotEnv on the path
+// named by DOTENV_PATH (default ".env", resolved relative to the process's
+// current working directory) so that a local .env file can supply values.
+// Variables already present in the OS environment take precedence over the
+// .env file.
 func Load() (Config, error) {
-	if err := loadDotEnv(".env"); err != nil {
-		return Config{}, fmt.Errorf("config: failed to load .env: %w", err)
+	dotenvPath := defaultDotenvPath
+	if raw := os.Getenv("DOTENV_PATH"); raw != "" {
+		dotenvPath = raw
+	}
+	if err := loadDotEnv(dotenvPath); err != nil {
+		return Config{}, fmt.Errorf("config: failed to load %s: %w", dotenvPath, err)
 	}
 
 	cfg := Config{
@@ -69,6 +86,7 @@ func Load() (Config, error) {
 		WriteTimeout:    defaultWriteTimeout,
 		IdleTimeout:     defaultIdleTimeout,
 		ShutdownTimeout: defaultShutdownTimeout,
+		LogLevel:        defaultLogLevel,
 	}
 
 	if raw := os.Getenv("HTTP_ADDR"); raw != "" {
@@ -89,6 +107,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.ShutdownTimeout, err = parseDuration("HTTP_SHUTDOWN_TIMEOUT", defaultShutdownTimeout); err != nil {
+		return Config{}, err
+	}
+	if cfg.LogLevel, err = parseLogLevel("LOG_LEVEL", defaultLogLevel); err != nil {
 		return Config{}, err
 	}
 
@@ -133,4 +154,27 @@ func parseDuration(name string, def time.Duration) (time.Duration, error) {
 	}
 
 	return d, nil
+}
+
+// parseLogLevel reads the environment variable name and parses it as a
+// case-insensitive log level: "debug", "info", "warn" (or "warning"), or
+// "error". If the variable is unset, def is returned unchanged.
+func parseLogLevel(name string, def slog.Level) (slog.Level, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def, nil
+	}
+
+	switch strings.ToLower(raw) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("config: %s %q is not a valid log level (want debug, info, warn, or error)", name, raw)
+	}
 }

@@ -1,9 +1,12 @@
 package middleware
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -161,3 +164,165 @@ func TestLogging_LevelAndErrorField_ByStatusClass(t *testing.T) {
 		})
 	}
 }
+
+// --- Optional interface passthrough (Flusher, Hijacker, Pusher) ---
+//
+// statusRecorder embeds http.ResponseWriter as an interface field, which
+// only promotes the methods declared on http.ResponseWriter itself
+// (Header, Write, WriteHeader) — NOT optional interfaces like http.Flusher
+// or http.Hijacker that the concrete writer might also implement. Without
+// explicit passthrough methods, a handler behind Logging that needs to
+// flush a streaming response or hijack the connection would see those
+// type assertions fail even though the real underlying ResponseWriter
+// supports them.
+
+// hijackableRecorder is a minimal http.ResponseWriter that also implements
+// http.Hijacker and http.Pusher, so tests can verify statusRecorder
+// delegates to it correctly.
+type hijackableRecorder struct {
+	http.ResponseWriter
+	hijackCalled bool
+	pushCalled   bool
+	pushTarget   string
+}
+
+func (h *hijackableRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h.hijackCalled = true
+	clientConn, serverConn := net.Pipe()
+	serverConn.Close() //nolint:errcheck // only the client side is inspected below
+	return clientConn, nil, nil
+}
+
+func (h *hijackableRecorder) Push(target string, _ *http.PushOptions) error {
+	h.pushCalled = true
+	h.pushTarget = target
+	return nil
+}
+
+func TestLogging_Flush_DelegatesToUnderlyingFlusher(t *testing.T) {
+	logger, _ := newTestLogger()
+
+	underlying := httptest.NewRecorder() // implements http.Flusher
+	handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("ResponseWriter behind Logging does not implement http.Flusher")
+		}
+		f.Flush()
+	}))
+
+	handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if !underlying.Flushed {
+		t.Error("Flush() on the wrapped ResponseWriter did not reach the underlying httptest.ResponseRecorder")
+	}
+}
+
+func TestLogging_Flush_NoopWhenUnderlyingDoesNotSupportIt(t *testing.T) {
+	logger, _ := newTestLogger()
+
+	// plainRecorder deliberately does NOT implement http.Flusher.
+	underlying := &plainRecorder{header: make(http.Header)}
+	handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("statusRecorder must always implement http.Flusher itself, even as a no-op")
+		}
+		f.Flush() // must not panic
+	}))
+
+	handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+}
+
+func TestLogging_Hijack_DelegatesToUnderlyingHijacker(t *testing.T) {
+	logger, _ := newTestLogger()
+
+	underlying := &hijackableRecorder{ResponseWriter: httptest.NewRecorder()}
+	handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("ResponseWriter behind Logging does not implement http.Hijacker")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("Hijack() unexpected error: %v", err)
+		}
+		conn.Close()
+	}))
+
+	handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if !underlying.hijackCalled {
+		t.Error("Hijack() did not reach the underlying ResponseWriter")
+	}
+}
+
+func TestLogging_Hijack_ErrorsWhenUnderlyingDoesNotSupportIt(t *testing.T) {
+	logger, _ := newTestLogger()
+
+	underlying := httptest.NewRecorder() // does not implement http.Hijacker
+	handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("statusRecorder must always implement http.Hijacker itself, even to report unsupported")
+		}
+		if _, _, err := hj.Hijack(); err == nil {
+			t.Error("Hijack() on an unsupported underlying writer: want an error, got nil")
+		}
+	}))
+
+	handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+}
+
+func TestLogging_Push_DelegatesToUnderlyingPusher(t *testing.T) {
+	logger, _ := newTestLogger()
+
+	underlying := &hijackableRecorder{ResponseWriter: httptest.NewRecorder()}
+	handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, ok := w.(http.Pusher)
+		if !ok {
+			t.Fatal("ResponseWriter behind Logging does not implement http.Pusher")
+		}
+		if err := p.Push("/style.css", nil); err != nil {
+			t.Errorf("Push() unexpected error: %v", err)
+		}
+	}))
+
+	handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if !underlying.pushCalled || underlying.pushTarget != "/style.css" {
+		t.Errorf("Push() did not reach the underlying ResponseWriter as expected: called=%v target=%q",
+			underlying.pushCalled, underlying.pushTarget)
+	}
+}
+
+func TestLogging_Push_NotSupportedWhenUnderlyingDoesNotSupportIt(t *testing.T) {
+	logger, _ := newTestLogger()
+
+	underlying := httptest.NewRecorder() // does not implement http.Pusher
+	handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, ok := w.(http.Pusher)
+		if !ok {
+			t.Fatal("statusRecorder must always implement http.Pusher itself, even to report unsupported")
+		}
+		if err := p.Push("/style.css", nil); !errors.Is(err, http.ErrNotSupported) {
+			t.Errorf("Push() error = %v, want http.ErrNotSupported", err)
+		}
+	}))
+
+	handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+}
+
+// plainRecorder is a minimal http.ResponseWriter with none of the optional
+// interfaces (Flusher, Hijacker, Pusher) — used to verify statusRecorder
+// degrades gracefully instead of panicking or forwarding to a method that
+// doesn't exist.
+type plainRecorder struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (p *plainRecorder) Header() http.Header         { return p.header }
+func (p *plainRecorder) WriteHeader(status int)      { p.status = status }
+func (p *plainRecorder) Write(b []byte) (int, error) { return p.body.Write(b) }

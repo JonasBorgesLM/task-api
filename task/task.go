@@ -18,4 +18,11 @@ type Task struct {
 	Status      Status    `json:"status"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+
+	// Version is a Repository-managed optimistic-concurrency counter. It is
+	// not part of the public wire format (json:"-"): callers never set it
+	// directly. Service reads it via FindByID/FindAll and passes it back
+	// unchanged to Update, which uses it to detect a concurrent write; see
+	// Repository's doc comment.
+	Version int `json:"-"`
 }

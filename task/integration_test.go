@@ -228,6 +228,31 @@ func TestIntegration_ListTasks_WithData(t *testing.T) {
 	}
 }
 
+// TestIntegration_ListTasks_Pagination drives the real stack through
+// limit/offset over tasks created (and therefore CreatedAt-ordered) in a
+// known sequence, confirming pagination and the underlying deterministic
+// ordering work together correctly end to end.
+func TestIntegration_ListTasks_Pagination(t *testing.T) {
+	srv := newIntegrationServer(t)
+
+	titles := []string{"A", "B", "C", "D", "E"}
+	for _, title := range titles {
+		resp := doRequest(t, srv, http.MethodPost, "/tasks", `{"title":"`+title+`"}`)
+		assertStatus(t, resp, http.StatusCreated)
+	}
+
+	resp := doRequest(t, srv, http.MethodGet, "/tasks?limit=2&offset=1", "")
+	assertStatus(t, resp, http.StatusOK)
+
+	got := decodeTasks(t, resp)
+	if len(got) != 2 {
+		t.Fatalf("len(tasks) = %d, want 2", len(got))
+	}
+	if got[0].Title != "B" || got[1].Title != "C" {
+		t.Errorf("titles = [%q, %q], want [%q, %q]", got[0].Title, got[1].Title, "B", "C")
+	}
+}
+
 // --- GET /tasks/{id} ---
 
 func TestIntegration_GetTask_NotFound(t *testing.T) {

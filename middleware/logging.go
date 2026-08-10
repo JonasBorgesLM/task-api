@@ -1,7 +1,10 @@
 package middleware
 
 import (
+	"bufio"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -79,4 +82,40 @@ func (rec *statusRecorder) Write(b []byte) (int, error) {
 		rec.WriteHeader(http.StatusOK)
 	}
 	return rec.ResponseWriter.Write(b)
+}
+
+// Flush implements http.Flusher by delegating to the wrapped
+// ResponseWriter when it supports flushing, and is a no-op otherwise.
+// Without this, a handler wrapped by Logging that type-asserts its
+// http.ResponseWriter to http.Flusher (e.g. for streaming/SSE responses)
+// would see the assertion fail even when the underlying writer actually
+// supports it — struct embedding only promotes methods declared on the
+// embedded interface (http.ResponseWriter), not http.Flusher.
+func (rec *statusRecorder) Flush() {
+	if f, ok := rec.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack implements http.Hijacker by delegating to the wrapped
+// ResponseWriter when it supports hijacking (e.g. for a WebSocket
+// upgrade), and returns an error otherwise, matching the contract
+// documented on http.Hijacker.
+func (rec *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := rec.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("middleware: underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return h.Hijack()
+}
+
+// Push implements http.Pusher by delegating to the wrapped ResponseWriter
+// when it supports HTTP/2 server push, and returns http.ErrNotSupported
+// otherwise, matching the contract documented on http.Pusher.
+func (rec *statusRecorder) Push(target string, opts *http.PushOptions) error {
+	p, ok := rec.ResponseWriter.(http.Pusher)
+	if !ok {
+		return http.ErrNotSupported
+	}
+	return p.Push(target, opts)
 }

@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -127,6 +128,48 @@ func TestCreateTask_WhitespaceTitle(t *testing.T) {
 	_, err := svc.CreateTask(context.Background(), "   ", "description")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("CreateTask() whitespace title error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestCreateTask_TitleTooLong(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	_, err := svc.CreateTask(context.Background(), strings.Repeat("a", maxTitleLen+1), "description")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("CreateTask() overlong title error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestCreateTask_TitleAtMaxLength(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	_, err := svc.CreateTask(context.Background(), strings.Repeat("a", maxTitleLen), "description")
+	if err != nil {
+		t.Errorf("CreateTask() title at max length unexpected error: %v", err)
+	}
+}
+
+func TestCreateTask_DescriptionTooLong(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	_, err := svc.CreateTask(context.Background(), "Valid title", strings.Repeat("a", maxDescriptionLen+1))
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("CreateTask() overlong description error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestCreateTask_TrimsTitleAndDescription(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	got, err := svc.CreateTask(context.Background(), "  Padded title  ", "  Padded description  ")
+	if err != nil {
+		t.Fatalf("CreateTask() unexpected error: %v", err)
+	}
+	if got.Title != "Padded title" {
+		t.Errorf("CreateTask() Title = %q, want %q", got.Title, "Padded title")
+	}
+	if got.Description != "Padded description" {
+		t.Errorf("CreateTask() Description = %q, want %q", got.Description, "Padded description")
 	}
 }
 
@@ -260,6 +303,53 @@ func TestUpdateTask_RepositoryUpdateError(t *testing.T) {
 	}
 }
 
+func TestUpdateTask_RepositoryConflictError(t *testing.T) {
+	repo := &fakeRepository{
+		findByIDTask: newFakeTask(StatusPending),
+		updateErr:    ErrConflict,
+	}
+	svc := NewService(repo)
+
+	_, err := svc.UpdateTask(context.Background(), "fake-id", "Title", "")
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("UpdateTask() error = %v, want ErrConflict", err)
+	}
+}
+
+func TestUpdateTask_TitleTooLong(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	_, err := svc.UpdateTask(context.Background(), "fake-id", strings.Repeat("a", maxTitleLen+1), "desc")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("UpdateTask() overlong title error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestUpdateTask_DescriptionTooLong(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	_, err := svc.UpdateTask(context.Background(), "fake-id", "Title", strings.Repeat("a", maxDescriptionLen+1))
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("UpdateTask() overlong description error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestUpdateTask_TrimsTitleAndDescription(t *testing.T) {
+	repo := &fakeRepository{findByIDTask: newFakeTask(StatusPending)}
+	svc := NewService(repo)
+
+	got, err := svc.UpdateTask(context.Background(), "fake-id", "  Padded title  ", "  Padded description  ")
+	if err != nil {
+		t.Fatalf("UpdateTask() unexpected error: %v", err)
+	}
+	if got.Title != "Padded title" {
+		t.Errorf("UpdateTask() Title = %q, want %q", got.Title, "Padded title")
+	}
+	if got.Description != "Padded description" {
+		t.Errorf("UpdateTask() Description = %q, want %q", got.Description, "Padded description")
+	}
+}
+
 // --- DeleteTask ---
 
 func TestDeleteTask_Delegates(t *testing.T) {
@@ -352,4 +442,55 @@ func TestCompleteTask_RepositoryUpdateError(t *testing.T) {
 	if !errors.Is(err, repoErr) {
 		t.Errorf("CompleteTask() repository error = %v, want %v", err, repoErr)
 	}
+}
+
+func TestCompleteTask_RepositoryConflictError(t *testing.T) {
+	repo := &fakeRepository{
+		findByIDTask: newFakeTask(StatusPending),
+		updateErr:    ErrConflict,
+	}
+	svc := NewService(repo)
+
+	_, err := svc.CompleteTask(context.Background(), "fake-id")
+	if !errors.Is(err, ErrConflict) {
+		t.Errorf("CompleteTask() error = %v, want ErrConflict", err)
+	}
+}
+
+// --- ListTasks ordering ---
+
+func TestListTasks_OrdersByCreatedAtThenID(t *testing.T) {
+	base := time.Now()
+	older := Task{ID: "b", CreatedAt: base.Add(-time.Hour)}
+	newer := Task{ID: "a", CreatedAt: base}
+	tie1 := Task{ID: "z", CreatedAt: base.Add(time.Minute)}
+	tie2 := Task{ID: "y", CreatedAt: base.Add(time.Minute)}
+
+	// Deliberately unordered input, mirroring memoryRepository's
+	// unordered map iteration.
+	repo := &fakeRepository{findAllTasks: []Task{tie1, newer, older, tie2}}
+	svc := NewService(repo)
+
+	got, err := svc.ListTasks(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasks() unexpected error: %v", err)
+	}
+
+	wantOrder := []string{"b", "a", "y", "z"}
+	if len(got) != len(wantOrder) {
+		t.Fatalf("ListTasks() returned %d tasks, want %d", len(got), len(wantOrder))
+	}
+	for i, id := range wantOrder {
+		if got[i].ID != id {
+			t.Errorf("ListTasks()[%d].ID = %q, want %q (order = %v)", i, got[i].ID, id, taskIDs(got))
+		}
+	}
+}
+
+func taskIDs(tasks []Task) []string {
+	ids := make([]string, len(tasks))
+	for i, t := range tasks {
+		ids[i] = t.ID
+	}
+	return ids
 }

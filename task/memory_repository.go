@@ -18,7 +18,9 @@ func NewMemoryRepository() Repository {
 	}
 }
 
-// Create persists a new task. Returns ErrAlreadyExists if the ID is already taken.
+// Create persists a new task. Returns ErrAlreadyExists if the ID is already
+// taken. The stored Version always starts at 1, regardless of what the
+// caller set on task.Version.
 func (r *memoryRepository) Create(ctx context.Context, task Task) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -31,6 +33,7 @@ func (r *memoryRepository) Create(ctx context.Context, task Task) error {
 		return ErrAlreadyExists
 	}
 
+	task.Version = 1
 	r.store[task.ID] = task
 	return nil
 }
@@ -69,7 +72,10 @@ func (r *memoryRepository) FindAll(ctx context.Context) ([]Task, error) {
 	return tasks, nil
 }
 
-// Update replaces an existing task. Returns ErrNotFound if the ID does not exist.
+// Update replaces an existing task. Returns ErrNotFound if the ID does not
+// exist, and ErrConflict if task.Version does not match the stored
+// Version — i.e. the task was modified by another writer since task was
+// read. On success the stored Version is incremented.
 func (r *memoryRepository) Update(ctx context.Context, task Task) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -78,10 +84,15 @@ func (r *memoryRepository) Update(ctx context.Context, task Task) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, ok := r.store[task.ID]; !ok {
+	stored, ok := r.store[task.ID]
+	if !ok {
 		return ErrNotFound
 	}
+	if task.Version != stored.Version {
+		return ErrConflict
+	}
 
+	task.Version = stored.Version + 1
 	r.store[task.ID] = task
 	return nil
 }

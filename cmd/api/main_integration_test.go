@@ -7,25 +7,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JonasBorgesLM/task-api/config"
 	"github.com/JonasBorgesLM/task-api/middleware"
 	"github.com/JonasBorgesLM/task-api/task"
 )
 
-// TestIntegration_TaskLifecycle wires the real MemoryRepository, Service and
-// Handler together — the same composition used in run() — and drives a full
-// create/read/update/complete/delete cycle over a real HTTP server. This is
-// the only test that exercises the actual dependency wiring end to end;
-// every other test in this repository talks to a fake Repository or Service.
+// TestIntegration_TaskLifecycle drives newServer's wiring — the same
+// composition run() uses — through a full create/read/update/complete/
+// delete cycle over a real HTTP server. This is the only test that
+// exercises the actual dependency wiring end to end; every other test in
+// this repository talks to a fake Repository or Service.
 func TestIntegration_TaskLifecycle(t *testing.T) {
-	repo := task.NewMemoryRepository()
-	svc := task.NewService(repo)
-	handler := task.NewHandler(svc, discardLogger())
-
-	mux := http.NewServeMux()
-	registerHealthRoute(mux, discardLogger())
-	handler.RegisterRoutes(mux)
-
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(newServer(config.Config{}, discardLogger()).Handler)
 	defer srv.Close()
 
 	client := srv.Client()
@@ -161,14 +154,7 @@ func TestIntegration_TaskLifecycle(t *testing.T) {
 // Service's validation rule is reachable through the real Handler, over a
 // real HTTP request.
 func TestIntegration_CreateTask_EmptyTitle_Returns400(t *testing.T) {
-	repo := task.NewMemoryRepository()
-	svc := task.NewService(repo)
-	handler := task.NewHandler(svc, discardLogger())
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(newServer(config.Config{}, discardLogger()).Handler)
 	defer srv.Close()
 
 	resp, err := srv.Client().Post(srv.URL+"/tasks", "application/json", strings.NewReader(`{"title":""}`))
@@ -183,24 +169,12 @@ func TestIntegration_CreateTask_EmptyTitle_Returns400(t *testing.T) {
 }
 
 // TestIntegration_MiddlewareWired verifies that the same middleware chain
-// built in run() is actually applied to the real Handler: every response
-// must carry an X-Request-ID header. This guards against someone changing
-// main.go and forgetting to keep the middleware chain wired to the server.
+// built by newServer (and used by run()) is actually applied: every
+// response must carry an X-Request-ID header. This guards against someone
+// changing newServer and forgetting to keep the middleware chain wired to
+// the server.
 func TestIntegration_MiddlewareWired(t *testing.T) {
-	repo := task.NewMemoryRepository()
-	svc := task.NewService(repo)
-	handler := task.NewHandler(svc, discardLogger())
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	rootHandler := middleware.Chain(
-		middleware.RequestID,
-		middleware.Logging(discardLogger()),
-		middleware.Recovery(discardLogger()),
-	)(mux)
-
-	srv := httptest.NewServer(rootHandler)
+	srv := httptest.NewServer(newServer(config.Config{}, discardLogger()).Handler)
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/tasks")
@@ -211,5 +185,34 @@ func TestIntegration_MiddlewareWired(t *testing.T) {
 
 	if got := resp.Header.Get(middleware.HeaderRequestID); got == "" {
 		t.Error("response is missing the X-Request-ID header — middleware chain not applied")
+	}
+}
+
+// TestIntegration_DebugVars verifies that newServer registers the stdlib
+// expvar handler at GET /debug/vars, giving at least baseline runtime
+// observability (goroutine count, memstats, GC stats) without pulling in
+// an external metrics dependency.
+func TestIntegration_DebugVars(t *testing.T) {
+	srv := httptest.NewServer(newServer(config.Config{}, discardLogger()).Handler)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/debug/vars")
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /debug/vars status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /debug/vars body: %v", err)
+	}
+	for _, key := range []string{"cmdline", "memstats"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("/debug/vars response is missing expected key %q", key)
+		}
 	}
 }

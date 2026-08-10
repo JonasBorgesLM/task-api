@@ -79,8 +79,9 @@ paths:
                 updated_at: "2026-08-08T12:00:00Z"
         '400':
           description: >
-            Malformed JSON body, or a missing/empty/whitespace-only
-            `title`.
+            Malformed JSON body; a missing, empty, or whitespace-only
+            `title`; or a `title`/`description` longer than 200/2000
+            characters (after trimming).
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -121,17 +122,36 @@ paths:
     get:
       tags: [Tasks]
       operationId: listTasks
-      summary: List all tasks
+      summary: List tasks
       description: >
-        Returns every stored task. There is no pagination, filtering or
-        sorting — the API returns the full set in whatever order the
-        underlying map iteration yields (unordered, and not guaranteed
-        stable across calls). Returns an empty JSON array, never `null`,
-        when no tasks exist.
+        Returns stored tasks ordered by `created_at` ascending (oldest
+        first; ties broken by `id`) — the Service sorts explicitly rather
+        than relying on the underlying map's iteration order. `limit` and
+        `offset` are optional; omitting both returns every task. Returns an
+        empty JSON array, never `null`, when no tasks exist or when
+        `offset` is past the end of the list.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of tasks to return.
+          schema:
+            type: integer
+            minimum: 0
+          example: 20
+        - name: offset
+          in: query
+          required: false
+          description: Number of tasks to skip before collecting `limit` results.
+          schema:
+            type: integer
+            minimum: 0
+          example: 0
       responses:
         '200':
           description: >
-            Success. The array is empty (`[]`) if no tasks exist.
+            Success. The array is empty (`[]`) if no tasks exist, or if
+            `offset` is past the end of the list.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -154,6 +174,17 @@ paths:
                 empty:
                   summary: No tasks exist
                   value: []
+        '400':
+          description: '`limit` or `offset` is present but not a non-negative integer.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "invalid input: limit must be a non-negative integer"
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -230,8 +261,9 @@ paths:
                 updated_at: "2026-08-08T12:05:00Z"
         '400':
           description: >
-            Malformed JSON body, or a missing/empty/whitespace-only
-            `title`.
+            Malformed JSON body; a missing, empty, or whitespace-only
+            `title`; or a `title`/`description` longer than 200/2000
+            characters (after trimming).
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -250,6 +282,20 @@ paths:
                     error: "invalid input: title must not be empty"
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: >
+            Optimistic concurrency conflict: another request updated this
+            task between when this request's caller last read it and this
+            write. The caller should re-fetch the task and retry.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: task was modified concurrently, please retry
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -309,6 +355,22 @@ paths:
                 updated_at: "2026-08-08T12:05:00Z"
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: >
+            Optimistic concurrency conflict: another request updated this
+            task between when this request's caller last read it and this
+            write. Never returned when the task was already `done` — that
+            path is idempotent and never writes. The caller should
+            re-fetch the task and retry.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: task was modified concurrently, please retry
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -396,17 +458,23 @@ components:
       description: >
         Accepted body for POST /tasks. Any additional field beyond
         `title`/`description` is silently ignored by the server rather
-        than rejected.
+        than rejected. Both fields are trimmed of leading/trailing
+        whitespace before being stored (length limits below are checked
+        after trimming).
       properties:
         title:
           type: string
+          maxLength: 200
           description: >
             Required. Rejected with 400 if empty or made of only
-            whitespace after trimming.
+            whitespace after trimming, or if longer than 200 characters.
           example: Buy groceries
         description:
           type: string
-          description: Optional. Defaults to an empty string if omitted.
+          maxLength: 2000
+          description: >
+            Optional. Defaults to an empty string if omitted. Rejected
+            with 400 if longer than 2000 characters.
           example: Milk, eggs, bread
       required:
         - title
@@ -420,13 +488,17 @@ components:
       properties:
         title:
           type: string
+          maxLength: 200
           description: >
             Required. Rejected with 400 if empty or made of only
-            whitespace after trimming.
+            whitespace after trimming, or if longer than 200 characters.
           example: Buy groceries and cook dinner
         description:
           type: string
-          description: Optional. Defaults to an empty string if omitted.
+          maxLength: 2000
+          description: >
+            Optional. Defaults to an empty string if omitted. Rejected
+            with 400 if longer than 2000 characters.
           example: Don't forget olive oil
       required:
         - title

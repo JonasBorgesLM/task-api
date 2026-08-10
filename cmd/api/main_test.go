@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -16,6 +19,66 @@ import (
 // discardLogger returns a logger that silently discards all output.
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// syncBuffer is a concurrency-safe io.Writer / fmt.Stringer, used to
+// capture run()'s log output from tests: run() logs from its own
+// goroutine (the one running srv.ListenAndServe/logger.Info("server
+// started", ...)) while the test concurrently polls the buffer, and a bare
+// bytes.Buffer is not safe for that.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// waitForLogLine polls buf (up to a generous timeout) until it contains
+// substr. Used to deterministically know that run()'s server goroutine has
+// reached a given point (e.g. logged "server started") without hardcoding
+// an arbitrary sleep duration and racing it against the goroutine.
+func waitForLogLine(t *testing.T, buf *syncBuffer, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), substr) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for a log line containing %q; got: %q", substr, buf.String())
+}
+
+// freeAddr returns a "127.0.0.1:<port>" address for a port that is free at
+// the moment this function returns. config.Load rejects HTTP_ADDR=":0"
+// (port 0 is explicitly out of the valid 1–65535 range — see
+// config.validateAddr), so run() can never be told to bind an
+// OS-assigned port directly; this grab-and-release is the standard
+// workaround for tests that need a real, otherwise-arbitrary port. There
+// is an inherent, unavoidable TOCTOU race (another process could take the
+// port between Close and run()'s own Listen), but it's negligible for a
+// local test run.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to find a free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("failed to close probe listener: %v", err)
+	}
+	return addr
 }
 
 // startTestServer starts a real HTTP server on a random port and returns the
@@ -183,5 +246,125 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 	if body["status"] != "ok" {
 		t.Errorf("GET /health body status = %q, want %q", body["status"], "ok")
+	}
+}
+
+// --- run() ---
+//
+// Unlike the tests above (which exercise individual pieces run() is built
+// from — registerHealthRoute, http.Server.Shutdown semantics), these call
+// run() itself: the same function main() calls, with the same config
+// loading, dependency wiring (via newServer) and signal-driven shutdown
+// path. This closes the gap where a regression inside run() itself (e.g.
+// the wrong shutdown order, or config.Load never actually being called)
+// could go undetected even though its constituent pieces are each well
+// tested in isolation.
+
+// TestRun_GracefulShutdownOnContextCancel verifies that run(), driven by a
+// context cancellation exactly as main() drives it from a SIGINT/SIGTERM,
+// starts the server, shuts it down cleanly and returns nil.
+func TestRun_GracefulShutdownOnContextCancel(t *testing.T) {
+	t.Setenv("HTTP_ADDR", freeAddr(t))
+	t.Setenv("HTTP_SHUTDOWN_TIMEOUT", "5s")
+
+	out := &syncBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- run(ctx, out) }()
+
+	waitForLogLine(t, out, "server started")
+
+	cancel()
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Errorf("run() error = %v, want nil after a clean, signal-driven shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() did not return within 5s of ctx cancellation")
+	}
+
+	if !strings.Contains(out.String(), "shutdown completed") {
+		t.Errorf(`expected a "shutdown completed" log line, got: %s`, out.String())
+	}
+}
+
+// TestRun_InvalidConfig_ReturnsError verifies that run() surfaces a
+// config.Load failure as an error instead of e.g. panicking or silently
+// falling back to defaults.
+func TestRun_InvalidConfig_ReturnsError(t *testing.T) {
+	t.Setenv("HTTP_ADDR", "not-a-valid-address")
+
+	if err := run(context.Background(), io.Discard); err == nil {
+		t.Error("run() with an invalid HTTP_ADDR: expected an error, got nil")
+	}
+}
+
+// TestRun_AddrAlreadyInUse_ReturnsError verifies that run() surfaces
+// ListenAndServe failing on its own (e.g. the port is already bound by
+// another process) as an error, via the `case err := <-serverErr` branch
+// — distinct from the signal-driven shutdown path exercised by
+// TestRun_GracefulShutdownOnContextCancel.
+func TestRun_AddrAlreadyInUse_ReturnsError(t *testing.T) {
+	addr := freeAddr(t)
+
+	// Occupy the port for the whole test so run()'s own ListenAndServe
+	// fails on it.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("failed to occupy %s: %v", addr, err)
+	}
+	defer ln.Close()
+
+	t.Setenv("HTTP_ADDR", addr)
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- run(context.Background(), io.Discard) }()
+
+	select {
+	case err := <-runErr:
+		if err == nil {
+			t.Error("run() with an already-occupied HTTP_ADDR: expected an error, got nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() did not return within 5s for an already-occupied HTTP_ADDR")
+	}
+}
+
+// TestRun_UsesConfiguredLogLevel verifies that LOG_LEVEL actually reaches
+// the logger run() builds and uses for the server: setting it to "error"
+// must suppress the Info-level "server started" line.
+func TestRun_UsesConfiguredLogLevel(t *testing.T) {
+	t.Setenv("HTTP_ADDR", freeAddr(t))
+	t.Setenv("LOG_LEVEL", "error")
+
+	out := &syncBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- run(ctx, out) }()
+
+	// LOG_LEVEL=error suppresses the one Info-level line
+	// (waitForLogLine's usual synchronization signal in the test above),
+	// so there is nothing to poll for here. A short fixed wait is used
+	// instead, purely to give the server goroutine a chance to run before
+	// cancellation — correctness doesn't depend on its exact duration,
+	// only on it being enough for a goroutine switch on a local listener.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Errorf("run() error = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() did not return within 5s of ctx cancellation")
+	}
+
+	if strings.Contains(out.String(), "server started") {
+		t.Error(`LOG_LEVEL=error must suppress the Info-level "server started" log line`)
 	}
 }

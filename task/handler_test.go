@@ -266,6 +266,80 @@ func TestListTasks_Handler_EmptyIsArray(t *testing.T) {
 	}
 }
 
+func TestListTasks_Handler_Pagination(t *testing.T) {
+	all := []Task{
+		{ID: "1"}, {ID: "2"}, {ID: "3"}, {ID: "4"}, {ID: "5"},
+	}
+	svc := &fakeService{
+		listTasksFn: func() ([]Task, error) { return all, nil },
+	}
+	h := newHandlerWithFake(svc)
+
+	cases := []struct {
+		name    string
+		query   string
+		wantIDs []string
+	}{
+		{"no params returns everything", "", []string{"1", "2", "3", "4", "5"}},
+		{"limit only", "?limit=2", []string{"1", "2"}},
+		{"offset only", "?offset=3", []string{"4", "5"}},
+		{"limit and offset", "?limit=2&offset=1", []string{"2", "3"}},
+		{"limit beyond end", "?limit=100", []string{"1", "2", "3", "4", "5"}},
+		{"offset beyond end", "?offset=100", []string{}},
+		{"limit zero", "?limit=0", []string{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := do(t, h.listTasks, http.MethodGet, "/tasks"+tc.query, "")
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+			}
+
+			var got []Task
+			decodeBody(t, w, &got)
+
+			gotIDs := make([]string, len(got))
+			for i, task := range got {
+				gotIDs[i] = task.ID
+			}
+			if len(gotIDs) != len(tc.wantIDs) {
+				t.Fatalf("IDs = %v, want %v", gotIDs, tc.wantIDs)
+			}
+			for i := range tc.wantIDs {
+				if gotIDs[i] != tc.wantIDs[i] {
+					t.Errorf("IDs = %v, want %v", gotIDs, tc.wantIDs)
+				}
+			}
+		})
+	}
+}
+
+func TestListTasks_Handler_InvalidPaginationParams(t *testing.T) {
+	svc := &fakeService{
+		listTasksFn: func() ([]Task, error) { return []Task{{ID: "1"}}, nil },
+	}
+	h := newHandlerWithFake(svc)
+
+	cases := []string{
+		"?limit=not-a-number",
+		"?limit=-1",
+		"?offset=not-a-number",
+		"?offset=-1",
+	}
+
+	for _, query := range cases {
+		t.Run(query, func(t *testing.T) {
+			w := do(t, h.listTasks, http.MethodGet, "/tasks"+query, "")
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
 // --- GET /tasks/{id} ---
 
 func TestGetTask_Handler_Found(t *testing.T) {

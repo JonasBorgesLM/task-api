@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 
 	"github.com/JonasBorgesLM/task-api/middleware"
 )
@@ -78,13 +81,30 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, r, http.StatusCreated, task)
 }
 
-// listTasks handles GET /tasks.
+// listTasks handles GET /tasks. It accepts two optional query parameters,
+// applied after Service.ListTasks' deterministic ordering (oldest first):
+//
+//   - limit: maximum number of tasks to return.
+//   - offset: number of tasks to skip before collecting up to limit.
+//
+// Both default to "return everything" when absent, so existing callers
+// that never pass them see no change in behavior — this establishes a
+// pagination contract for GET /tasks without altering today's default
+// response shape (still a bare JSON array, not an envelope).
 func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
+	limit, offset, err := parsePagination(r.URL.Query())
+	if err != nil {
+		h.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	tasks, err := h.svc.ListTasks(r.Context())
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return
 	}
+
+	tasks = paginate(tasks, limit, offset)
 
 	// Ensure an empty list serialises as [] and never as null.
 	if tasks == nil {
@@ -92,6 +112,49 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, r, http.StatusOK, tasks)
+}
+
+// parsePagination reads the optional "limit" and "offset" query
+// parameters. A missing limit is reported as -1 (paginate's "no limit"
+// sentinel); a missing offset defaults to 0. Both, when present, must
+// parse as non-negative integers.
+func parsePagination(query url.Values) (limit, offset int, err error) {
+	limit = -1
+
+	if raw := query.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 0 {
+			return 0, 0, fmt.Errorf("%w: limit must be a non-negative integer", ErrInvalidInput)
+		}
+	}
+
+	if raw := query.Get("offset"); raw != "" {
+		offset, err = strconv.Atoi(raw)
+		if err != nil || offset < 0 {
+			return 0, 0, fmt.Errorf("%w: offset must be a non-negative integer", ErrInvalidInput)
+		}
+	}
+
+	return limit, offset, nil
+}
+
+// paginate returns the slice of tasks starting at offset and containing at
+// most limit elements. limit < 0 means "no limit" (return everything from
+// offset onward). offset or limit values beyond the end of tasks yield an
+// empty (non-nil semantics preserved by the caller) result rather than an
+// error — pagination parameters describing a page past the end of the data
+// is a normal, not exceptional, outcome.
+func paginate(tasks []Task, limit, offset int) []Task {
+	if offset >= len(tasks) {
+		return []Task{}
+	}
+	tasks = tasks[offset:]
+
+	if limit >= 0 && limit < len(tasks) {
+		tasks = tasks[:limit]
+	}
+
+	return tasks
 }
 
 // getTask handles GET /tasks/{id}.
@@ -175,6 +238,8 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, r *http.Request, err
 		h.writeError(w, r, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrAlreadyExists):
 		h.writeError(w, r, http.StatusConflict, "task already exists")
+	case errors.Is(err, ErrConflict):
+		h.writeError(w, r, http.StatusConflict, "task was modified concurrently, please retry")
 	default:
 		requestID, _ := middleware.RequestIDFromContext(r.Context())
 		h.logger.Error("unexpected service error",

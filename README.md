@@ -33,7 +33,7 @@ HTTP Request
 
 ## Requirements
 
-- Go 1.22 or later (uses `http.ServeMux` path parameters and `log/slog`)
+- Go 1.26 or later, matching the version pinned in `go.mod` (the codebase and its tests use `http.ServeMux` path parameters, `log/slog`, range-over-int, and `sync.WaitGroup.Go`)
 - No external dependencies — standard library only
 
 ## Getting Started
@@ -55,7 +55,7 @@ cp .env.example .env
 
 `.env` is read automatically on startup (see [Configuration](#configuration) below). It is listed in `.gitignore` and must **never** be committed — `.env.example` is the only env file that belongs in version control, and it must only ever contain non-sensitive placeholder values.
 
-If you don't create a `.env` file, the application falls back to its built-in defaults (`HTTP_ADDR=:8080`, 5s/10s/60s read/write/idle timeouts, `HTTP_SHUTDOWN_TIMEOUT=10s`).
+If you don't create a `.env` file, the application falls back to its built-in defaults (`HTTP_ADDR=:8080`, 5s/10s/60s read/write/idle timeouts, `HTTP_SHUTDOWN_TIMEOUT=10s`, `LOG_LEVEL=info`).
 
 ### Run
 
@@ -107,11 +107,14 @@ On startup, the application loads `.env` from the working directory (if present)
 | `HTTP_WRITE_TIMEOUT` | `http.Server.WriteTimeout` | `10s` | `HTTP_WRITE_TIMEOUT=15s` |
 | `HTTP_IDLE_TIMEOUT` | `http.Server.IdleTimeout` | `60s` | `HTTP_IDLE_TIMEOUT=120s` |
 | `HTTP_SHUTDOWN_TIMEOUT` | Maximum time to wait for in-flight requests during shutdown | `10s` | `HTTP_SHUTDOWN_TIMEOUT=30s` |
+| `LOG_LEVEL` | Minimum log level: `debug`, `info`, `warn`, or `error` | `info` | `LOG_LEVEL=debug` |
+| `DOTENV_PATH` | Path to the `.env` file `Load` reads before the OS environment | `.env` | `DOTENV_PATH=/etc/task-api/.env` |
 
 **Validation rules:**
 
 - `HTTP_ADDR` must be a syntactically valid `host:port` address (per `net.SplitHostPort`) with a numeric port between 1 and 65535. Port 0 is rejected.
 - All `HTTP_*_TIMEOUT` variables must be a valid Go duration string (e.g. `10s`, `1m`, `500ms`) and must be strictly positive.
+- `LOG_LEVEL` is case-insensitive and must be one of `debug`, `info`, `warn`/`warning`, or `error`.
 
 ## API
 
@@ -134,8 +137,10 @@ Creates a new task.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `title` | string | yes | Task title. Cannot be empty or whitespace-only. |
-| `description` | string | no | Optional task description. |
+| `title` | string | yes | Task title. Cannot be empty or whitespace-only after trimming; at most 200 characters. |
+| `description` | string | no | Optional task description; at most 2000 characters. |
+
+Both fields are trimmed of leading/trailing whitespace before being stored.
 
 **Response** `201 Created`
 
@@ -163,7 +168,14 @@ Creates a new task.
 
 ### `GET /tasks`
 
-Returns all tasks. Returns an empty array when no tasks exist.
+Returns tasks ordered by `created_at` ascending (oldest first, ties broken by `id`). Returns an empty array when no tasks exist.
+
+**Query parameters** (both optional; omitting both returns everything, unchanged from before pagination existed)
+
+| Parameter | Type | Description |
+|---|---|---|
+| `limit` | integer ≥ 0 | Maximum number of tasks to return. |
+| `offset` | integer ≥ 0 | Number of tasks to skip before collecting `limit` results. |
 
 **Response** `200 OK`
 
@@ -184,7 +196,8 @@ Returns all tasks. Returns an empty array when no tasks exist.
 
 | Code | Reason |
 |---|---|
-| `200` | Success (empty array `[]` if no tasks exist) |
+| `200` | Success (empty array `[]` if no tasks exist, or if `offset` is past the end of the list) |
+| `400` | `limit` or `offset` is present but not a non-negative integer |
 | `500` | Unexpected server error |
 
 ---
@@ -229,6 +242,8 @@ Updates the title and description of an existing task. `CreatedAt`, `Status`, an
 }
 ```
 
+Same field constraints as `POST /tasks` (see above): `title` required, at most 200 characters; `description` optional, at most 2000 characters; both trimmed before being stored.
+
 **Response** `200 OK` — the updated task.
 
 **HTTP status codes**
@@ -236,8 +251,9 @@ Updates the title and description of an existing task. `CreatedAt`, `Status`, an
 | Code | Reason |
 |---|---|
 | `200` | Task updated |
-| `400` | Missing or empty title, or malformed JSON |
+| `400` | Missing/empty/overlong title, overlong description, or malformed JSON |
 | `404` | No task with the given ID |
+| `409` | The task was modified by another request between your read and this write (optimistic concurrency conflict) — re-fetch the task and retry |
 | `500` | Unexpected server error |
 
 ---
@@ -267,6 +283,7 @@ No request body required.
 |---|---|
 | `200` | Task marked as done (or was already done) |
 | `404` | No task with the given ID |
+| `409` | The task was modified by another request between your read and this write (optimistic concurrency conflict) — re-fetch the task and retry. Never returned for a task that was already `done`, since that path never writes. |
 | `500` | Unexpected server error |
 
 ---
@@ -305,6 +322,12 @@ Returns the application health status. Always responds `200 OK` while the server
 |---|---|
 | `200` | Application is healthy |
 
+---
+
+### `GET /debug/vars`
+
+Standard library `expvar` endpoint: exposes baseline runtime observability (command line, memory stats, GC stats, goroutine-related counters) as JSON. Not part of the Task domain API — provided for basic operational visibility without pulling in an external metrics dependency.
+
 ## Error Handling
 
 All error responses use the same JSON envelope:
@@ -317,9 +340,9 @@ All error responses use the same JSON envelope:
 
 | HTTP Code | Meaning |
 |---|---|
-| `400 Bad Request` | Invalid input — malformed JSON or failed business rule validation (e.g. empty title). The error message describes the specific problem. |
+| `400 Bad Request` | Invalid input — malformed JSON, failed business rule validation (e.g. empty or overlong title), or an invalid `limit`/`offset` on `GET /tasks`. The error message describes the specific problem. |
 | `404 Not Found` | The requested task ID does not exist. |
-| `409 Conflict` | A task with the generated ID already exists. Practically unreachable in normal operation, since IDs are server-generated UUIDv4. |
+| `409 Conflict` | Either a task with the generated ID already exists on `POST /tasks` (practically unreachable, since IDs are server-generated UUIDv4), or `PUT /tasks/{id}` / `PATCH /tasks/{id}/done` lost an optimistic concurrency race against another concurrent write to the same task — re-fetch and retry. |
 | `500 Internal Server Error` | An unexpected server-side failure. The response body contains a generic message; details are logged server-side and never exposed to the client. |
 
 ## Development
@@ -365,12 +388,13 @@ task-api/
 │   └── config_test.go
 └── task/
     ├── task.go           # Domain model: Task struct and Status type
-    ├── repository.go     # Repository interface and ErrNotFound
-    ├── memory_repository.go      # In-memory implementation of Repository
+    ├── errors.go         # Domain error sentinels (ErrNotFound, ErrInvalidInput, ErrAlreadyExists, ErrConflict)
+    ├── repository.go     # Repository interface
+    ├── memory_repository.go      # In-memory implementation of Repository (with CAS-based optimistic concurrency)
     ├── memory_repository_test.go
-    ├── service.go        # Business logic: validation, ID generation, timestamps
+    ├── service.go        # Business logic: validation, ID generation, timestamps, ordering
     ├── service_test.go
-    ├── handler.go        # HTTP handlers and route registration
+    ├── handler.go        # HTTP handlers, route registration, pagination
     └── handler_test.go
 ```
 
@@ -395,7 +419,7 @@ Calling `PATCH /tasks/{id}/done` on a task that is already `done` returns the cu
 The in-memory store uses `sync.RWMutex`. Multiple concurrent reads are allowed; writes are exclusive. All methods are safe to call from concurrent goroutines.
 
 **Domain errors are translated at the Handler layer**
-`ErrNotFound` becomes HTTP 404. `ErrInvalidInput` becomes HTTP 400 with the original message. `ErrAlreadyExists` becomes HTTP 409 (practically unreachable, since IDs are server-generated UUIDv4). All other errors become HTTP 500 with a generic message, and the original error is logged server-side.
+`ErrNotFound` becomes HTTP 404. `ErrInvalidInput` becomes HTTP 400 with the original message. `ErrAlreadyExists` becomes HTTP 409 (practically unreachable, since IDs are server-generated UUIDv4). `ErrConflict` also becomes HTTP 409 (an optimistic concurrency conflict — see below). All other errors become HTTP 500 with a generic message, and the original error is logged server-side.
 
 **Structured logging with `log/slog`**
 The application uses `log/slog` (Go standard library) with a JSON handler. The logger is created in `cmd/api/main.go` and injected into the `Handler`. No global mutable logger exists.
@@ -406,8 +430,11 @@ Every `Repository` and `Service` method takes `ctx context.Context` as its first
 **Request bodies are capped at 1 MiB**
 `POST /tasks` and `PUT /tasks/{id}` wrap the request body in `http.MaxBytesReader` before decoding JSON, so an oversized payload is rejected instead of being fully buffered into memory.
 
-**No optimistic concurrency control on updates**
-`UpdateTask` and `CompleteTask` perform a read-modify-write against the `Repository` (`FindByID` then `Update`) with no version check. Two concurrent requests updating the same task ID can race: both read the same starting state, and whichever `Update` call completes last silently overwrites the other's changes (a "lost update"). This is a known, accepted limitation for the current single-writer-per-task usage pattern — closing it would require a version field on `Task` and a conditional (compare-and-swap) `Update` in `Repository`.
+**Optimistic concurrency control on updates**
+`Task` carries an internal `Version` field (`json:"-"`, never exposed on the wire). `UpdateTask` and `CompleteTask` perform a read-modify-write against the `Repository` (`FindByID` then `Update`), passing back the `Version` they read. `memoryRepository.Update` rejects the write with `ErrConflict` (surfaced as HTTP `409`) if the stored `Version` no longer matches — i.e. another writer updated the task in between — instead of silently overwriting it (a "lost update"). `Create` always resets `Version` to `1` regardless of what the caller supplies, and a successful `Update` increments it. Callers that receive a `409` should re-fetch the task and retry.
+
+**`GET /tasks` ordering is deterministic**
+`memoryRepository.FindAll` iterates a Go map, whose iteration order is randomized. `Service.ListTasks` sorts the result by `CreatedAt` ascending (ties broken by `ID`) before returning it, so callers — including paginated ones — see a stable order across requests rather than depending on map iteration.
 
 ## Graceful Shutdown
 
@@ -426,10 +453,8 @@ The following are possible improvements not yet implemented:
 
 - **Persistent storage** — replace `MemoryRepository` with a SQL or NoSQL database implementation
 - **Authentication and authorization** — protect endpoints with JWT or API key middleware
-- **Request ID middleware** — attach a unique ID to each request for log correlation
-- **Metrics** — expose Prometheus metrics (request count, latency, error rate)
+- **Application-level metrics** — `GET /debug/vars` exposes baseline Go runtime stats via `expvar`; a richer metrics surface (request count/latency/error-rate per route) would still need dedicated instrumentation, e.g. Prometheus
 - **Distributed tracing** — integrate OpenTelemetry for end-to-end request tracing
-- **Pagination** — add `limit` and `offset` parameters to `GET /tasks`
 - **Task filtering** — filter tasks by status in `GET /tasks`
 - **Docker** — add `Dockerfile` and `docker-compose.yml` for containerized development
 - **CI/CD** — add GitHub Actions workflow for automated testing and building
