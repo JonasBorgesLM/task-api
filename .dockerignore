@@ -1,0 +1,42 @@
+# Version control and CI/tooling metadata — irrelevant to the build and
+# no reason to ship it into the build context.
+.git
+.github
+.claude
+
+# Env files may contain local secrets and must never be sent to the
+# Docker daemon or baked into an image layer. Configuration is supplied
+# at `docker run` time via -e/--env-file instead (see Dockerfile).
+.env
+.env.*
+!.env.example
+
+# Build artifacts / local test output — never inputs to the build.
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+task-api
+
+# Go workspace files — local dev only, not part of the module build.
+go.work
+go.work.sum
+
+# Docker metadata itself.
+Dockerfile
+.dockerignore
+
+# Editor/IDE.
+.vscode
+.idea
+
+# Documentation — not needed inside the build context.
+*.md
+docs
+LICENSE

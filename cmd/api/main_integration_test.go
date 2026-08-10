@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,13 +13,35 @@ import (
 	"github.com/JonasBorgesLM/task-api/task"
 )
 
+// newTestServer builds the same *http.Server newServer builds in
+// production, failing the test immediately if wiring fails (it shouldn't,
+// for the zero-value config.Config{} every caller here passes — that
+// config has no DatabaseURL, so it always resolves to the in-memory
+// Repository) and registering the returned close function via
+// t.Cleanup so tests never need to remember it themselves.
+func newTestServer(t *testing.T, cfg config.Config, logger *slog.Logger) *http.Server {
+	t.Helper()
+
+	srv, closeRepo, err := newServer(cfg, logger)
+	if err != nil {
+		t.Fatalf("newServer() unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := closeRepo(); err != nil {
+			t.Errorf("closeRepo() unexpected error: %v", err)
+		}
+	})
+
+	return srv
+}
+
 // TestIntegration_TaskLifecycle drives newServer's wiring — the same
 // composition run() uses — through a full create/read/update/complete/
 // delete cycle over a real HTTP server. This is the only test that
 // exercises the actual dependency wiring end to end; every other test in
 // this repository talks to a fake Repository or Service.
 func TestIntegration_TaskLifecycle(t *testing.T) {
-	srv := httptest.NewServer(newServer(config.Config{}, discardLogger()).Handler)
+	srv := httptest.NewServer(newTestServer(t, config.Config{}, discardLogger()).Handler)
 	defer srv.Close()
 
 	client := srv.Client()
@@ -154,7 +177,7 @@ func TestIntegration_TaskLifecycle(t *testing.T) {
 // Service's validation rule is reachable through the real Handler, over a
 // real HTTP request.
 func TestIntegration_CreateTask_EmptyTitle_Returns400(t *testing.T) {
-	srv := httptest.NewServer(newServer(config.Config{}, discardLogger()).Handler)
+	srv := httptest.NewServer(newTestServer(t, config.Config{}, discardLogger()).Handler)
 	defer srv.Close()
 
 	resp, err := srv.Client().Post(srv.URL+"/tasks", "application/json", strings.NewReader(`{"title":""}`))
@@ -174,7 +197,7 @@ func TestIntegration_CreateTask_EmptyTitle_Returns400(t *testing.T) {
 // changing newServer and forgetting to keep the middleware chain wired to
 // the server.
 func TestIntegration_MiddlewareWired(t *testing.T) {
-	srv := httptest.NewServer(newServer(config.Config{}, discardLogger()).Handler)
+	srv := httptest.NewServer(newTestServer(t, config.Config{}, discardLogger()).Handler)
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/tasks")
@@ -193,7 +216,7 @@ func TestIntegration_MiddlewareWired(t *testing.T) {
 // observability (goroutine count, memstats, GC stats) without pulling in
 // an external metrics dependency.
 func TestIntegration_DebugVars(t *testing.T) {
-	srv := httptest.NewServer(newServer(config.Config{}, discardLogger()).Handler)
+	srv := httptest.NewServer(newTestServer(t, config.Config{}, discardLogger()).Handler)
 	defer srv.Close()
 
 	resp, err := srv.Client().Get(srv.URL + "/debug/vars")

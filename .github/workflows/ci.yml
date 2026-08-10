@@ -15,6 +15,28 @@ jobs:
     name: Quality Gate
     runs-on: ubuntu-latest
 
+    # Backs postgresRepository's integration tests
+    # (task/postgres_repository_test.go, built only with -tags=integration
+    # — see the "Test (integration)" step below). Without this service and
+    # that step, those tests would never actually run in CI at all.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: task_api
+          POSTGRES_PASSWORD: task_api
+          POSTGRES_DB: task_api
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U task_api -d task_api"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,11 +69,38 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Test
+      # The default `go vet ./...` above never even compiles
+      # postgres_repository_test.go (the "integration" build tag excludes
+      # it), so it's vetted separately here.
+      - name: Vet (integration)
+        run: go vet -tags=integration ./task/...
+
+      # staticcheck, not golangci-lint: see README's Future Improvements —
+      # the golangci-lint build available at the time of writing predates
+      # the Go version pinned in go.mod and cannot type-check it.
+      - name: Lint (staticcheck)
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+          staticcheck -tags=integration ./task/...
+
+      # Unit tests: memoryRepository, Service, Handler, config, middleware,
+      # server lifecycle — everything that needs no external service.
+      # postgresRepository's tests are excluded entirely (the "integration"
+      # build tag means this package isn't even compiled here).
+      - name: Test (unit)
         run: go test ./...
 
-      - name: Test (race detector)
+      - name: Test (unit, race detector)
         run: go test -race ./...
 
-      - name: Test (coverage)
+      - name: Test (unit, coverage)
         run: go test -cover ./...
+
+      # Integration tests: postgresRepository against the real postgres
+      # service container declared above.
+      - name: Test (integration)
+        run: go test -tags=integration ./task/... -run Postgres -v
+
+      - name: Test (integration, race detector)
+        run: go test -tags=integration -race ./task/... -run Postgres

@@ -15,6 +15,16 @@
 //	DOTENV_PATH             Path to the .env file Load reads before the OS
 //	                        environment (default: ".env", relative to the
 //	                        process's current working directory)
+//	DATABASE_URL            PostgreSQL connection string (e.g.
+//	                        postgres://user:pass@host:5432/dbname?sslmode=disable).
+//	                        When unset, the application falls back to an
+//	                        in-memory task store (default: unset)
+//	DB_MAX_OPEN_CONNS       Maximum open connections in the database pool (default: 25)
+//	DB_MAX_IDLE_CONNS       Maximum idle connections kept in the database pool (default: 25)
+//	DB_CONN_MAX_LIFETIME    Maximum lifetime of a pooled database connection,
+//	                        as a Go duration string (default: 5m)
+//	DB_AUTO_MIGRATE         Whether to apply pending PostgreSQL migrations on
+//	                        startup: true or false (default: true)
 package config
 
 import (
@@ -35,6 +45,10 @@ const (
 	defaultShutdownTimeout = 10 * time.Second
 	defaultLogLevel        = slog.LevelInfo
 	defaultDotenvPath      = ".env"
+	defaultDBMaxOpenConns  = 25
+	defaultDBMaxIdleConns  = 25
+	defaultDBConnMaxLife   = 5 * time.Minute
+	defaultDBAutoMigrate   = true
 )
 
 // Config holds all application configuration values. It is independent of
@@ -60,6 +74,33 @@ type Config struct {
 
 	// LogLevel is the minimum slog.Level the application logs at.
 	LogLevel slog.Level
+
+	// DatabaseURL is a PostgreSQL connection string. When empty (the
+	// zero value), the application uses an in-memory task store instead
+	// of PostgreSQL — this is what every test that builds a
+	// config.Config{} without setting it relies on.
+	DatabaseURL string
+
+	// DBMaxOpenConns is the maximum number of open connections in the
+	// PostgreSQL connection pool (sql.DB.SetMaxOpenConns). Unused when
+	// DatabaseURL is empty.
+	DBMaxOpenConns int
+
+	// DBMaxIdleConns is the maximum number of idle connections kept in
+	// the PostgreSQL connection pool (sql.DB.SetMaxIdleConns). Unused
+	// when DatabaseURL is empty.
+	DBMaxIdleConns int
+
+	// DBConnMaxLifetime is the maximum lifetime of a pooled PostgreSQL
+	// connection (sql.DB.SetConnMaxLifetime) before it is closed and
+	// replaced, bounding how long a connection can survive a database
+	// failover or load balancer change. Unused when DatabaseURL is empty.
+	DBConnMaxLifetime time.Duration
+
+	// DBAutoMigrate controls whether the application applies pending
+	// PostgreSQL migrations (see task.RunMigrations) on startup. Unused
+	// when DatabaseURL is empty.
+	DBAutoMigrate bool
 }
 
 // Load reads configuration from environment variables and applies defaults
@@ -81,12 +122,16 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Addr:            defaultAddr,
-		ReadTimeout:     defaultReadTimeout,
-		WriteTimeout:    defaultWriteTimeout,
-		IdleTimeout:     defaultIdleTimeout,
-		ShutdownTimeout: defaultShutdownTimeout,
-		LogLevel:        defaultLogLevel,
+		Addr:              defaultAddr,
+		ReadTimeout:       defaultReadTimeout,
+		WriteTimeout:      defaultWriteTimeout,
+		IdleTimeout:       defaultIdleTimeout,
+		ShutdownTimeout:   defaultShutdownTimeout,
+		LogLevel:          defaultLogLevel,
+		DBMaxOpenConns:    defaultDBMaxOpenConns,
+		DBMaxIdleConns:    defaultDBMaxIdleConns,
+		DBConnMaxLifetime: defaultDBConnMaxLife,
+		DBAutoMigrate:     defaultDBAutoMigrate,
 	}
 
 	if raw := os.Getenv("HTTP_ADDR"); raw != "" {
@@ -110,6 +155,26 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.LogLevel, err = parseLogLevel("LOG_LEVEL", defaultLogLevel); err != nil {
+		return Config{}, err
+	}
+
+	// DATABASE_URL is intentionally not format-validated here: connection
+	// strings vary (postgres://..., key=value form, ...) and the
+	// PostgreSQL driver is the authority on what it accepts. An invalid
+	// value surfaces when the application tries to open/ping the
+	// connection at startup, with the driver's own error message.
+	cfg.DatabaseURL = os.Getenv("DATABASE_URL")
+
+	if cfg.DBMaxOpenConns, err = parsePositiveInt("DB_MAX_OPEN_CONNS", defaultDBMaxOpenConns); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBMaxIdleConns, err = parsePositiveInt("DB_MAX_IDLE_CONNS", defaultDBMaxIdleConns); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBConnMaxLifetime, err = parseDuration("DB_CONN_MAX_LIFETIME", defaultDBConnMaxLife); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBAutoMigrate, err = parseBool("DB_AUTO_MIGRATE", defaultDBAutoMigrate); err != nil {
 		return Config{}, err
 	}
 
@@ -154,6 +219,43 @@ func parseDuration(name string, def time.Duration) (time.Duration, error) {
 	}
 
 	return d, nil
+}
+
+// parsePositiveInt reads the environment variable name and parses it as a
+// base-10 integer. If the variable is unset, def is returned unchanged.
+// The parsed value must be strictly positive.
+func parsePositiveInt(name string, def int) (int, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def, nil
+	}
+
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s %q is not a valid integer: %w", name, raw, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("config: %s must be positive, got %q", name, raw)
+	}
+
+	return n, nil
+}
+
+// parseBool reads the environment variable name and parses it with
+// strconv.ParseBool (accepts 1/t/T/TRUE/true/True and 0/f/F/FALSE/false/False).
+// If the variable is unset, def is returned unchanged.
+func parseBool(name string, def bool) (bool, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def, nil
+	}
+
+	b, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("config: %s %q is not a valid boolean: %w", name, raw, err)
+	}
+
+	return b, nil
 }
 
 // parseLogLevel reads the environment variable name and parses it as a
