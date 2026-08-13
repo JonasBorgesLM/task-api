@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/JonasBorgesLM/task-api/task"
 )
 
 // discardLogger returns a logger that silently discards all output.
@@ -246,6 +248,87 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 	if body["status"] != "ok" {
 		t.Errorf("GET /health body status = %q, want %q", body["status"], "ok")
+	}
+}
+
+// --- Readiness check ---
+
+// pingerRepository is a minimal task.Repository that also implements
+// task.Pinger, letting these tests drive registerReadinessRoute's Pinger
+// branch with a controllable error instead of a real PostgreSQL instance.
+type pingerRepository struct {
+	task.Repository
+	pingErr error
+}
+
+func (r *pingerRepository) Ping(context.Context) error { return r.pingErr }
+
+// TestReadinessEndpoint_NonPinger_AlwaysReady verifies that a Repository
+// which doesn't implement task.Pinger (memoryRepository, in production) is
+// always reported ready — there's nothing external for it to check.
+func TestReadinessEndpoint_NonPinger_AlwaysReady(t *testing.T) {
+	mux := http.NewServeMux()
+	registerReadinessRoute(mux, task.NewMemoryRepository(), discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("GET /health/ready status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode readiness response: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Errorf("GET /health/ready body status = %q, want %q", body["status"], "ok")
+	}
+}
+
+// TestReadinessEndpoint_PingerHealthy_ReturnsOK verifies the 200 path when
+// the repository's Ping succeeds.
+func TestReadinessEndpoint_PingerHealthy_ReturnsOK(t *testing.T) {
+	mux := http.NewServeMux()
+	registerReadinessRoute(mux, &pingerRepository{Repository: task.NewMemoryRepository()}, discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("GET /health/ready status = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+// TestReadinessEndpoint_PingerFailing_ReturnsServiceUnavailable verifies
+// that a repository whose Ping fails (e.g. PostgreSQL unreachable) makes
+// GET /health/ready report 503 instead of the always-200 GET /health —
+// this is the whole point of the readiness check: an orchestrator can act
+// on this distinction to stop routing traffic to this replica.
+func TestReadinessEndpoint_PingerFailing_ReturnsServiceUnavailable(t *testing.T) {
+	mux := http.NewServeMux()
+	repo := &pingerRepository{
+		Repository: task.NewMemoryRepository(),
+		pingErr:    errors.New("connection refused"),
+	}
+	registerReadinessRoute(mux, repo, discardLogger())
+
+	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET /health/ready status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode readiness response: %v", err)
+	}
+	if body["status"] != "unavailable" {
+		t.Errorf("GET /health/ready body status = %q, want %q", body["status"], "unavailable")
 	}
 }
 

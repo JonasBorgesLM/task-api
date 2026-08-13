@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Maximum accepted lengths for user-supplied text fields. These bound
@@ -83,22 +83,21 @@ func (s *Service) GetTask(ctx context.Context, id string) (Task, error) {
 	return task, nil
 }
 
-// ListTasks returns all stored tasks, ordered deterministically by
-// CreatedAt (oldest first) and then by ID to break ties. The Repository
-// itself makes no ordering guarantee (memoryRepository iterates a map), so
-// this ordering is applied here rather than relied upon from storage.
-func (s *Service) ListTasks(ctx context.Context) ([]Task, error) {
-	tasks, err := s.repo.FindAll(ctx)
+// ListTasks returns stored tasks ordered deterministically by CreatedAt
+// (oldest first) and then by ID to break ties, optionally windowed to at
+// most limit results starting at offset. limit < 0 means "no limit" —
+// every task from offset onward is returned.
+//
+// The ordering and the limit/offset window are both enforced by
+// Repository.FindAll itself (see its doc comment), not re-derived here:
+// pushing them down to storage means a PostgreSQL-backed Repository can
+// apply ORDER BY/LIMIT/OFFSET in the query instead of fetching every row
+// into the process on every call just to discard most of them.
+func (s *Service) ListTasks(ctx context.Context, limit, offset int) ([]Task, error) {
+	tasks, err := s.repo.FindAll(ctx, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list tasks: %w", err)
 	}
-
-	sort.Slice(tasks, func(i, j int) bool {
-		if !tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
-			return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
-		}
-		return tasks[i].ID < tasks[j].ID
-	})
 
 	return tasks, nil
 }
@@ -173,6 +172,14 @@ func (s *Service) CompleteTask(ctx context.Context, id string) (Task, error) {
 // maxTitleLen characters; description must be at most maxDescriptionLen
 // characters. It returns the trimmed values, or ErrInvalidInput describing
 // which constraint failed.
+//
+// Length is measured in Unicode characters (utf8.RuneCountInString), not
+// bytes: len() on a Go string counts bytes, which for any non-ASCII text
+// (accents, Cyrillic, CJK, emoji, ...) is larger than — and therefore a
+// stricter limit than — the character count the error message and the
+// PostgreSQL VARCHAR(200)/VARCHAR(2000) columns (which count characters,
+// not bytes) actually enforce. Measuring bytes here would reject valid
+// input well under the intended limit.
 func validateTitleAndDescription(title, description string) (string, string, error) {
 	title = strings.TrimSpace(title)
 	description = strings.TrimSpace(description)
@@ -180,10 +187,10 @@ func validateTitleAndDescription(title, description string) (string, string, err
 	if title == "" {
 		return "", "", fmt.Errorf("%w: title must not be empty", ErrInvalidInput)
 	}
-	if len(title) > maxTitleLen {
+	if utf8.RuneCountInString(title) > maxTitleLen {
 		return "", "", fmt.Errorf("%w: title must be at most %d characters", ErrInvalidInput, maxTitleLen)
 	}
-	if len(description) > maxDescriptionLen {
+	if utf8.RuneCountInString(description) > maxDescriptionLen {
 		return "", "", fmt.Errorf("%w: description must be at most %d characters", ErrInvalidInput, maxDescriptionLen)
 	}
 

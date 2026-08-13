@@ -21,13 +21,14 @@ import (
 type fakeService struct {
 	createTaskFn   func(title, description string) (Task, error)
 	getTaskFn      func(id string) (Task, error)
-	listTasksFn    func() ([]Task, error)
+	listTasksFn    func(limit, offset int) ([]Task, error)
 	updateTaskFn   func(id, title, description string) (Task, error)
 	deleteTaskFn   func(id string) error
 	completeTaskFn func(id string) (Task, error)
 
 	// Call recording.
 	createCalledWith   [2]string // [title, description]
+	listCalledWith     [2]int    // [limit, offset]
 	updateCalledWith   [3]string // [id, title, description]
 	completeCalledWith string
 	deleteCalledWith   string
@@ -48,9 +49,10 @@ func (f *fakeService) GetTask(_ context.Context, id string) (Task, error) {
 	return Task{}, nil
 }
 
-func (f *fakeService) ListTasks(_ context.Context) ([]Task, error) {
+func (f *fakeService) ListTasks(_ context.Context, limit, offset int) ([]Task, error) {
+	f.listCalledWith = [2]int{limit, offset}
 	if f.listTasksFn != nil {
-		return f.listTasksFn()
+		return f.listTasksFn(limit, offset)
 	}
 	return []Task{}, nil
 }
@@ -224,7 +226,7 @@ func TestCreateTask_Handler_IgnoresProtectedFields(t *testing.T) {
 func TestListTasks_Handler_ReturnsOK(t *testing.T) {
 	tasks := []Task{sampleTask(), sampleTask()}
 	svc := &fakeService{
-		listTasksFn: func() ([]Task, error) { return tasks, nil },
+		listTasksFn: func(limit, offset int) ([]Task, error) { return tasks, nil },
 	}
 	h := newHandlerWithFake(svc)
 
@@ -243,7 +245,7 @@ func TestListTasks_Handler_ReturnsOK(t *testing.T) {
 
 func TestListTasks_Handler_EmptyIsArray(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func() ([]Task, error) { return nil, nil },
+		listTasksFn: func(limit, offset int) ([]Task, error) { return nil, nil },
 	}
 	h := newHandlerWithFake(svc)
 
@@ -266,27 +268,30 @@ func TestListTasks_Handler_EmptyIsArray(t *testing.T) {
 	}
 }
 
-func TestListTasks_Handler_Pagination(t *testing.T) {
-	all := []Task{
-		{ID: "1"}, {ID: "2"}, {ID: "3"}, {ID: "4"}, {ID: "5"},
-	}
+// TestListTasks_Handler_PassesLimitOffsetToService verifies that Handler
+// parses "limit"/"offset" from the query string and passes them straight
+// through to Service.ListTasks — the actual windowing (which IDs come back
+// for a given limit/offset) now happens inside Repository.FindAll, and is
+// tested there directly: see TestFindAll_Pagination in
+// memory_repository_test.go and TestPostgres_FindAll_Pagination in
+// postgres_repository_test.go.
+func TestListTasks_Handler_PassesLimitOffsetToService(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func() ([]Task, error) { return all, nil },
+		listTasksFn: func(limit, offset int) ([]Task, error) { return []Task{}, nil },
 	}
 	h := newHandlerWithFake(svc)
 
 	cases := []struct {
-		name    string
-		query   string
-		wantIDs []string
+		name       string
+		query      string
+		wantLimit  int
+		wantOffset int
 	}{
-		{"no params returns everything", "", []string{"1", "2", "3", "4", "5"}},
-		{"limit only", "?limit=2", []string{"1", "2"}},
-		{"offset only", "?offset=3", []string{"4", "5"}},
-		{"limit and offset", "?limit=2&offset=1", []string{"2", "3"}},
-		{"limit beyond end", "?limit=100", []string{"1", "2", "3", "4", "5"}},
-		{"offset beyond end", "?offset=100", []string{}},
-		{"limit zero", "?limit=0", []string{}},
+		{"no params means no limit, zero offset", "", -1, 0},
+		{"limit only", "?limit=2", 2, 0},
+		{"offset only", "?offset=3", -1, 3},
+		{"limit and offset", "?limit=2&offset=1", 2, 1},
+		{"limit zero", "?limit=0", 0, 0},
 	}
 
 	for _, tc := range cases {
@@ -297,20 +302,9 @@ func TestListTasks_Handler_Pagination(t *testing.T) {
 				t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
 			}
 
-			var got []Task
-			decodeBody(t, w, &got)
-
-			gotIDs := make([]string, len(got))
-			for i, task := range got {
-				gotIDs[i] = task.ID
-			}
-			if len(gotIDs) != len(tc.wantIDs) {
-				t.Fatalf("IDs = %v, want %v", gotIDs, tc.wantIDs)
-			}
-			for i := range tc.wantIDs {
-				if gotIDs[i] != tc.wantIDs[i] {
-					t.Errorf("IDs = %v, want %v", gotIDs, tc.wantIDs)
-				}
+			want := [2]int{tc.wantLimit, tc.wantOffset}
+			if svc.listCalledWith != want {
+				t.Errorf("ListTasks() called with limit/offset = %v, want %v", svc.listCalledWith, want)
 			}
 		})
 	}
@@ -318,7 +312,7 @@ func TestListTasks_Handler_Pagination(t *testing.T) {
 
 func TestListTasks_Handler_InvalidPaginationParams(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func() ([]Task, error) { return []Task{{ID: "1"}}, nil },
+		listTasksFn: func(limit, offset int) ([]Task, error) { return []Task{{ID: "1"}}, nil },
 	}
 	h := newHandlerWithFake(svc)
 
@@ -682,7 +676,7 @@ func TestLoggingStrategy_NotFound_ProducesOnlyAccessLog(t *testing.T) {
 func TestRegisterRoutes(t *testing.T) {
 	svc := &fakeService{
 		createTaskFn:   func(_, _ string) (Task, error) { return sampleTask(), nil },
-		listTasksFn:    func() ([]Task, error) { return []Task{sampleTask()}, nil },
+		listTasksFn:    func(limit, offset int) ([]Task, error) { return []Task{sampleTask()}, nil },
 		getTaskFn:      func(_ string) (Task, error) { return sampleTask(), nil },
 		updateTaskFn:   func(_, _, _ string) (Task, error) { return sampleTask(), nil },
 		completeTaskFn: func(_ string) (Task, error) { return sampleTask(), nil },

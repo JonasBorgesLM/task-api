@@ -27,6 +27,8 @@ servers:
 tags:
   - name: Tasks
     description: Task lifecycle management (create, read, update, complete, delete)
+  - name: Health
+    description: Liveness and readiness checks, for process supervisors and load balancers
 
 paths:
   /tasks:
@@ -125,11 +127,13 @@ paths:
       summary: List tasks
       description: >
         Returns stored tasks ordered by `created_at` ascending (oldest
-        first; ties broken by `id`) — the Service sorts explicitly rather
-        than relying on the underlying map's iteration order. `limit` and
-        `offset` are optional; omitting both returns every task. Returns an
-        empty JSON array, never `null`, when no tasks exist or when
-        `offset` is past the end of the list.
+        first; ties broken by `id`) — the Repository guarantees this
+        ordering and applies `limit`/`offset` itself (pushed into the SQL
+        query for the PostgreSQL-backed store), rather than the Service
+        fetching everything and paginating in memory. `limit` and `offset`
+        are optional; omitting both returns every task. Returns an empty
+        JSON array, never `null`, when no tasks exist or when `offset` is
+        past the end of the list.
       parameters:
         - name: limit
           in: query
@@ -374,6 +378,57 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Liveness check
+      description: >
+        Always responds 200 while the process is running. Does not check
+        PostgreSQL or any other dependency — use GET /health/ready for
+        that. Intended for a process supervisor / container runtime
+        liveness probe (restart the process if this stops responding).
+      responses:
+        '200':
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+
+  /health/ready:
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      summary: Readiness check
+      description: >
+        Reports whether the backing store is actually reachable, not just
+        whether the process is alive. For the in-memory store (no
+        DATABASE_URL configured) this always reports ready, since there is
+        nothing external to check. For PostgreSQL, it pings the
+        connection pool with a 5s timeout. Intended for a load balancer /
+        Kubernetes readiness probe, so traffic stops routing to a replica
+        whose database connection is broken.
+      responses:
+        '200':
+          description: The backing store is reachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+        '503':
+          description: The backing store is not reachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: unavailable
+
 components:
   parameters:
     TaskID:
@@ -404,6 +459,16 @@ components:
       example: 7a947bb6436a2e5009efcaa55c42cdf8
 
   schemas:
+    HealthResponse:
+      type: object
+      description: Body returned by both GET /health and GET /health/ready.
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+      required:
+        - status
+
     Status:
       type: string
       description: Task lifecycle state. There is no state other than these two.

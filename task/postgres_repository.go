@@ -54,6 +54,16 @@ func NewPostgresRepository(db *sql.DB) Repository {
 	return &postgresRepository{db: db}
 }
 
+// Ping verifies that the underlying PostgreSQL connection pool can reach
+// the database right now, satisfying the Pinger interface. It is used by
+// cmd/api/health.go's readiness endpoint, not by any request path here —
+// postgresRepository's other methods rely on *sql.DB's own connection
+// handling and surface a failure to reach the database as a normal query
+// error instead.
+func (r *postgresRepository) Ping(ctx context.Context) error {
+	return r.db.PingContext(ctx)
+}
+
 // Create persists a new task. Returns ErrAlreadyExists if the ID is
 // already taken. The stored Version always starts at 1, regardless of
 // what the caller set on task.Version — matching memoryRepository's
@@ -102,22 +112,34 @@ func (r *postgresRepository) FindByID(ctx context.Context, id string) (Task, err
 	return task, nil
 }
 
-// FindAll returns every stored task.
+// FindAll returns tasks ordered by (created_at, id) — per Repository's
+// contract — windowed to at most limit results starting at offset.
 //
-// The query is ordered by (created_at, id) — the same tie-break Service
-// applies in ListTasks — purely so it can use idx_tasks_created_at_id to
-// avoid an in-database sort as the table grows. This is a performance
-// choice, not a substitute for Service's ordering: Repository still makes
-// no ordering guarantee callers may rely on, and Service re-sorts the
-// slice it gets back regardless.
-func (r *postgresRepository) FindAll(ctx context.Context) ([]Task, error) {
+// The window is applied in the query itself (LIMIT/OFFSET), not by
+// fetching every row and slicing in Go: for a table with far more rows
+// than any single page, that's the difference between a query that reads
+// (roughly) offset+limit rows and one that reads and transfers the entire
+// table on every call. limit < 0 ("no limit") is passed as SQL NULL, which
+// PostgreSQL's LIMIT clause treats as "no limit" — i.e. LIMIT NULL is
+// equivalent to omitting LIMIT entirely. The ORDER BY lets this use
+// idx_tasks_created_at_id instead of an in-database sort as the table
+// grows.
+func (r *postgresRepository) FindAll(ctx context.Context, limit, offset int) ([]Task, error) {
 	const query = `
 		SELECT id::text, title, description, status, created_at, updated_at, version
 		FROM tasks
 		ORDER BY created_at, id
+		LIMIT $1::bigint OFFSET $2::bigint
 	`
 
-	rows, err := r.db.QueryContext(ctx, query)
+	// limit < 0 ("no limit") must reach the query as SQL NULL, not as a
+	// negative number — PostgreSQL's LIMIT rejects a negative value.
+	var limitArg any
+	if limit >= 0 {
+		limitArg = limit
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, limitArg, offset)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find all tasks: %w", err)
 	}

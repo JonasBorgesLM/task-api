@@ -140,6 +140,7 @@ func newServer(cfg config.Config, logger *slog.Logger) (*http.Server, func() err
 
 	mux := http.NewServeMux()
 	registerHealthRoute(mux, logger)
+	registerReadinessRoute(mux, repo, logger)
 	mux.Handle("GET /debug/vars", expvar.Handler())
 	handler.RegisterRoutes(mux)
 
