@@ -2,7 +2,7 @@
         test test-race test-integration test-integration-race coverage \
         fmt fmt-check vet lint check \
         docker-build docker-up docker-down db-up \
-        migrate-up migrate-down
+        migrate-up migrate-down seed seed-reset
 
 .DEFAULT_GOAL := help
 
@@ -12,6 +12,10 @@
 # to point at a different instance.
 TEST_DATABASE_URL ?= postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable
 DATABASE_URL       ?= $(TEST_DATABASE_URL)
+
+# Number of tasks `make seed` / `make seed-reset` create. Override on the
+# command line, e.g. `make seed SEED_COUNT=200`.
+SEED_COUNT ?= 20
 
 ##@ Help
 
@@ -96,3 +100,9 @@ migrate-up: ## Apply pending PostgreSQL migrations against DATABASE_URL
 
 migrate-down: ## Revert the single most recently applied migration
 	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate -direction=down
+
+seed: ## Populate the database with SEED_COUNT random tasks (override: `make seed SEED_COUNT=200`)
+	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/seed -count=$(SEED_COUNT)
+
+seed-reset: ## Empty the tasks table, then populate it with SEED_COUNT random tasks
+	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/seed -count=$(SEED_COUNT) -reset

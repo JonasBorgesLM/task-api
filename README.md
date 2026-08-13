@@ -13,11 +13,12 @@ A small, production-shaped HTTP REST API for task management, written in Go — 
 7. [Running with Docker](#running-with-docker)
 8. [Testing](#testing)
 9. [Migrations](#migrations)
-10. [API](#api)
-11. [Graceful Shutdown](#graceful-shutdown)
-12. [Observability](#observability)
-13. [Design Decisions](#design-decisions)
-14. [Future Improvements](#future-improvements)
+10. [Seeding](#seeding)
+11. [API](#api)
+12. [Graceful Shutdown](#graceful-shutdown)
+13. [Observability](#observability)
+14. [Design Decisions](#design-decisions)
+15. [Future Improvements](#future-improvements)
 
 ## Overview
 
@@ -57,7 +58,7 @@ HTTP Request
 └────────────────┘   └─────────────────────┘
 ```
 
-`cmd/api/main.go` is the **Composition Root** — the only place that instantiates concrete types and wires them together. `Service` and `Handler` depend only on the `Repository` interface (`task/repository.go`) and are completely unaware PostgreSQL exists; only `cmd/api/main.go` and `cmd/migrate/main.go` import a PostgreSQL package. Swapping `memoryRepository` for `postgresRepository` — or adding a third implementation — requires zero changes to business logic or HTTP handling.
+`cmd/api/main.go` is the **Composition Root** — the only place that instantiates concrete types and wires them together. `Service` and `Handler` depend only on the `Repository` interface (`task/repository.go`) and are completely unaware PostgreSQL exists; only the small standalone binaries in `cmd/` (`api`, `migrate`, `seed`) import a PostgreSQL package. Swapping `memoryRepository` for `postgresRepository` — or adding a third implementation — requires zero changes to business logic or HTTP handling.
 
 ## Project Structure
 
@@ -68,8 +69,11 @@ task-api/
 │   │   ├── main.go                   # Composition Root: wires Repository→Service→Handler, starts the HTTP server
 │   │   ├── health.go                 # GET /health (liveness) and GET /health/ready (readiness)
 │   │   └── *_test.go                 # Server lifecycle + full-stack HTTP tests
-│   └── migrate/
-│       └── main.go                   # Standalone CLI: applies/reverts PostgreSQL migrations
+│   ├── migrate/
+│   │   └── main.go                   # Standalone CLI: applies/reverts PostgreSQL migrations
+│   └── seed/
+│       ├── main.go                   # Standalone CLI: populates the tasks table via the real Service
+│       └── data.go                   # Word lists + randomTask() — the random title/description generator
 ├── config/                # Environment variable loading and validation (the only package that reads os.Getenv)
 ├── middleware/             # RequestID, Logging, Recovery — composed via Chain()
 ├── task/
@@ -205,6 +209,26 @@ make migrate-down       # revert the last applied migration
 ```
 
 Both are safe to re-run: `migrate-up` with nothing pending changes nothing; `migrate-down` with nothing to revert exits cleanly.
+
+## Seeding
+
+`cmd/seed` populates the `tasks` table with randomly generated tasks (varied titles, descriptions, and `pending`/`done` status) for local development and manual testing against a non-trivial dataset. Every task is created through the real `Service.CreateTask`/`CompleteTask` — the same validation, ID generation, and timestamp logic every other write path uses — so seeded data is indistinguishable from data created through the API.
+
+It requires PostgreSQL: seeding the in-memory store would vanish the moment the process exits, with nothing left to have observed it. It applies pending migrations itself before inserting, so it works against a freshly created, empty database with no separate `migrate-up` step.
+
+```bash
+make db-up                    # if not already running
+make seed                      # create 20 random tasks
+make seed SEED_COUNT=200       # create 200
+make seed-reset                # empty the table first, then seed
+```
+
+For direct control over the flags (`-count`, `-done-ratio`, `-reset`):
+
+```bash
+DATABASE_URL="postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable" \
+  go run ./cmd/seed -count=50 -done-ratio=0.5
+```
 
 ## API
 
