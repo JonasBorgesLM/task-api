@@ -21,9 +21,10 @@ type fakeRepository struct {
 	deleteErr    error
 
 	// Call recording.
-	updateCalled bool
-	savedTask    Task
-	updatedTask  Task
+	updateCalled      bool
+	savedTask         Task
+	updatedTask       Task
+	findAllCalledWith [2]int // [limit, offset]
 }
 
 func (f *fakeRepository) Create(_ context.Context, task Task) error {
@@ -35,7 +36,8 @@ func (f *fakeRepository) FindByID(_ context.Context, _ string) (Task, error) {
 	return f.findByIDTask, f.findByIDErr
 }
 
-func (f *fakeRepository) FindAll(_ context.Context) ([]Task, error) {
+func (f *fakeRepository) FindAll(_ context.Context, limit, offset int) ([]Task, error) {
+	f.findAllCalledWith = [2]int{limit, offset}
 	return f.findAllTasks, f.findAllErr
 }
 
@@ -158,6 +160,53 @@ func TestCreateTask_DescriptionTooLong(t *testing.T) {
 	}
 }
 
+// TestCreateTask_TitleUnicode_AtMaxLength verifies that length is measured
+// in Unicode characters, not bytes: "é" is 1 rune but 2 bytes in UTF-8, so
+// a title of exactly maxTitleLen "é" characters is 2*maxTitleLen bytes —
+// len() on the raw string would wrongly reject it as over the limit. This
+// guards a real bug where a byte-length check rejected valid non-ASCII
+// input well under the intended character limit (e.g. Cyrillic, CJK,
+// emoji, accented Latin).
+func TestCreateTask_TitleUnicode_AtMaxLength(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	title := strings.Repeat("é", maxTitleLen)
+	got, err := svc.CreateTask(context.Background(), title, "description")
+	if err != nil {
+		t.Fatalf("CreateTask() title at max rune length unexpected error: %v", err)
+	}
+	if got.Title != title {
+		t.Errorf("CreateTask() Title = %q, want %q", got.Title, title)
+	}
+}
+
+// TestCreateTask_TitleUnicode_OverMaxLength verifies that a title one rune
+// over the limit is still rejected, even though — as bytes — it would be
+// far more than one unit over.
+func TestCreateTask_TitleUnicode_OverMaxLength(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	_, err := svc.CreateTask(context.Background(), strings.Repeat("é", maxTitleLen+1), "description")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("CreateTask() overlong unicode title error = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestCreateTask_DescriptionUnicode_AtMaxLength mirrors
+// TestCreateTask_TitleUnicode_AtMaxLength for description.
+func TestCreateTask_DescriptionUnicode_AtMaxLength(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	description := strings.Repeat("é", maxDescriptionLen)
+	got, err := svc.CreateTask(context.Background(), "Valid title", description)
+	if err != nil {
+		t.Fatalf("CreateTask() description at max rune length unexpected error: %v", err)
+	}
+	if got.Description != description {
+		t.Errorf("CreateTask() Description = %q, want %q", got.Description, description)
+	}
+}
+
 func TestCreateTask_TrimsTitleAndDescription(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
@@ -213,12 +262,39 @@ func TestListTasks_Delegates(t *testing.T) {
 	tasks := []Task{newFakeTask(StatusPending), newFakeTask(StatusDone)}
 	svc := NewService(&fakeRepository{findAllTasks: tasks})
 
-	got, err := svc.ListTasks(context.Background())
+	got, err := svc.ListTasks(context.Background(), -1, 0)
 	if err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
 	if len(got) != len(tasks) {
 		t.Errorf("ListTasks() returned %d tasks, want %d", len(got), len(tasks))
+	}
+}
+
+// TestListTasks_PassesLimitOffsetToRepository verifies that Service passes
+// the limit/offset it received straight through to Repository.FindAll,
+// unmodified — Service no longer applies its own ordering or windowing
+// (that moved to Repository; see memory_repository_test.go's and
+// postgres_repository_test.go's FindAll ordering/pagination tests).
+func TestListTasks_PassesLimitOffsetToRepository(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	if _, err := svc.ListTasks(context.Background(), 10, 5); err != nil {
+		t.Fatalf("ListTasks() unexpected error: %v", err)
+	}
+	if want := [2]int{10, 5}; repo.findAllCalledWith != want {
+		t.Errorf("ListTasks() called Repository.FindAll with limit/offset = %v, want %v", repo.findAllCalledWith, want)
+	}
+}
+
+func TestListTasks_RepositoryError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	svc := NewService(&fakeRepository{findAllErr: repoErr})
+
+	_, err := svc.ListTasks(context.Background(), -1, 0)
+	if !errors.Is(err, repoErr) {
+		t.Errorf("ListTasks() repository error = %v, want %v", err, repoErr)
 	}
 }
 
@@ -457,40 +533,8 @@ func TestCompleteTask_RepositoryConflictError(t *testing.T) {
 	}
 }
 
-// --- ListTasks ordering ---
-
-func TestListTasks_OrdersByCreatedAtThenID(t *testing.T) {
-	base := time.Now()
-	older := Task{ID: "b", CreatedAt: base.Add(-time.Hour)}
-	newer := Task{ID: "a", CreatedAt: base}
-	tie1 := Task{ID: "z", CreatedAt: base.Add(time.Minute)}
-	tie2 := Task{ID: "y", CreatedAt: base.Add(time.Minute)}
-
-	// Deliberately unordered input, mirroring memoryRepository's
-	// unordered map iteration.
-	repo := &fakeRepository{findAllTasks: []Task{tie1, newer, older, tie2}}
-	svc := NewService(repo)
-
-	got, err := svc.ListTasks(context.Background())
-	if err != nil {
-		t.Fatalf("ListTasks() unexpected error: %v", err)
-	}
-
-	wantOrder := []string{"b", "a", "y", "z"}
-	if len(got) != len(wantOrder) {
-		t.Fatalf("ListTasks() returned %d tasks, want %d", len(got), len(wantOrder))
-	}
-	for i, id := range wantOrder {
-		if got[i].ID != id {
-			t.Errorf("ListTasks()[%d].ID = %q, want %q (order = %v)", i, got[i].ID, id, taskIDs(got))
-		}
-	}
-}
-
-func taskIDs(tasks []Task) []string {
-	ids := make([]string, len(tasks))
-	for i, t := range tasks {
-		ids[i] = t.ID
-	}
-	return ids
-}
+// Note: GET /tasks' ordering guarantee (CreatedAt ascending, ties broken by
+// ID) is no longer applied by Service — it's Repository.FindAll's own
+// contract now, enforced and tested at that layer directly: see
+// TestFindAll_OrdersByCreatedAtThenID in memory_repository_test.go and
+// TestPostgres_FindAll_OrderedByCreatedAtThenID in postgres_repository_test.go.

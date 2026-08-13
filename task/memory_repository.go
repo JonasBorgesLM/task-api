@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"sort"
 	"sync"
 )
 
@@ -55,8 +56,11 @@ func (r *memoryRepository) FindByID(ctx context.Context, id string) (Task, error
 	return task, nil
 }
 
-// FindAll returns a snapshot of all tasks as a new slice.
-func (r *memoryRepository) FindAll(ctx context.Context) ([]Task, error) {
+// FindAll returns a snapshot of tasks ordered by CreatedAt ascending (ties
+// broken by ID) — the store is a Go map, so this ordering is applied here
+// rather than relied upon from iteration — windowed to at most limit
+// results starting at offset, per Repository's contract.
+func (r *memoryRepository) FindAll(ctx context.Context, limit, offset int) ([]Task, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -69,7 +73,32 @@ func (r *memoryRepository) FindAll(ctx context.Context) ([]Task, error) {
 		tasks = append(tasks, task)
 	}
 
-	return tasks, nil
+	sort.Slice(tasks, func(i, j int) bool {
+		if !tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
+			return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+		}
+		return tasks[i].ID < tasks[j].ID
+	})
+
+	return paginateTasks(tasks, limit, offset), nil
+}
+
+// paginateTasks returns the sub-slice of tasks starting at offset and
+// containing at most limit elements. limit < 0 means "no limit" (return
+// everything from offset onward). offset or limit values beyond the end of
+// tasks yield an empty result rather than an error — matching
+// Repository.FindAll's documented contract.
+func paginateTasks(tasks []Task, limit, offset int) []Task {
+	if offset >= len(tasks) {
+		return []Task{}
+	}
+	tasks = tasks[offset:]
+
+	if limit >= 0 && limit < len(tasks) {
+		tasks = tasks[:limit]
+	}
+
+	return tasks
 }
 
 // Update replaces an existing task. Returns ErrNotFound if the ID does not

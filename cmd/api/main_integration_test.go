@@ -211,6 +211,25 @@ func TestIntegration_MiddlewareWired(t *testing.T) {
 	}
 }
 
+// TestIntegration_ReadinessEndpoint verifies that newServer registers GET
+// /health/ready and that, for the in-memory Repository these tests build
+// (config.Config{} has no DatabaseURL), it reports ready — there's no
+// external dependency for it to be unready about.
+func TestIntegration_ReadinessEndpoint(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, config.Config{}, discardLogger()).Handler)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/health/ready")
+	if err != nil {
+		t.Fatalf("GET /health/ready: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /health/ready status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
 // TestIntegration_DebugVars verifies that newServer registers the stdlib
 // expvar handler at GET /debug/vars, giving at least baseline runtime
 // observability (goroutine count, memstats, GC stats) without pulling in

@@ -68,13 +68,102 @@ func TestFindAll(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background())
+	got, err := repo.FindAll(context.Background(), -1, 0)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
 
 	if len(got) != len(tasks) {
 		t.Errorf("FindAll() returned %d tasks, want %d", len(got), len(tasks))
+	}
+}
+
+// TestFindAll_OrdersByCreatedAtThenID verifies that FindAll itself
+// (not a caller re-sorting its result) returns tasks ordered by CreatedAt
+// ascending, ties broken by ID — required now that Repository.FindAll's
+// contract guarantees this ordering directly, since the store is a Go map
+// with no iteration order of its own.
+func TestFindAll_OrdersByCreatedAtThenID(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	base := time.Now()
+	tasks := []Task{
+		{ID: "z", CreatedAt: base.Add(time.Minute)},
+		{ID: "y", CreatedAt: base.Add(time.Minute)}, // ties with "z"; ID breaks the tie
+		{ID: "a", CreatedAt: base},
+		{ID: "b", CreatedAt: base.Add(-time.Hour)},
+	}
+	for _, task := range tasks {
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	got, err := repo.FindAll(context.Background(), -1, 0)
+	if err != nil {
+		t.Fatalf("FindAll() unexpected error: %v", err)
+	}
+
+	wantOrder := []string{"b", "a", "y", "z"}
+	if len(got) != len(wantOrder) {
+		t.Fatalf("FindAll() returned %d tasks, want %d", len(got), len(wantOrder))
+	}
+	for i, id := range wantOrder {
+		if got[i].ID != id {
+			t.Errorf("FindAll()[%d].ID = %q, want %q", i, got[i].ID, id)
+		}
+	}
+}
+
+// TestFindAll_Pagination verifies the limit/offset windowing FindAll
+// applies over its ordered result.
+func TestFindAll_Pagination(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	base := time.Now()
+	for i, id := range []string{"1", "2", "3", "4", "5"} {
+		task := newTestTask(id, "Task "+id)
+		task.CreatedAt = base.Add(time.Duration(i) * time.Second)
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name    string
+		limit   int
+		offset  int
+		wantIDs []string
+	}{
+		{"no limit, no offset", -1, 0, []string{"1", "2", "3", "4", "5"}},
+		{"limit only", 2, 0, []string{"1", "2"}},
+		{"offset only", -1, 3, []string{"4", "5"}},
+		{"limit and offset", 2, 1, []string{"2", "3"}},
+		{"limit beyond end", 100, 0, []string{"1", "2", "3", "4", "5"}},
+		{"offset beyond end", -1, 100, []string{}},
+		{"limit zero", 0, 0, []string{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repo.FindAll(context.Background(), tc.limit, tc.offset)
+			if err != nil {
+				t.Fatalf("FindAll() unexpected error: %v", err)
+			}
+
+			gotIDs := make([]string, len(got))
+			for i, task := range got {
+				gotIDs[i] = task.ID
+			}
+			if len(gotIDs) != len(tc.wantIDs) {
+				t.Fatalf("FindAll() IDs = %v, want %v", gotIDs, tc.wantIDs)
+			}
+			for i := range tc.wantIDs {
+				if gotIDs[i] != tc.wantIDs[i] {
+					t.Errorf("FindAll() IDs = %v, want %v", gotIDs, tc.wantIDs)
+				}
+			}
+		})
 	}
 }
 
@@ -270,7 +359,7 @@ func TestFindAll_IsolatesInternalState(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	all, _ := repo.FindAll(context.Background())
+	all, _ := repo.FindAll(context.Background(), -1, 0)
 	all[0].Title = "Mutated"
 	all[0].Status = StatusDone
 
@@ -323,7 +412,7 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	// All 50 concurrent tasks plus the seed must be present.
-	all, err := repo.FindAll(context.Background())
+	all, err := repo.FindAll(context.Background(), -1, 0)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}

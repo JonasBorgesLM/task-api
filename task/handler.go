@@ -22,7 +22,7 @@ const maxRequestBodyBytes = 1 << 20 // 1 MiB
 type taskService interface {
 	CreateTask(ctx context.Context, title, description string) (Task, error)
 	GetTask(ctx context.Context, id string) (Task, error)
-	ListTasks(ctx context.Context) ([]Task, error)
+	ListTasks(ctx context.Context, limit, offset int) ([]Task, error)
 	UpdateTask(ctx context.Context, id, title, description string) (Task, error)
 	DeleteTask(ctx context.Context, id string) error
 	CompleteTask(ctx context.Context, id string) (Task, error)
@@ -82,15 +82,17 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // listTasks handles GET /tasks. It accepts two optional query parameters,
-// applied after Service.ListTasks' deterministic ordering (oldest first):
+// applied as a pagination window over Service's deterministic ordering
+// (oldest first, ties broken by ID):
 //
 //   - limit: maximum number of tasks to return.
 //   - offset: number of tasks to skip before collecting up to limit.
 //
 // Both default to "return everything" when absent, so existing callers
-// that never pass them see no change in behavior — this establishes a
-// pagination contract for GET /tasks without altering today's default
-// response shape (still a bare JSON array, not an envelope).
+// that never pass them see no change in behavior. limit/offset are passed
+// through to Service.ListTasks (and from there to Repository), rather than
+// applied here after fetching every task — see Repository's doc comment
+// for why that matters.
 func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 	limit, offset, err := parsePagination(r.URL.Query())
 	if err != nil {
@@ -98,13 +100,11 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tasks, err := h.svc.ListTasks(r.Context())
+	tasks, err := h.svc.ListTasks(r.Context(), limit, offset)
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return
 	}
-
-	tasks = paginate(tasks, limit, offset)
 
 	// Ensure an empty list serialises as [] and never as null.
 	if tasks == nil {
@@ -136,25 +136,6 @@ func parsePagination(query url.Values) (limit, offset int, err error) {
 	}
 
 	return limit, offset, nil
-}
-
-// paginate returns the slice of tasks starting at offset and containing at
-// most limit elements. limit < 0 means "no limit" (return everything from
-// offset onward). offset or limit values beyond the end of tasks yield an
-// empty (non-nil semantics preserved by the caller) result rather than an
-// error — pagination parameters describing a page past the end of the data
-// is a normal, not exceptional, outcome.
-func paginate(tasks []Task, limit, offset int) []Task {
-	if offset >= len(tasks) {
-		return []Task{}
-	}
-	tasks = tasks[offset:]
-
-	if limit >= 0 && limit < len(tasks) {
-		tasks = tasks[:limit]
-	}
-
-	return tasks
 }
 
 // getTask handles GET /tasks/{id}.

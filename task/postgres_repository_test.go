@@ -189,7 +189,7 @@ func TestPostgres_FindAll_OrderedByCreatedAtThenID(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background())
+	got, err := repo.FindAll(context.Background(), -1, 0)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -208,12 +208,68 @@ func TestPostgres_FindAll_OrderedByCreatedAtThenID(t *testing.T) {
 func TestPostgres_FindAll_Empty(t *testing.T) {
 	repo, _ := newPostgresTestRepo(t)
 
-	got, err := repo.FindAll(context.Background())
+	got, err := repo.FindAll(context.Background(), -1, 0)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
 	if len(got) != 0 {
 		t.Errorf("FindAll() returned %d tasks, want 0", len(got))
+	}
+}
+
+// TestPostgres_FindAll_Pagination verifies that limit/offset are applied by
+// the SQL query itself (LIMIT/OFFSET, see postgresRepository.FindAll) —
+// not by fetching every row and slicing in Go — while still respecting the
+// (created_at, id) ordering.
+func TestPostgres_FindAll_Pagination(t *testing.T) {
+	repo, _ := newPostgresTestRepo(t)
+
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	titles := []string{"1", "2", "3", "4", "5"}
+	for i, title := range titles {
+		task := newPostgresTestTask(t, title)
+		task.CreatedAt = base.Add(time.Duration(i) * time.Second)
+		task.UpdatedAt = task.CreatedAt
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name       string
+		limit      int
+		offset     int
+		wantTitles []string
+	}{
+		{"no limit, no offset", -1, 0, []string{"1", "2", "3", "4", "5"}},
+		{"limit only", 2, 0, []string{"1", "2"}},
+		{"offset only", -1, 3, []string{"4", "5"}},
+		{"limit and offset", 2, 1, []string{"2", "3"}},
+		{"limit beyond end", 100, 0, []string{"1", "2", "3", "4", "5"}},
+		{"offset beyond end", -1, 100, []string{}},
+		{"limit zero", 0, 0, []string{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repo.FindAll(context.Background(), tc.limit, tc.offset)
+			if err != nil {
+				t.Fatalf("FindAll() unexpected error: %v", err)
+			}
+
+			gotTitles := make([]string, len(got))
+			for i, task := range got {
+				gotTitles[i] = task.Title
+			}
+			if len(gotTitles) != len(tc.wantTitles) {
+				t.Fatalf("FindAll() titles = %v, want %v", gotTitles, tc.wantTitles)
+			}
+			for i := range tc.wantTitles {
+				if gotTitles[i] != tc.wantTitles[i] {
+					t.Errorf("FindAll() titles = %v, want %v", gotTitles, tc.wantTitles)
+				}
+			}
+		})
 	}
 }
 

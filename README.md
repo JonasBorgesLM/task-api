@@ -70,8 +70,8 @@ task-api/
 ├── cmd/
 │   ├── api/
 │   │   ├── main.go                   # Composition Root: wires Repository→Service→Handler, starts the HTTP server
-│   │   ├── health.go                 # GET /health handler
-│   │   ├── main_test.go              # Server lifecycle tests (Shutdown behavior, health endpoint)
+│   │   ├── health.go                 # GET /health (liveness) and GET /health/ready (readiness) handlers
+│   │   ├── main_test.go              # Server lifecycle tests (Shutdown behavior, health/readiness endpoints)
 │   │   └── main_integration_test.go  # Full-stack HTTP test: real Handler+Service+memoryRepository
 │   └── migrate/
 │       └── main.go                   # Standalone CLI: applies/reverts PostgreSQL migrations (make migrate-up / migrate-down)
@@ -98,9 +98,9 @@ task-api/
 │   ├── migrations/
 │   │   ├── 0001_create_tasks_table.up.sql
 │   │   └── 0001_create_tasks_table.down.sql
-│   ├── service.go                    # Business logic: validation, ID generation, timestamps, ordering
+│   ├── service.go                    # Business logic: validation, ID generation, timestamps
 │   ├── service_test.go               # Unit tests (fake Repository)
-│   ├── handler.go                    # HTTP handlers, route registration, pagination
+│   ├── handler.go                    # HTTP handlers, route registration, pagination param parsing
 │   ├── handler_test.go               # Unit tests (fake Service)
 │   └── integration_test.go           # Full-stack HTTP tests using the *real* memoryRepository (no external dependency — see Testing)
 ├── docker-compose.yml      # Local stack: PostgreSQL, and optionally the API itself
@@ -242,7 +242,7 @@ make db-up              # start PostgreSQL via docker compose
 make test-integration   # go test -tags=integration ./task/... -run Postgres -v
 ```
 
-`task/postgres_repository_test.go` covers, against a real PostgreSQL instance: `Create` (including a duplicate-ID conflict and a SQL-injection attempt), `FindByID` (including not-found and a malformed, non-UUID ID), `FindAll` (ordering and the empty case), `Update` (including not-found, a version-mismatch conflict, and real concurrent goroutines racing on the same row), `Delete` (including not-found), context cancellation, and the database-level `CHECK` constraint on `status`. `newPostgresTestRepo` also `TRUNCATE`s the `tasks` table before every test, so each test starts from a clean, isolated state despite sharing one physical database — and it skips (not fails) if `TEST_DATABASE_URL` isn't set, so an accidental `-tags=integration` run on a machine with no PostgreSQL degrades gracefully.
+`task/postgres_repository_test.go` covers, against a real PostgreSQL instance: `Create` (including a duplicate-ID conflict and a SQL-injection attempt), `FindByID` (including not-found and a malformed, non-UUID ID), `FindAll` (ordering, `LIMIT`/`OFFSET` pagination, and the empty case), `Update` (including not-found, a version-mismatch conflict, and real concurrent goroutines racing on the same row), `Delete` (including not-found), context cancellation, and the database-level `CHECK` constraint on `status`. `newPostgresTestRepo` also `TRUNCATE`s the `tasks` table before every test, so each test starts from a clean, isolated state despite sharing one physical database — and it skips (not fails) if `TEST_DATABASE_URL` isn't set, so an accidental `-tags=integration` run on a machine with no PostgreSQL degrades gracefully.
 
 ## Race Detector
 
@@ -403,7 +403,13 @@ Removes a task permanently. No request body. No response body.
 
 ### `GET /health`
 
-Always responds `200 OK` while the server is running: `{"status": "ok"}`.
+Liveness check: always responds `200 OK` while the process is running: `{"status": "ok"}`. It does not check PostgreSQL or any other dependency — that's what `GET /health/ready` is for.
+
+### `GET /health/ready`
+
+Readiness check: responds `200 OK` with `{"status": "ok"}` if the backing store is reachable, or `503 Service Unavailable` with `{"status": "unavailable"}` if it isn't. For the in-memory store (no `DATABASE_URL`) it always reports ready — there's nothing external to check. For PostgreSQL, it calls `db.PingContext` (bounded by a 5s timeout) through the `task.Pinger` interface `postgresRepository` implements.
+
+Use this, not `GET /health`, for a Kubernetes readiness probe or load balancer health check: it's what lets an orchestrator stop routing traffic to a replica whose database connection is broken, instead of only detecting a hard process crash.
 
 ### `GET /debug/vars`
 
@@ -501,7 +507,7 @@ The server handles `SIGINT` (Ctrl+C) and `SIGTERM` (sent by process managers and
 
 ## Design Decisions
 
-**Service contains all business rules.** Validation (non-empty title, length limits), ID generation, timestamp management, and result ordering live exclusively in `Service`. `Handler` translates HTTP; `Repository` stores data. Neither of those two layers contains domain logic.
+**Service contains all business rules.** Validation (non-empty title, length limits, measured in Unicode characters via `utf8.RuneCountInString` — not bytes, which would misjudge non-ASCII text), ID generation, and timestamp management live exclusively in `Service`. `Handler` translates HTTP; `Repository` stores data. Neither of those two layers contains domain logic. (Result ordering and pagination windowing are `Repository`'s responsibility — see below — precisely so a SQL-backed `Repository` can push them into the query instead of `Service` re-deriving them from an already-fetched, unbounded result set.)
 
 **`Repository` is interface-based, with two implementations.** `cmd/api/main.go`'s `buildRepository` picks the concrete implementation at startup — `memoryRepository` or `postgresRepository`, based solely on whether `DATABASE_URL` is set — and injects it into `Service`. Adding `postgresRepository` required zero changes to `Service` or `Handler`. `memoryRepository` is not a placeholder scheduled for removal: it stays because it needs no external service, keeping the unit test suite fast and hermetic.
 
@@ -519,7 +525,7 @@ The server handles `SIGINT` (Ctrl+C) and `SIGTERM` (sent by process managers and
 
 **Request bodies are capped at 1 MiB.** `POST /tasks` and `PUT /tasks/{id}` wrap the body in `http.MaxBytesReader` before decoding, so an oversized payload is rejected instead of being fully buffered into memory.
 
-**`GET /tasks` ordering is deterministic despite the storage layer making no guarantee.** `memoryRepository.FindAll` iterates a Go map (randomized order); `postgresRepository.FindAll` issues `ORDER BY created_at, id` purely as a query-shaping optimization. Either way, `Service.ListTasks` is what actually guarantees the order callers see — sorted by `CreatedAt` ascending, ties broken by `ID` — so pagination is stable across requests regardless of which `Repository` is in use.
+**`GET /tasks` ordering and pagination are enforced by `Repository`, not `Service`.** `Repository.FindAll(ctx, limit, offset)` guarantees its result is ordered by `CreatedAt` ascending (ties broken by `ID`) and windowed to `limit`/`offset` — `Service.ListTasks` just passes those two integers through and returns whatever comes back, without re-sorting or re-slicing. `memoryRepository.FindAll` sorts the snapshot it takes of its map (which has no iteration order of its own) and then slices it. `postgresRepository.FindAll` pushes both concerns into the query itself: `ORDER BY created_at, id LIMIT $1 OFFSET $2` (`LIMIT NULL` when `limit < 0`, PostgreSQL's own "no limit" spelling) — so a page of results costs roughly `offset + limit` rows read, not the whole table. This is a deliberate change from fetching every row and paginating client-side in `Handler`: with an unbounded `Repository.FindAll(ctx)` (no window), `GET /tasks?limit=10` against a large table would still scan and transfer every row on every call, and only discard most of them after the fact — the window has to be inside the query to actually bound the work done per request. `idx_tasks_created_at_id` (below) is what makes the `ORDER BY` in that query cheap as the table grows.
 
 ### PostgreSQL implementation
 
