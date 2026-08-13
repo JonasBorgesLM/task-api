@@ -1,7 +1,10 @@
-.PHONY: run build test test-race coverage test-integration \
-        fmt vet lint check \
+.PHONY: help run build tidy clean \
+        test test-race test-integration test-integration-race coverage \
+        fmt fmt-check vet lint check \
         docker-build docker-up docker-down db-up \
         migrate-up migrate-down
+
+.DEFAULT_GOAL := help
 
 # Connection string used by the local PostgreSQL instance started via
 # `make db-up` / `make docker-up` (see docker-compose.yml). Override on
@@ -10,77 +13,86 @@
 TEST_DATABASE_URL ?= postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable
 DATABASE_URL       ?= $(TEST_DATABASE_URL)
 
-## run: start the API (uses environment variables / .env for configuration;
-## in-memory store unless DATABASE_URL is set — see README "Configuration")
-run:
+##@ Help
+
+help: ## Show this help
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} \
+		/^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 } \
+		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
+
+##@ Development
+
+run: ## Start the API (in-memory store unless DATABASE_URL is set — see README "Configuration")
 	go run ./cmd/api
 
-## build: compile the API binary to ./bin/task-api
-build:
+build: ## Compile the API binary to ./bin/task-api
 	go build -o bin/task-api ./cmd/api
 
-## test: run unit tests (memoryRepository, Service, Handler, config,
-## middleware, server lifecycle — no external services required)
-test:
+tidy: ## Tidy and verify go.mod/go.sum
+	go mod tidy
+	go mod verify
+
+clean: ## Remove build artifacts (bin/, coverage.out)
+	rm -rf bin coverage.out
+
+##@ Testing
+
+test: ## Run unit tests (no external services required)
 	go test ./...
 
-## test-race: run unit tests with the race detector enabled
-test-race:
+test-race: ## Run unit tests with the race detector enabled
 	go test -race ./...
 
-## coverage: run unit tests and print a per-function coverage report
-coverage:
+test-integration: ## Run PostgreSQL integration tests (needs `make db-up` first)
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -tags=integration ./task/... -run Postgres -v
+
+test-integration-race: ## Run PostgreSQL integration tests with the race detector (needs `make db-up` first)
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -tags=integration -race ./task/... -run Postgres
+
+coverage: ## Run unit tests and print a per-function coverage report
 	go test -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out
 
-## test-integration: run postgresRepository's integration tests against a
-## real PostgreSQL instance (see `make db-up`). Built only with the
-## "integration" tag, so they never run as part of `make test`.
-test-integration:
-	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -tags=integration ./task/... -run Postgres -v
+##@ Code Quality
 
-## fmt: format all Go source files
-fmt:
+fmt: ## Format all Go source files in place
 	gofmt -w .
 
-## vet: run go vet (unit-tagged and integration-tagged source)
-vet:
+fmt-check: ## Fail if any Go source file is not gofmt-formatted (matches CI)
+	@unformatted="$$(gofmt -l .)"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "The following files are not gofmt-formatted:"; echo "$$unformatted"; exit 1; \
+	fi
+
+vet: ## Run go vet (default-tagged and integration-tagged source)
 	go vet ./...
 	go vet -tags=integration ./task/...
 
-## lint: run staticcheck (installs it into $GOBIN if not already present)
-lint:
+lint: ## Run staticcheck (installs it into $GOBIN if not already present)
 	@command -v staticcheck >/dev/null 2>&1 || go install honnef.co/go/tools/cmd/staticcheck@latest
 	staticcheck ./...
+	staticcheck -tags=integration ./task/...
 
-## check: everything the CI quality gate runs, in one command
-check: fmt vet lint test-race
+check: fmt-check vet lint test-race ## Run everything the CI quality gate runs (no PostgreSQL required)
 
-## docker-build: build the production API image (see Dockerfile)
-docker-build:
+##@ Docker
+
+docker-build: ## Build the production API image (see Dockerfile)
 	docker build -t task-api:latest .
 
-## docker-up: start the full stack (API + PostgreSQL) via docker compose
-docker-up:
+docker-up: ## Start the full stack (API + PostgreSQL) via docker compose
 	docker compose up -d --build
 
-## docker-down: stop and remove every container docker compose started
-## (whether started via docker-up or db-up below); the data volume is kept
-docker-down:
+docker-down: ## Stop and remove every container docker compose started (data volume is kept)
 	docker compose down
 
-## db-up: start only PostgreSQL via docker compose — for running the API
-## with `make run` on the host (faster edit/rebuild loop than docker-up)
-## or for `make test-integration` / `make migrate-up` / `make migrate-down`
-db-up:
+db-up: ## Start only PostgreSQL — for `make run` on the host, or `make test-integration`/`migrate-*`
 	docker compose up -d postgres
 
-## migrate-up: apply pending PostgreSQL migrations against DATABASE_URL
-## (defaults to the local docker-compose instance; override to target
-## another database, e.g. `make migrate-up DATABASE_URL=...`)
-migrate-up:
+##@ Database
+
+migrate-up: ## Apply pending PostgreSQL migrations against DATABASE_URL
 	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate -direction=up
 
-## migrate-down: revert the single most recently applied migration
-migrate-down:
+migrate-down: ## Revert the single most recently applied migration
 	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate -direction=down
