@@ -10,14 +10,25 @@ import (
 	"time"
 )
 
-// newTestTask is a helper that returns a Task with predictable values.
+// testUserID and otherUserID are the two owners used throughout these
+// tests: testUserID for the "normal" case, otherUserID to verify
+// ownership scoping actually isolates one user's tasks from another's.
+const (
+	testUserID  = "owner-1"
+	otherUserID = "owner-2"
+)
+
+// newTestTask is a helper that returns a Task owned by testUserID with
+// predictable values.
 func newTestTask(id, title string) Task {
 	now := time.Now()
 	return Task{
 		ID:          id,
+		UserID:      testUserID,
 		Title:       title,
 		Description: "test description",
 		Status:      StatusPending,
+		Priority:    PriorityMedium,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -32,7 +43,7 @@ func TestCreateAndFindByID(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	got, err := repo.FindByID(context.Background(), "1")
+	got, err := repo.FindByID(context.Background(), "1", testUserID)
 	if err != nil {
 		t.Fatalf("FindByID() unexpected error: %v", err)
 	}
@@ -46,9 +57,26 @@ func TestCreateAndFindByID(t *testing.T) {
 func TestFindByID_NotFound(t *testing.T) {
 	repo := NewMemoryRepository()
 
-	_, err := repo.FindByID(context.Background(), "nonexistent")
+	_, err := repo.FindByID(context.Background(), "nonexistent", testUserID)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("FindByID() error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestFindByID_WrongUser_ReturnsErrNotFound verifies that a task owned by
+// a different user is reported as ErrNotFound, not a distinct "forbidden"
+// error — see Repository's doc comment on why.
+func TestFindByID_WrongUser_ReturnsErrNotFound(t *testing.T) {
+	repo := NewMemoryRepository()
+	task := newTestTask("1", "Someone else's task")
+
+	if err := repo.Create(context.Background(), task); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	_, err := repo.FindByID(context.Background(), "1", otherUserID)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("FindByID() by non-owner error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -68,13 +96,38 @@ func TestFindAll(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), -1, 0)
+	got, err := repo.FindAll(context.Background(), testUserID, -1, 0)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
 
 	if len(got) != len(tasks) {
 		t.Errorf("FindAll() returned %d tasks, want %d", len(got), len(tasks))
+	}
+}
+
+// TestFindAll_ScopedToUser verifies that FindAll never returns another
+// user's tasks.
+func TestFindAll_ScopedToUser(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	mine := newTestTask("1", "Mine")
+	theirs := newTestTask("2", "Theirs")
+	theirs.UserID = otherUserID
+
+	for _, task := range []Task{mine, theirs} {
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	got, err := repo.FindAll(context.Background(), testUserID, -1, 0)
+	if err != nil {
+		t.Fatalf("FindAll() unexpected error: %v", err)
+	}
+
+	if len(got) != 1 || got[0].ID != "1" {
+		t.Errorf("FindAll() = %+v, want only task 1", got)
 	}
 }
 
@@ -88,10 +141,10 @@ func TestFindAll_OrdersByCreatedAtThenID(t *testing.T) {
 
 	base := time.Now()
 	tasks := []Task{
-		{ID: "z", CreatedAt: base.Add(time.Minute)},
-		{ID: "y", CreatedAt: base.Add(time.Minute)}, // ties with "z"; ID breaks the tie
-		{ID: "a", CreatedAt: base},
-		{ID: "b", CreatedAt: base.Add(-time.Hour)},
+		{ID: "z", UserID: testUserID, CreatedAt: base.Add(time.Minute)},
+		{ID: "y", UserID: testUserID, CreatedAt: base.Add(time.Minute)}, // ties with "z"; ID breaks the tie
+		{ID: "a", UserID: testUserID, CreatedAt: base},
+		{ID: "b", UserID: testUserID, CreatedAt: base.Add(-time.Hour)},
 	}
 	for _, task := range tasks {
 		if err := repo.Create(context.Background(), task); err != nil {
@@ -99,7 +152,7 @@ func TestFindAll_OrdersByCreatedAtThenID(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), -1, 0)
+	got, err := repo.FindAll(context.Background(), testUserID, -1, 0)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -146,7 +199,7 @@ func TestFindAll_Pagination(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := repo.FindAll(context.Background(), tc.limit, tc.offset)
+			got, err := repo.FindAll(context.Background(), testUserID, tc.limit, tc.offset)
 			if err != nil {
 				t.Fatalf("FindAll() unexpected error: %v", err)
 			}
@@ -177,7 +230,7 @@ func TestUpdate(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	current, err := repo.FindByID(context.Background(), "1")
+	current, err := repo.FindByID(context.Background(), "1", testUserID)
 	if err != nil {
 		t.Fatalf("FindByID() unexpected error: %v", err)
 	}
@@ -189,7 +242,7 @@ func TestUpdate(t *testing.T) {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
 
-	got, err := repo.FindByID(context.Background(), "1")
+	got, err := repo.FindByID(context.Background(), "1", testUserID)
 	if err != nil {
 		t.Fatalf("FindByID() unexpected error: %v", err)
 	}
@@ -200,6 +253,31 @@ func TestUpdate(t *testing.T) {
 
 	if got.Status != StatusDone {
 		t.Errorf("Update() status = %q, want %q", got.Status, StatusDone)
+	}
+}
+
+// TestUpdate_WrongUser_ReturnsErrNotFound verifies that Update rejects a
+// task whose UserID doesn't match the stored row's owner, before even
+// looking at Version.
+func TestUpdate_WrongUser_ReturnsErrNotFound(t *testing.T) {
+	repo := NewMemoryRepository()
+	task := newTestTask("1", "Original title")
+
+	if err := repo.Create(context.Background(), task); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	current, err := repo.FindByID(context.Background(), "1", testUserID)
+	if err != nil {
+		t.Fatalf("FindByID() unexpected error: %v", err)
+	}
+
+	current.UserID = otherUserID
+	current.Title = "Hijacked"
+
+	err = repo.Update(context.Background(), current)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Update() with mismatched UserID error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -214,7 +292,7 @@ func TestUpdate_VersionMismatch_ReturnsErrConflict(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	stale, err := repo.FindByID(context.Background(), "1")
+	stale, err := repo.FindByID(context.Background(), "1", testUserID)
 	if err != nil {
 		t.Fatalf("FindByID() unexpected error: %v", err)
 	}
@@ -234,7 +312,7 @@ func TestUpdate_VersionMismatch_ReturnsErrConflict(t *testing.T) {
 		t.Errorf("Update() (stale version) error = %v, want ErrConflict", err)
 	}
 
-	got, err := repo.FindByID(context.Background(), "1")
+	got, err := repo.FindByID(context.Background(), "1", testUserID)
 	if err != nil {
 		t.Fatalf("FindByID() unexpected error: %v", err)
 	}
@@ -254,7 +332,7 @@ func TestCreate_AlwaysStartsAtVersionOne(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	got, err := repo.FindByID(context.Background(), "1")
+	got, err := repo.FindByID(context.Background(), "1", testUserID)
 	if err != nil {
 		t.Fatalf("FindByID() unexpected error: %v", err)
 	}
@@ -283,11 +361,11 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	if err := repo.Delete(context.Background(), "1"); err != nil {
+	if err := repo.Delete(context.Background(), "1", testUserID); err != nil {
 		t.Fatalf("Delete() unexpected error: %v", err)
 	}
 
-	_, err := repo.FindByID(context.Background(), "1")
+	_, err := repo.FindByID(context.Background(), "1", testUserID)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("FindByID() after Delete() error = %v, want ErrNotFound", err)
 	}
@@ -297,9 +375,29 @@ func TestDelete(t *testing.T) {
 func TestDelete_NotFound(t *testing.T) {
 	repo := NewMemoryRepository()
 
-	err := repo.Delete(context.Background(), "nonexistent")
+	err := repo.Delete(context.Background(), "nonexistent", testUserID)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Delete() error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDelete_WrongUser_ReturnsErrNotFound verifies that Delete refuses to
+// remove a task owned by a different user.
+func TestDelete_WrongUser_ReturnsErrNotFound(t *testing.T) {
+	repo := NewMemoryRepository()
+	task := newTestTask("1", "Not yours")
+
+	if err := repo.Create(context.Background(), task); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	err := repo.Delete(context.Background(), "1", otherUserID)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() by non-owner error = %v, want ErrNotFound", err)
+	}
+
+	if _, err := repo.FindByID(context.Background(), "1", testUserID); err != nil {
+		t.Errorf("task should still exist after a non-owner's failed Delete: %v", err)
 	}
 }
 
@@ -319,7 +417,7 @@ func TestCreate_DuplicateID(t *testing.T) {
 	}
 
 	// Confirm the original task was not overwritten.
-	got, _ := repo.FindByID(context.Background(), "1")
+	got, _ := repo.FindByID(context.Background(), "1", testUserID)
 	if got.Title != "First" {
 		t.Errorf("Create() duplicate overwrote original: got title %q, want %q", got.Title, "First")
 	}
@@ -335,11 +433,11 @@ func TestFindByID_IsolatesInternalState(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	got, _ := repo.FindByID(context.Background(), "1")
+	got, _ := repo.FindByID(context.Background(), "1", testUserID)
 	got.Title = "Mutated"
 	got.Status = StatusDone
 
-	stored, _ := repo.FindByID(context.Background(), "1")
+	stored, _ := repo.FindByID(context.Background(), "1", testUserID)
 	if stored.Title != "Original" {
 		t.Errorf("FindByID() isolation failed: stored title = %q, want %q", stored.Title, "Original")
 	}
@@ -359,11 +457,11 @@ func TestFindAll_IsolatesInternalState(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	all, _ := repo.FindAll(context.Background(), -1, 0)
+	all, _ := repo.FindAll(context.Background(), testUserID, -1, 0)
 	all[0].Title = "Mutated"
 	all[0].Status = StatusDone
 
-	stored, _ := repo.FindByID(context.Background(), "1")
+	stored, _ := repo.FindByID(context.Background(), "1", testUserID)
 	if stored.Title != "Original" {
 		t.Errorf("FindAll() isolation failed: stored title = %q, want %q", stored.Title, "Original")
 	}
@@ -412,7 +510,7 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	// All 50 concurrent tasks plus the seed must be present.
-	all, err := repo.FindAll(context.Background(), -1, 0)
+	all, err := repo.FindAll(context.Background(), testUserID, -1, 0)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -433,12 +531,14 @@ func TestConcurrentAccess(t *testing.T) {
 //
 // This goes through Service (not just Repository directly) so it exercises
 // the exact read-then-write pattern UpdateTask/CompleteTask use in
-// production; run with -race to also confirm no data race.
+// production; run with -race to also confirm no data race. Every goroutine
+// uses the same userID throughout — this is testing the Version race, not
+// ownership.
 func TestConcurrentUpdate_LosersGetErrConflict(t *testing.T) {
 	repo := NewMemoryRepository()
 	svc := NewService(repo)
 
-	created, err := svc.CreateTask(context.Background(), "Original", "")
+	created, err := svc.CreateTask(context.Background(), testUserID, "Original", "", "")
 	if err != nil {
 		t.Fatalf("CreateTask() unexpected error: %v", err)
 	}
@@ -458,7 +558,7 @@ func TestConcurrentUpdate_LosersGetErrConflict(t *testing.T) {
 	for i := range writers {
 		wg.Go(func() {
 			<-start // release all goroutines together to maximize overlap
-			_, err := svc.UpdateTask(context.Background(), created.ID, fmt.Sprintf("Writer %d", i), "")
+			_, err := svc.UpdateTask(context.Background(), testUserID, created.ID, fmt.Sprintf("Writer %d", i), "", "")
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -488,7 +588,7 @@ func TestConcurrentUpdate_LosersGetErrConflict(t *testing.T) {
 
 	// Whichever writer's update actually landed, it must be internally
 	// consistent — not a corrupted mix of two writers' data.
-	final, err := svc.GetTask(context.Background(), created.ID)
+	final, err := svc.GetTask(context.Background(), testUserID, created.ID)
 	if err != nil {
 		t.Fatalf("GetTask() unexpected error: %v", err)
 	}

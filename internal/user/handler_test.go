@@ -1,0 +1,332 @@
+package user
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/JonasBorgesLM/task-api/internal/middleware"
+)
+
+// fakeService is a test double for userService (Handler) and
+// sessionValidator (RequireAuth) — one fake implements both, since
+// RequireAuth only needs ValidateToken.
+type fakeService struct {
+	registerFn      func(email, password string) (User, error)
+	authenticateFn  func(email, password string) (User, error)
+	createSessionFn func(userID string) (string, time.Time, error)
+	logoutFn        func(token string) error
+	getUserFn       func(id string) (User, error)
+	validateTokenFn func(token string) (string, error)
+
+	logoutCalledWith  string
+	getUserCalledWith string
+}
+
+func (f *fakeService) Register(_ context.Context, email, password string) (User, error) {
+	if f.registerFn != nil {
+		return f.registerFn(email, password)
+	}
+	return User{}, nil
+}
+
+func (f *fakeService) Authenticate(_ context.Context, email, password string) (User, error) {
+	if f.authenticateFn != nil {
+		return f.authenticateFn(email, password)
+	}
+	return User{}, nil
+}
+
+func (f *fakeService) CreateSession(_ context.Context, userID string) (string, time.Time, error) {
+	if f.createSessionFn != nil {
+		return f.createSessionFn(userID)
+	}
+	return "token", time.Now().Add(time.Hour), nil
+}
+
+func (f *fakeService) Logout(_ context.Context, token string) error {
+	f.logoutCalledWith = token
+	if f.logoutFn != nil {
+		return f.logoutFn(token)
+	}
+	return nil
+}
+
+func (f *fakeService) GetUser(_ context.Context, id string) (User, error) {
+	f.getUserCalledWith = id
+	if f.getUserFn != nil {
+		return f.getUserFn(id)
+	}
+	return User{}, nil
+}
+
+func (f *fakeService) ValidateToken(_ context.Context, token string) (string, error) {
+	if f.validateTokenFn != nil {
+		return f.validateTokenFn(token)
+	}
+	return "", ErrNotFound
+}
+
+func newHandlerWithFake(svc *fakeService) *Handler {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return NewHandler(svc, logger)
+}
+
+func do(handler http.HandlerFunc, method, target, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+	return w
+}
+
+func decodeBody(t *testing.T, w *httptest.ResponseRecorder, dst any) {
+	t.Helper()
+	if err := json.NewDecoder(w.Body).Decode(dst); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
+}
+
+// --- POST /auth/register ---
+
+func TestRegister_Handler_ValidJSON(t *testing.T) {
+	svc := &fakeService{
+		registerFn: func(email, password string) (User, error) {
+			return User{ID: "u1", Email: email}, nil
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(h.register, http.MethodPost, "/auth/register", `{"email":"user@example.com","password":"password123"}`)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("register status = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	var got User
+	decodeBody(t, w, &got)
+	if got.Email != "user@example.com" {
+		t.Errorf("register body Email = %q, want %q", got.Email, "user@example.com")
+	}
+}
+
+func TestRegister_Handler_InvalidJSON(t *testing.T) {
+	h := newHandlerWithFake(&fakeService{})
+
+	w := do(h.register, http.MethodPost, "/auth/register", `{invalid}`)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("register invalid JSON status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestRegister_Handler_DuplicateEmail(t *testing.T) {
+	svc := &fakeService{
+		registerFn: func(_, _ string) (User, error) { return User{}, ErrAlreadyExists },
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(h.register, http.MethodPost, "/auth/register", `{"email":"user@example.com","password":"password123"}`)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("register duplicate email status = %d, want %d", w.Code, http.StatusConflict)
+	}
+}
+
+func TestRegister_Handler_InvalidInput(t *testing.T) {
+	svc := &fakeService{
+		registerFn: func(_, _ string) (User, error) { return User{}, ErrInvalidInput },
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(h.register, http.MethodPost, "/auth/register", `{"email":"","password":""}`)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("register invalid input status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// --- POST /auth/login ---
+
+func TestLogin_Handler_ValidCredentials(t *testing.T) {
+	svc := &fakeService{
+		authenticateFn: func(email, _ string) (User, error) { return User{ID: "u1", Email: email}, nil },
+		createSessionFn: func(userID string) (string, time.Time, error) {
+			return "a-real-token", time.Now().Add(time.Hour), nil
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(h.login, http.MethodPost, "/auth/login", `{"email":"user@example.com","password":"password123"}`)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("login status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var got loginResponse
+	decodeBody(t, w, &got)
+	if got.Token != "a-real-token" {
+		t.Errorf("login body Token = %q, want %q", got.Token, "a-real-token")
+	}
+	if got.User.Email != "user@example.com" {
+		t.Errorf("login body User.Email = %q, want %q", got.User.Email, "user@example.com")
+	}
+}
+
+func TestLogin_Handler_InvalidCredentials(t *testing.T) {
+	svc := &fakeService{
+		authenticateFn: func(_, _ string) (User, error) { return User{}, ErrInvalidCredentials },
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(h.login, http.MethodPost, "/auth/login", `{"email":"user@example.com","password":"wrong"}`)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("login invalid credentials status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestLogin_Handler_InvalidJSON(t *testing.T) {
+	h := newHandlerWithFake(&fakeService{})
+
+	w := do(h.login, http.MethodPost, "/auth/login", `{invalid}`)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("login invalid JSON status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// --- POST /auth/logout ---
+
+func TestLogout_Handler_UsesTokenFromContext(t *testing.T) {
+	svc := &fakeService{}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req = req.WithContext(middleware.ContextWithSessionToken(req.Context(), "the-token"))
+	w := httptest.NewRecorder()
+	h.logout(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("logout status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	if svc.logoutCalledWith != "the-token" {
+		t.Errorf("logout called Service.Logout with %q, want %q", svc.logoutCalledWith, "the-token")
+	}
+}
+
+// --- GET /auth/me ---
+
+func TestMe_Handler_UsesUserIDFromContext(t *testing.T) {
+	svc := &fakeService{
+		getUserFn: func(id string) (User, error) { return User{ID: id, Email: "user@example.com"}, nil },
+	}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.me(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("me status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if svc.getUserCalledWith != "u1" {
+		t.Errorf("me called Service.GetUser with %q, want %q", svc.getUserCalledWith, "u1")
+	}
+
+	var got User
+	decodeBody(t, w, &got)
+	if got.ID != "u1" {
+		t.Errorf("me body ID = %q, want %q", got.ID, "u1")
+	}
+}
+
+// --- RegisterRoutes ---
+
+func TestRegisterRoutes_PublicAndProtectedRoutes(t *testing.T) {
+	svc := &fakeService{
+		registerFn:      func(email, _ string) (User, error) { return User{Email: email}, nil },
+		authenticateFn:  func(email, _ string) (User, error) { return User{Email: email}, nil },
+		createSessionFn: func(_ string) (string, time.Time, error) { return "tok", time.Now().Add(time.Hour), nil },
+		getUserFn:       func(id string) (User, error) { return User{ID: id}, nil },
+		validateTokenFn: func(token string) (string, error) {
+			if token == "valid-token" {
+				return "u1", nil
+			}
+			return "", ErrNotFound
+		},
+	}
+	h := newHandlerWithFake(svc)
+	mux := http.NewServeMux()
+	// A generous limit here: this test exercises route wiring, not
+	// RateLimiter itself (see internal/middleware/rate_limit_test.go for
+	// that).
+	noopRateLimit := middleware.NewRateLimiter(1000, time.Minute).Middleware()
+	h.RegisterRoutes(mux, RequireAuth(svc), noopRateLimit)
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		token  string
+		want   int
+	}{
+		{"register is public", http.MethodPost, "/auth/register", `{"email":"a@example.com","password":"password123"}`, "", http.StatusCreated},
+		{"login is public", http.MethodPost, "/auth/login", `{"email":"a@example.com","password":"password123"}`, "", http.StatusOK},
+		{"logout without token is rejected", http.MethodPost, "/auth/logout", "", "", http.StatusUnauthorized},
+		{"logout with valid token succeeds", http.MethodPost, "/auth/logout", "", "valid-token", http.StatusNoContent},
+		{"me without token is rejected", http.MethodGet, "/auth/me", "", "", http.StatusUnauthorized},
+		{"me with valid token succeeds", http.MethodGet, "/auth/me", "", "valid-token", http.StatusOK},
+		{"me with invalid token is rejected", http.MethodGet, "/auth/me", "", "not-a-real-token", http.StatusUnauthorized},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			if w.Code != tc.want {
+				t.Errorf("%s %s status = %d, want %d", tc.method, tc.path, w.Code, tc.want)
+			}
+		})
+	}
+}
+
+// --- Error mapping ---
+
+func TestHandler_UnexpectedError_Returns500(t *testing.T) {
+	svc := &fakeService{
+		getUserFn: func(_ string) (User, error) { return User{}, errors.New("database exploded") },
+	}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.me(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("unexpected error status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+
+	var body map[string]string
+	decodeBody(t, w, &body)
+	if strings.Contains(body["error"], "database") {
+		t.Error("500 response must not expose internal error details")
+	}
+}

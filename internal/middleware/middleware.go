@@ -1,7 +1,11 @@
 // Package middleware provides small, composable net/http middlewares
-// (RequestID, Logging, Recovery) for the HTTP layer. It has no knowledge of
-// the application's domain — it never imports the task package — and works
-// exclusively in terms of net/http, context and log/slog.
+// (RequestID, Logging, Recovery) for the HTTP layer, plus generic request
+// context plumbing (see auth_context.go). It has no knowledge of the
+// application's domain — it never imports internal/task or internal/user —
+// and works exclusively in terms of net/http, context and log/slog.
+// Domain-aware middleware (e.g. user.RequireAuth) lives beside the domain
+// it belongs to and calls into this package's context helpers, not the
+// other way around.
 package middleware
 
 import "net/http"

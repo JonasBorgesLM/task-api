@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/JonasBorgesLM/task-api/middleware"
+	"github.com/JonasBorgesLM/task-api/internal/middleware"
 )
 
 // maxRequestBodyBytes caps the size of decoded JSON request bodies to guard
@@ -20,12 +20,13 @@ const maxRequestBodyBytes = 1 << 20 // 1 MiB
 // taskService is the interface the Handler depends on.
 // It allows the Handler to be tested with a fake implementation.
 type taskService interface {
-	CreateTask(ctx context.Context, title, description string) (Task, error)
-	GetTask(ctx context.Context, id string) (Task, error)
-	ListTasks(ctx context.Context, limit, offset int) ([]Task, error)
-	UpdateTask(ctx context.Context, id, title, description string) (Task, error)
-	DeleteTask(ctx context.Context, id string) error
-	CompleteTask(ctx context.Context, id string) (Task, error)
+	CreateTask(ctx context.Context, userID, title, description, priority string) (Task, error)
+	GetTask(ctx context.Context, userID, id string) (Task, error)
+	ListTasks(ctx context.Context, userID string, limit, offset int) ([]Task, error)
+	UpdateTask(ctx context.Context, userID, id, title, description, priority string) (Task, error)
+	DeleteTask(ctx context.Context, userID, id string) error
+	CompleteTask(ctx context.Context, userID, id string) (Task, error)
+	TransitionStatus(ctx context.Context, userID, id string, target Status) (Task, error)
 }
 
 // Handler exposes the task Service over HTTP.
@@ -39,26 +40,43 @@ func NewHandler(svc taskService, logger *slog.Logger) *Handler {
 	return &Handler{svc: svc, logger: logger}
 }
 
-// RegisterRoutes registers all task routes on the given mux.
-func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /tasks", h.createTask)
-	mux.HandleFunc("GET /tasks", h.listTasks)
-	mux.HandleFunc("GET /tasks/{id}", h.getTask)
-	mux.HandleFunc("PUT /tasks/{id}", h.updateTask)
-	mux.HandleFunc("PATCH /tasks/{id}/done", h.completeTask)
-	mux.HandleFunc("DELETE /tasks/{id}", h.deleteTask)
+// RegisterRoutes registers all task routes on the given mux, each wrapped
+// with requireAuth — every task route requires an authenticated caller,
+// unlike user.Handler.RegisterRoutes, which only wraps some of its routes.
+// requireAuth is what makes middleware.UserIDFromContext(r.Context())
+// non-empty inside every handler method below.
+func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth middleware.Middleware) {
+	protect := func(hf http.HandlerFunc) http.Handler { return requireAuth(hf) }
+
+	mux.Handle("POST /tasks", protect(h.createTask))
+	mux.Handle("GET /tasks", protect(h.listTasks))
+	mux.Handle("GET /tasks/{id}", protect(h.getTask))
+	mux.Handle("PUT /tasks/{id}", protect(h.updateTask))
+	mux.Handle("PATCH /tasks/{id}/done", protect(h.completeTask))
+	mux.Handle("PATCH /tasks/{id}/status", protect(h.transitionStatus))
+	mux.Handle("DELETE /tasks/{id}", protect(h.deleteTask))
 }
 
-// createTaskRequest is the accepted body for POST /tasks.
+// createTaskRequest is the accepted body for POST /tasks. Priority is
+// optional — see Service.CreateTask for what an empty value defaults to.
 type createTaskRequest struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
+	Priority    string `json:"priority"`
 }
 
-// updateTaskRequest is the accepted body for PUT /tasks/{id}.
+// updateTaskRequest is the accepted body for PUT /tasks/{id}. Priority is
+// optional — an empty value leaves the task's current priority unchanged
+// (see Service.UpdateTask).
 type updateTaskRequest struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
+	Priority    string `json:"priority"`
+}
+
+// statusRequest is the accepted body for PATCH /tasks/{id}/status.
+type statusRequest struct {
+	Status string `json:"status"`
 }
 
 // createTask handles POST /tasks.
@@ -72,7 +90,9 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := h.svc.CreateTask(r.Context(), req.Title, req.Description)
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	task, err := h.svc.CreateTask(r.Context(), userID, req.Title, req.Description, req.Priority)
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return
@@ -100,7 +120,9 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tasks, err := h.svc.ListTasks(r.Context(), limit, offset)
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	tasks, err := h.svc.ListTasks(r.Context(), userID, limit, offset)
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return
@@ -141,8 +163,9 @@ func parsePagination(query url.Values) (limit, offset int, err error) {
 // getTask handles GET /tasks/{id}.
 func (h *Handler) getTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	userID, _ := middleware.UserIDFromContext(r.Context())
 
-	task, err := h.svc.GetTask(r.Context(), id)
+	task, err := h.svc.GetTask(r.Context(), userID, id)
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return
@@ -164,7 +187,9 @@ func (h *Handler) updateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := h.svc.UpdateTask(r.Context(), id, req.Title, req.Description)
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	task, err := h.svc.UpdateTask(r.Context(), userID, id, req.Title, req.Description, req.Priority)
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return
@@ -176,8 +201,33 @@ func (h *Handler) updateTask(w http.ResponseWriter, r *http.Request) {
 // completeTask handles PATCH /tasks/{id}/done.
 func (h *Handler) completeTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	userID, _ := middleware.UserIDFromContext(r.Context())
 
-	task, err := h.svc.CompleteTask(r.Context(), id)
+	task, err := h.svc.CompleteTask(r.Context(), userID, id)
+	if err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
+	h.writeJSON(w, r, http.StatusOK, task)
+}
+
+// transitionStatus handles PATCH /tasks/{id}/status.
+func (h *Handler) transitionStatus(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	defer r.Body.Close()
+
+	id := r.PathValue("id")
+
+	var req statusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	task, err := h.svc.TransitionStatus(r.Context(), userID, id, Status(req.Status))
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return
@@ -189,8 +239,9 @@ func (h *Handler) completeTask(w http.ResponseWriter, r *http.Request) {
 // deleteTask handles DELETE /tasks/{id}.
 func (h *Handler) deleteTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	userID, _ := middleware.UserIDFromContext(r.Context())
 
-	if err := h.svc.DeleteTask(r.Context(), id); err != nil {
+	if err := h.svc.DeleteTask(r.Context(), userID, id); err != nil {
 		h.handleServiceError(w, r, err)
 		return
 	}
@@ -221,6 +272,8 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, r *http.Request, err
 		h.writeError(w, r, http.StatusConflict, "task already exists")
 	case errors.Is(err, ErrConflict):
 		h.writeError(w, r, http.StatusConflict, "task was modified concurrently, please retry")
+	case errors.Is(err, ErrInvalidTransition):
+		h.writeError(w, r, http.StatusConflict, err.Error())
 	default:
 		requestID, _ := middleware.RequestIDFromContext(r.Context())
 		h.logger.Error("unexpected service error",
