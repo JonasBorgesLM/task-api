@@ -24,7 +24,7 @@ type fakeRepository struct {
 	updateCalled      bool
 	savedTask         Task
 	updatedTask       Task
-	findAllCalledWith [2]int // [limit, offset]
+	findAllCalledWith [3]any // [userID, limit, offset]
 }
 
 func (f *fakeRepository) Create(_ context.Context, task Task) error {
@@ -32,12 +32,12 @@ func (f *fakeRepository) Create(_ context.Context, task Task) error {
 	return f.createErr
 }
 
-func (f *fakeRepository) FindByID(_ context.Context, _ string) (Task, error) {
+func (f *fakeRepository) FindByID(_ context.Context, _, _ string) (Task, error) {
 	return f.findByIDTask, f.findByIDErr
 }
 
-func (f *fakeRepository) FindAll(_ context.Context, limit, offset int) ([]Task, error) {
-	f.findAllCalledWith = [2]int{limit, offset}
+func (f *fakeRepository) FindAll(_ context.Context, userID string, limit, offset int) ([]Task, error) {
+	f.findAllCalledWith = [3]any{userID, limit, offset}
 	return f.findAllTasks, f.findAllErr
 }
 
@@ -47,18 +47,21 @@ func (f *fakeRepository) Update(_ context.Context, task Task) error {
 	return f.updateErr
 }
 
-func (f *fakeRepository) Delete(_ context.Context, _ string) error {
+func (f *fakeRepository) Delete(_ context.Context, _, _ string) error {
 	return f.deleteErr
 }
 
-// newFakeTask returns a Task with predictable values for use in tests.
+// newFakeTask returns a Task owned by testUserID with predictable values
+// for use in tests.
 func newFakeTask(status Status) Task {
 	t := time.Now().Add(-time.Hour) // one hour ago, to ensure UpdatedAt changes are detectable
 	return Task{
 		ID:          "fake-id",
+		UserID:      testUserID,
 		Title:       "Fake task",
 		Description: "Fake description",
 		Status:      status,
+		Priority:    PriorityMedium,
 		CreatedAt:   t,
 		UpdatedAt:   t,
 	}
@@ -70,13 +73,16 @@ func TestCreateTask_ValidTitle(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	got, err := svc.CreateTask(context.Background(), "Buy groceries", "at the market")
+	got, err := svc.CreateTask(context.Background(), testUserID, "Buy groceries", "at the market", "")
 	if err != nil {
 		t.Fatalf("CreateTask() unexpected error: %v", err)
 	}
 
 	if got.ID == "" {
 		t.Error("CreateTask() ID must not be empty")
+	}
+	if got.UserID != testUserID {
+		t.Errorf("CreateTask() UserID = %q, want %q", got.UserID, testUserID)
 	}
 	if got.Title != "Buy groceries" {
 		t.Errorf("CreateTask() Title = %q, want %q", got.Title, "Buy groceries")
@@ -86,6 +92,9 @@ func TestCreateTask_ValidTitle(t *testing.T) {
 	}
 	if got.Status != StatusPending {
 		t.Errorf("CreateTask() Status = %q, want %q", got.Status, StatusPending)
+	}
+	if got.Priority != PriorityMedium {
+		t.Errorf("CreateTask() Priority = %q, want %q (default)", got.Priority, PriorityMedium)
 	}
 	if got.CreatedAt.IsZero() {
 		t.Error("CreateTask() CreatedAt must not be zero")
@@ -115,10 +124,31 @@ func TestCreateTask_ValidTitle(t *testing.T) {
 	}
 }
 
+func TestCreateTask_ExplicitPriority(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	got, err := svc.CreateTask(context.Background(), testUserID, "Title", "", "high")
+	if err != nil {
+		t.Fatalf("CreateTask() unexpected error: %v", err)
+	}
+	if got.Priority != PriorityHigh {
+		t.Errorf("CreateTask() Priority = %q, want %q", got.Priority, PriorityHigh)
+	}
+}
+
+func TestCreateTask_InvalidPriority(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	_, err := svc.CreateTask(context.Background(), testUserID, "Title", "", "urgent")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("CreateTask() invalid priority error = %v, want ErrInvalidInput", err)
+	}
+}
+
 func TestCreateTask_EmptyTitle(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.CreateTask(context.Background(), "", "description")
+	_, err := svc.CreateTask(context.Background(), testUserID, "", "description", "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("CreateTask() empty title error = %v, want ErrInvalidInput", err)
 	}
@@ -127,7 +157,7 @@ func TestCreateTask_EmptyTitle(t *testing.T) {
 func TestCreateTask_WhitespaceTitle(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.CreateTask(context.Background(), "   ", "description")
+	_, err := svc.CreateTask(context.Background(), testUserID, "   ", "description", "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("CreateTask() whitespace title error = %v, want ErrInvalidInput", err)
 	}
@@ -136,7 +166,7 @@ func TestCreateTask_WhitespaceTitle(t *testing.T) {
 func TestCreateTask_TitleTooLong(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.CreateTask(context.Background(), strings.Repeat("a", maxTitleLen+1), "description")
+	_, err := svc.CreateTask(context.Background(), testUserID, strings.Repeat("a", maxTitleLen+1), "description", "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("CreateTask() overlong title error = %v, want ErrInvalidInput", err)
 	}
@@ -145,7 +175,7 @@ func TestCreateTask_TitleTooLong(t *testing.T) {
 func TestCreateTask_TitleAtMaxLength(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.CreateTask(context.Background(), strings.Repeat("a", maxTitleLen), "description")
+	_, err := svc.CreateTask(context.Background(), testUserID, strings.Repeat("a", maxTitleLen), "description", "")
 	if err != nil {
 		t.Errorf("CreateTask() title at max length unexpected error: %v", err)
 	}
@@ -154,7 +184,7 @@ func TestCreateTask_TitleAtMaxLength(t *testing.T) {
 func TestCreateTask_DescriptionTooLong(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.CreateTask(context.Background(), "Valid title", strings.Repeat("a", maxDescriptionLen+1))
+	_, err := svc.CreateTask(context.Background(), testUserID, "Valid title", strings.Repeat("a", maxDescriptionLen+1), "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("CreateTask() overlong description error = %v, want ErrInvalidInput", err)
 	}
@@ -171,7 +201,7 @@ func TestCreateTask_TitleUnicode_AtMaxLength(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
 	title := strings.Repeat("é", maxTitleLen)
-	got, err := svc.CreateTask(context.Background(), title, "description")
+	got, err := svc.CreateTask(context.Background(), testUserID, title, "description", "")
 	if err != nil {
 		t.Fatalf("CreateTask() title at max rune length unexpected error: %v", err)
 	}
@@ -186,7 +216,7 @@ func TestCreateTask_TitleUnicode_AtMaxLength(t *testing.T) {
 func TestCreateTask_TitleUnicode_OverMaxLength(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.CreateTask(context.Background(), strings.Repeat("é", maxTitleLen+1), "description")
+	_, err := svc.CreateTask(context.Background(), testUserID, strings.Repeat("é", maxTitleLen+1), "description", "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("CreateTask() overlong unicode title error = %v, want ErrInvalidInput", err)
 	}
@@ -198,7 +228,7 @@ func TestCreateTask_DescriptionUnicode_AtMaxLength(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
 	description := strings.Repeat("é", maxDescriptionLen)
-	got, err := svc.CreateTask(context.Background(), "Valid title", description)
+	got, err := svc.CreateTask(context.Background(), testUserID, "Valid title", description, "")
 	if err != nil {
 		t.Fatalf("CreateTask() description at max rune length unexpected error: %v", err)
 	}
@@ -210,7 +240,7 @@ func TestCreateTask_DescriptionUnicode_AtMaxLength(t *testing.T) {
 func TestCreateTask_TrimsTitleAndDescription(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	got, err := svc.CreateTask(context.Background(), "  Padded title  ", "  Padded description  ")
+	got, err := svc.CreateTask(context.Background(), testUserID, "  Padded title  ", "  Padded description  ", "")
 	if err != nil {
 		t.Fatalf("CreateTask() unexpected error: %v", err)
 	}
@@ -226,7 +256,7 @@ func TestCreateTask_RepositoryError(t *testing.T) {
 	repoErr := errors.New("storage failure")
 	svc := NewService(&fakeRepository{createErr: repoErr})
 
-	_, err := svc.CreateTask(context.Background(), "Valid title", "")
+	_, err := svc.CreateTask(context.Background(), testUserID, "Valid title", "", "")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("CreateTask() repository error = %v, want %v", err, repoErr)
 	}
@@ -238,7 +268,7 @@ func TestGetTask_Delegates(t *testing.T) {
 	task := newFakeTask(StatusPending)
 	svc := NewService(&fakeRepository{findByIDTask: task})
 
-	got, err := svc.GetTask(context.Background(), "fake-id")
+	got, err := svc.GetTask(context.Background(), testUserID, "fake-id")
 	if err != nil {
 		t.Fatalf("GetTask() unexpected error: %v", err)
 	}
@@ -250,7 +280,7 @@ func TestGetTask_Delegates(t *testing.T) {
 func TestGetTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{findByIDErr: ErrNotFound})
 
-	_, err := svc.GetTask(context.Background(), "nonexistent")
+	_, err := svc.GetTask(context.Background(), testUserID, "nonexistent")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("GetTask() error = %v, want ErrNotFound", err)
 	}
@@ -262,7 +292,7 @@ func TestListTasks_Delegates(t *testing.T) {
 	tasks := []Task{newFakeTask(StatusPending), newFakeTask(StatusDone)}
 	svc := NewService(&fakeRepository{findAllTasks: tasks})
 
-	got, err := svc.ListTasks(context.Background(), -1, 0)
+	got, err := svc.ListTasks(context.Background(), testUserID, -1, 0)
 	if err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
@@ -271,20 +301,21 @@ func TestListTasks_Delegates(t *testing.T) {
 	}
 }
 
-// TestListTasks_PassesLimitOffsetToRepository verifies that Service passes
-// the limit/offset it received straight through to Repository.FindAll,
-// unmodified — Service no longer applies its own ordering or windowing
-// (that moved to Repository; see memory_repository_test.go's and
-// postgres_repository_test.go's FindAll ordering/pagination tests).
-func TestListTasks_PassesLimitOffsetToRepository(t *testing.T) {
+// TestListTasks_PassesUserIDLimitOffsetToRepository verifies that Service
+// passes userID and the limit/offset it received straight through to
+// Repository.FindAll, unmodified — Service no longer applies its own
+// ordering or windowing (that moved to Repository; see
+// memory_repository_test.go's and postgres_repository_test.go's FindAll
+// ordering/pagination tests).
+func TestListTasks_PassesUserIDLimitOffsetToRepository(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	if _, err := svc.ListTasks(context.Background(), 10, 5); err != nil {
+	if _, err := svc.ListTasks(context.Background(), testUserID, 10, 5); err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
-	if want := [2]int{10, 5}; repo.findAllCalledWith != want {
-		t.Errorf("ListTasks() called Repository.FindAll with limit/offset = %v, want %v", repo.findAllCalledWith, want)
+	if want := [3]any{testUserID, 10, 5}; repo.findAllCalledWith != want {
+		t.Errorf("ListTasks() called Repository.FindAll with (userID, limit, offset) = %v, want %v", repo.findAllCalledWith, want)
 	}
 }
 
@@ -292,7 +323,7 @@ func TestListTasks_RepositoryError(t *testing.T) {
 	repoErr := errors.New("storage failure")
 	svc := NewService(&fakeRepository{findAllErr: repoErr})
 
-	_, err := svc.ListTasks(context.Background(), -1, 0)
+	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0)
 	if !errors.Is(err, repoErr) {
 		t.Errorf("ListTasks() repository error = %v, want %v", err, repoErr)
 	}
@@ -305,7 +336,7 @@ func TestUpdateTask_ValidTitle(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.UpdateTask(context.Background(), "fake-id", "New title", "New description")
+	got, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "New title", "New description", "")
 	if err != nil {
 		t.Fatalf("UpdateTask() unexpected error: %v", err)
 	}
@@ -330,11 +361,51 @@ func TestUpdateTask_ValidTitle(t *testing.T) {
 	}
 }
 
+func TestUpdateTask_EmptyPriority_KeepsCurrent(t *testing.T) {
+	original := newFakeTask(StatusPending)
+	original.Priority = PriorityHigh
+	repo := &fakeRepository{findByIDTask: original}
+	svc := NewService(repo)
+
+	got, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "New title", "", "")
+	if err != nil {
+		t.Fatalf("UpdateTask() unexpected error: %v", err)
+	}
+	if got.Priority != PriorityHigh {
+		t.Errorf("UpdateTask() with empty priority Priority = %q, want unchanged %q", got.Priority, PriorityHigh)
+	}
+}
+
+func TestUpdateTask_ExplicitPriority_Changes(t *testing.T) {
+	original := newFakeTask(StatusPending)
+	original.Priority = PriorityLow
+	repo := &fakeRepository{findByIDTask: original}
+	svc := NewService(repo)
+
+	got, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "New title", "", "high")
+	if err != nil {
+		t.Fatalf("UpdateTask() unexpected error: %v", err)
+	}
+	if got.Priority != PriorityHigh {
+		t.Errorf("UpdateTask() Priority = %q, want %q", got.Priority, PriorityHigh)
+	}
+}
+
+func TestUpdateTask_InvalidPriority(t *testing.T) {
+	repo := &fakeRepository{findByIDTask: newFakeTask(StatusPending)}
+	svc := NewService(repo)
+
+	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "Title", "", "urgent")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("UpdateTask() invalid priority error = %v, want ErrInvalidInput", err)
+	}
+}
+
 func TestUpdateTask_EmptyTitle(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask(context.Background(), "fake-id", "", "desc")
+	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "", "desc", "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("UpdateTask() empty title error = %v, want ErrInvalidInput", err)
 	}
@@ -347,7 +418,7 @@ func TestUpdateTask_WhitespaceTitle(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask(context.Background(), "fake-id", "   ", "desc")
+	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "   ", "desc", "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("UpdateTask() whitespace title error = %v, want ErrInvalidInput", err)
 	}
@@ -359,7 +430,7 @@ func TestUpdateTask_WhitespaceTitle(t *testing.T) {
 func TestUpdateTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{findByIDErr: ErrNotFound})
 
-	_, err := svc.UpdateTask(context.Background(), "nonexistent", "Title", "")
+	_, err := svc.UpdateTask(context.Background(), testUserID, "nonexistent", "Title", "", "")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("UpdateTask() error = %v, want ErrNotFound", err)
 	}
@@ -373,7 +444,7 @@ func TestUpdateTask_RepositoryUpdateError(t *testing.T) {
 	}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask(context.Background(), "fake-id", "Title", "")
+	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "Title", "", "")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("UpdateTask() repository error = %v, want %v", err, repoErr)
 	}
@@ -386,7 +457,7 @@ func TestUpdateTask_RepositoryConflictError(t *testing.T) {
 	}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask(context.Background(), "fake-id", "Title", "")
+	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "Title", "", "")
 	if !errors.Is(err, ErrConflict) {
 		t.Errorf("UpdateTask() error = %v, want ErrConflict", err)
 	}
@@ -395,7 +466,7 @@ func TestUpdateTask_RepositoryConflictError(t *testing.T) {
 func TestUpdateTask_TitleTooLong(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.UpdateTask(context.Background(), "fake-id", strings.Repeat("a", maxTitleLen+1), "desc")
+	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", strings.Repeat("a", maxTitleLen+1), "desc", "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("UpdateTask() overlong title error = %v, want ErrInvalidInput", err)
 	}
@@ -404,7 +475,7 @@ func TestUpdateTask_TitleTooLong(t *testing.T) {
 func TestUpdateTask_DescriptionTooLong(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.UpdateTask(context.Background(), "fake-id", "Title", strings.Repeat("a", maxDescriptionLen+1))
+	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "Title", strings.Repeat("a", maxDescriptionLen+1), "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("UpdateTask() overlong description error = %v, want ErrInvalidInput", err)
 	}
@@ -414,7 +485,7 @@ func TestUpdateTask_TrimsTitleAndDescription(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: newFakeTask(StatusPending)}
 	svc := NewService(repo)
 
-	got, err := svc.UpdateTask(context.Background(), "fake-id", "  Padded title  ", "  Padded description  ")
+	got, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "  Padded title  ", "  Padded description  ", "")
 	if err != nil {
 		t.Fatalf("UpdateTask() unexpected error: %v", err)
 	}
@@ -431,7 +502,7 @@ func TestUpdateTask_TrimsTitleAndDescription(t *testing.T) {
 func TestDeleteTask_Delegates(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	if err := svc.DeleteTask(context.Background(), "fake-id"); err != nil {
+	if err := svc.DeleteTask(context.Background(), testUserID, "fake-id"); err != nil {
 		t.Errorf("DeleteTask() unexpected error: %v", err)
 	}
 }
@@ -439,7 +510,7 @@ func TestDeleteTask_Delegates(t *testing.T) {
 func TestDeleteTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{deleteErr: ErrNotFound})
 
-	err := svc.DeleteTask(context.Background(), "nonexistent")
+	err := svc.DeleteTask(context.Background(), testUserID, "nonexistent")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("DeleteTask() error = %v, want ErrNotFound", err)
 	}
@@ -449,7 +520,7 @@ func TestDeleteTask_RepositoryError(t *testing.T) {
 	repoErr := errors.New("delete failure")
 	svc := NewService(&fakeRepository{deleteErr: repoErr})
 
-	err := svc.DeleteTask(context.Background(), "fake-id")
+	err := svc.DeleteTask(context.Background(), testUserID, "fake-id")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("DeleteTask() repository error = %v, want %v", err, repoErr)
 	}
@@ -462,7 +533,7 @@ func TestCompleteTask_PendingToDone(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.CompleteTask(context.Background(), "fake-id")
+	got, err := svc.CompleteTask(context.Background(), testUserID, "fake-id")
 	if err != nil {
 		t.Fatalf("CompleteTask() unexpected error: %v", err)
 	}
@@ -482,7 +553,7 @@ func TestCompleteTask_AlreadyDone_Idempotent(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.CompleteTask(context.Background(), "fake-id")
+	got, err := svc.CompleteTask(context.Background(), testUserID, "fake-id")
 	if err != nil {
 		t.Fatalf("CompleteTask() unexpected error: %v", err)
 	}
@@ -500,7 +571,7 @@ func TestCompleteTask_AlreadyDone_Idempotent(t *testing.T) {
 func TestCompleteTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{findByIDErr: ErrNotFound})
 
-	_, err := svc.CompleteTask(context.Background(), "nonexistent")
+	_, err := svc.CompleteTask(context.Background(), testUserID, "nonexistent")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("CompleteTask() error = %v, want ErrNotFound", err)
 	}
@@ -514,7 +585,7 @@ func TestCompleteTask_RepositoryUpdateError(t *testing.T) {
 	}
 	svc := NewService(repo)
 
-	_, err := svc.CompleteTask(context.Background(), "fake-id")
+	_, err := svc.CompleteTask(context.Background(), testUserID, "fake-id")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("CompleteTask() repository error = %v, want %v", err, repoErr)
 	}
@@ -527,9 +598,117 @@ func TestCompleteTask_RepositoryConflictError(t *testing.T) {
 	}
 	svc := NewService(repo)
 
-	_, err := svc.CompleteTask(context.Background(), "fake-id")
+	_, err := svc.CompleteTask(context.Background(), testUserID, "fake-id")
 	if !errors.Is(err, ErrConflict) {
 		t.Errorf("CompleteTask() error = %v, want ErrConflict", err)
+	}
+}
+
+// --- TransitionStatus ---
+
+// TestTransitionStatus_LegalTransitions exercises every transition
+// legalTransitions marks as allowed (see service.go's table).
+func TestTransitionStatus_LegalTransitions(t *testing.T) {
+	cases := []struct {
+		from, to Status
+	}{
+		{StatusPending, StatusInProgress},
+		{StatusPending, StatusDone},
+		{StatusPending, StatusCancelled},
+		{StatusInProgress, StatusPending},
+		{StatusInProgress, StatusDone},
+		{StatusInProgress, StatusCancelled},
+		{StatusDone, StatusPending},
+		{StatusDone, StatusInProgress},
+		{StatusCancelled, StatusPending},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.from)+"_to_"+string(tc.to), func(t *testing.T) {
+			repo := &fakeRepository{findByIDTask: newFakeTask(tc.from)}
+			svc := NewService(repo)
+
+			got, err := svc.TransitionStatus(context.Background(), testUserID, "fake-id", tc.to)
+			if err != nil {
+				t.Fatalf("TransitionStatus(%s -> %s) unexpected error: %v", tc.from, tc.to, err)
+			}
+			if got.Status != tc.to {
+				t.Errorf("TransitionStatus(%s -> %s) Status = %q, want %q", tc.from, tc.to, got.Status, tc.to)
+			}
+			if !repo.updateCalled {
+				t.Errorf("TransitionStatus(%s -> %s) must call Repository.Update", tc.from, tc.to)
+			}
+		})
+	}
+}
+
+// TestTransitionStatus_IllegalTransitions exercises every transition
+// legalTransitions marks as disallowed.
+func TestTransitionStatus_IllegalTransitions(t *testing.T) {
+	cases := []struct {
+		from, to Status
+	}{
+		{StatusDone, StatusCancelled},
+		{StatusCancelled, StatusInProgress},
+		{StatusCancelled, StatusDone},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.from)+"_to_"+string(tc.to), func(t *testing.T) {
+			repo := &fakeRepository{findByIDTask: newFakeTask(tc.from)}
+			svc := NewService(repo)
+
+			_, err := svc.TransitionStatus(context.Background(), testUserID, "fake-id", tc.to)
+			if !errors.Is(err, ErrInvalidTransition) {
+				t.Errorf("TransitionStatus(%s -> %s) error = %v, want ErrInvalidTransition", tc.from, tc.to, err)
+			}
+			if repo.updateCalled {
+				t.Errorf("TransitionStatus(%s -> %s) must not call Repository.Update on an illegal transition", tc.from, tc.to)
+			}
+		})
+	}
+}
+
+// TestTransitionStatus_SameStatus_Idempotent verifies that requesting a
+// task's current status again is always a no-op success, independent of
+// legalTransitions — mirroring CompleteTask's existing idempotency for
+// "already done".
+func TestTransitionStatus_SameStatus_Idempotent(t *testing.T) {
+	original := newFakeTask(StatusInProgress)
+	repo := &fakeRepository{findByIDTask: original}
+	svc := NewService(repo)
+
+	got, err := svc.TransitionStatus(context.Background(), testUserID, "fake-id", StatusInProgress)
+	if err != nil {
+		t.Fatalf("TransitionStatus() same-status unexpected error: %v", err)
+	}
+	if !got.UpdatedAt.Equal(original.UpdatedAt) {
+		t.Errorf("TransitionStatus() idempotent: UpdatedAt changed from %v to %v", original.UpdatedAt, got.UpdatedAt)
+	}
+	if repo.updateCalled {
+		t.Error("TransitionStatus() must NOT call Repository.Update for a same-status request")
+	}
+}
+
+func TestTransitionStatus_UnknownStatus(t *testing.T) {
+	repo := &fakeRepository{findByIDTask: newFakeTask(StatusPending)}
+	svc := NewService(repo)
+
+	_, err := svc.TransitionStatus(context.Background(), testUserID, "fake-id", Status("archived"))
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("TransitionStatus() unknown status error = %v, want ErrInvalidInput", err)
+	}
+	if repo.updateCalled {
+		t.Error("TransitionStatus() must not call Repository.Update for an unknown status")
+	}
+}
+
+func TestTransitionStatus_NotFound(t *testing.T) {
+	svc := NewService(&fakeRepository{findByIDErr: ErrNotFound})
+
+	_, err := svc.TransitionStatus(context.Background(), testUserID, "nonexistent", StatusDone)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("TransitionStatus() error = %v, want ErrNotFound", err)
 	}
 }
 

@@ -1,0 +1,293 @@
+package task
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"strings"
+	"time"
+	"unicode/utf8"
+)
+
+// Maximum accepted lengths for user-supplied text fields. These bound
+// storage/response size and catch obviously malformed input; they are
+// deliberately generous for a task title/description.
+const (
+	maxTitleLen       = 200
+	maxDescriptionLen = 2000
+)
+
+// legalTransitions is the complete set of allowed Status transitions,
+// keyed by the task's current status. Requesting the task's current
+// status again is always allowed as a no-op, independently of this table
+// — see TransitionStatus.
+//
+//	from \ to     pending  in_progress  done  cancelled
+//	pending          -          Y        Y        Y
+//	in_progress      Y          -        Y        Y
+//	done             Y          Y        -        N
+//	cancelled        Y          N        N        -
+//
+// done and cancelled are both reopenable back to pending (and done can
+// resume directly to in_progress), but cancelled must pass back through
+// pending before becoming active again — this keeps the graph small
+// without blocking any realistic workflow. pending -> done stays legal
+// directly, matching PATCH /tasks/{id}/done's existing one-hop behavior.
+var legalTransitions = map[Status]map[Status]bool{
+	StatusPending:    {StatusInProgress: true, StatusDone: true, StatusCancelled: true},
+	StatusInProgress: {StatusPending: true, StatusDone: true, StatusCancelled: true},
+	StatusDone:       {StatusPending: true, StatusInProgress: true},
+	StatusCancelled:  {StatusPending: true},
+}
+
+// validStatuses is the complete set of Status values a caller may name as
+// a TransitionStatus target.
+var validStatuses = map[Status]bool{
+	StatusPending:    true,
+	StatusInProgress: true,
+	StatusDone:       true,
+	StatusCancelled:  true,
+}
+
+// validPriorities is the complete set of Priority values CreateTask/
+// UpdateTask accept.
+var validPriorities = map[Priority]bool{
+	PriorityLow:    true,
+	PriorityMedium: true,
+	PriorityHigh:   true,
+}
+
+// Service holds the business logic for task management.
+type Service struct {
+	repo Repository
+}
+
+// NewService returns a new Service with the given Repository.
+func NewService(repo Repository) *Service {
+	return &Service{repo: repo}
+}
+
+// newID generates a random UUID v4.
+func newID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("failed to generate task ID: %w", err)
+	}
+
+	// Set version 4 (bits 4–7 of byte 6).
+	b[6] = b[6]&0x0f | 0x40
+	// Set variant bits (bits 6–7 of byte 8 to 0b10).
+	b[8] = b[8]&0x3f | 0x80
+
+	return fmt.Sprintf(
+		"%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:],
+	), nil
+}
+
+// CreateTask validates input, builds a new Task owned by userID and
+// persists it. An empty priority defaults to PriorityMedium; otherwise it
+// must be one of low/medium/high.
+func (s *Service) CreateTask(ctx context.Context, userID, title, description, priority string) (Task, error) {
+	title, description, err := validateTitleAndDescription(title, description)
+	if err != nil {
+		return Task{}, err
+	}
+
+	p, err := validatePriority(priority, PriorityMedium)
+	if err != nil {
+		return Task{}, err
+	}
+
+	id, err := newID()
+	if err != nil {
+		return Task{}, fmt.Errorf("create task: %w", err)
+	}
+
+	now := time.Now()
+	task := Task{
+		ID:          id,
+		UserID:      userID,
+		Title:       title,
+		Description: description,
+		Status:      StatusPending,
+		Priority:    p,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := s.repo.Create(ctx, task); err != nil {
+		return Task{}, fmt.Errorf("create task: %w", err)
+	}
+
+	return task, nil
+}
+
+// GetTask retrieves userID's Task by its ID.
+func (s *Service) GetTask(ctx context.Context, userID, id string) (Task, error) {
+	task, err := s.repo.FindByID(ctx, id, userID)
+	if err != nil {
+		return Task{}, fmt.Errorf("get task: %w", err)
+	}
+	return task, nil
+}
+
+// ListTasks returns userID's stored tasks ordered deterministically by
+// CreatedAt (oldest first) and then by ID to break ties, optionally
+// windowed to at most limit results starting at offset. limit < 0 means
+// "no limit" — every task from offset onward is returned.
+//
+// The ordering and the limit/offset window are both enforced by
+// Repository.FindAll itself (see its doc comment), not re-derived here:
+// pushing them down to storage means a PostgreSQL-backed Repository can
+// apply ORDER BY/LIMIT/OFFSET in the query instead of fetching every row
+// into the process on every call just to discard most of them.
+func (s *Service) ListTasks(ctx context.Context, userID string, limit, offset int) ([]Task, error) {
+	tasks, err := s.repo.FindAll(ctx, userID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list tasks: %w", err)
+	}
+
+	return tasks, nil
+}
+
+// UpdateTask updates the title, description and (optionally) priority of
+// an existing Task owned by userID. CreatedAt and Status are never
+// modified here — see TransitionStatus for status changes. UpdatedAt is
+// set to now. An empty priority leaves the task's current priority
+// unchanged; otherwise it must be one of low/medium/high.
+//
+// UpdateTask performs a read-modify-write against the Repository with
+// optimistic concurrency control: it passes back the Version it read from
+// FindByID, and Repository.Update rejects the write with ErrConflict if
+// another writer updated the same task in between. The caller should treat
+// ErrConflict as retryable — re-read the task and try again.
+func (s *Service) UpdateTask(ctx context.Context, userID, id, title, description, priority string) (Task, error) {
+	title, description, err := validateTitleAndDescription(title, description)
+	if err != nil {
+		return Task{}, err
+	}
+
+	task, err := s.repo.FindByID(ctx, id, userID)
+	if err != nil {
+		return Task{}, fmt.Errorf("update task: %w", err)
+	}
+
+	p, err := validatePriority(priority, task.Priority)
+	if err != nil {
+		return Task{}, err
+	}
+
+	task.Title = title
+	task.Description = description
+	task.Priority = p
+	task.UpdatedAt = time.Now()
+
+	if err := s.repo.Update(ctx, task); err != nil {
+		return Task{}, fmt.Errorf("update task: %w", err)
+	}
+
+	return task, nil
+}
+
+// DeleteTask removes userID's Task by its ID.
+func (s *Service) DeleteTask(ctx context.Context, userID, id string) error {
+	if err := s.repo.Delete(ctx, id, userID); err != nil {
+		return fmt.Errorf("delete task: %w", err)
+	}
+	return nil
+}
+
+// TransitionStatus moves userID's Task with the given id to target,
+// enforcing legalTransitions. Requesting the task's current status again
+// is always a no-op success (idempotent, and never calls Repository.Update
+// — so it cannot ErrConflict), the same idempotency CompleteTask has
+// always provided for "already done". Any other transition not present in
+// legalTransitions[current] returns ErrInvalidTransition without applying
+// the write.
+//
+// Like UpdateTask, this uses optimistic concurrency control via the
+// Version read from FindByID; see UpdateTask's doc comment.
+func (s *Service) TransitionStatus(ctx context.Context, userID, id string, target Status) (Task, error) {
+	if !validStatuses[target] {
+		return Task{}, fmt.Errorf("%w: unknown status %q", ErrInvalidInput, target)
+	}
+
+	task, err := s.repo.FindByID(ctx, id, userID)
+	if err != nil {
+		return Task{}, fmt.Errorf("transition status: %w", err)
+	}
+
+	if task.Status == target {
+		return task, nil
+	}
+	if !legalTransitions[task.Status][target] {
+		return Task{}, fmt.Errorf("%w: cannot move from %q to %q", ErrInvalidTransition, task.Status, target)
+	}
+
+	task.Status = target
+	task.UpdatedAt = time.Now()
+
+	if err := s.repo.Update(ctx, task); err != nil {
+		return Task{}, fmt.Errorf("transition status: %w", err)
+	}
+
+	return task, nil
+}
+
+// CompleteTask marks userID's Task as done. It is a thin, backward-compatible
+// wrapper around TransitionStatus(..., StatusDone) — kept as its own method
+// because PATCH /tasks/{id}/done predates the general status endpoint and
+// its wire contract (200, unchanged body shape) must not change.
+func (s *Service) CompleteTask(ctx context.Context, userID, id string) (Task, error) {
+	task, err := s.TransitionStatus(ctx, userID, id, StatusDone)
+	if err != nil {
+		return Task{}, fmt.Errorf("complete task: %w", err)
+	}
+	return task, nil
+}
+
+// validateTitleAndDescription trims title and description and validates
+// their length: title must be non-empty (after trimming) and at most
+// maxTitleLen characters; description must be at most maxDescriptionLen
+// characters. It returns the trimmed values, or ErrInvalidInput describing
+// which constraint failed.
+//
+// Length is measured in Unicode characters (utf8.RuneCountInString), not
+// bytes: len() on a Go string counts bytes, which for any non-ASCII text
+// (accents, Cyrillic, CJK, emoji, ...) is larger than — and therefore a
+// stricter limit than — the character count the error message and the
+// PostgreSQL VARCHAR(200)/VARCHAR(2000) columns (which count characters,
+// not bytes) actually enforce. Measuring bytes here would reject valid
+// input well under the intended limit.
+func validateTitleAndDescription(title, description string) (string, string, error) {
+	title = strings.TrimSpace(title)
+	description = strings.TrimSpace(description)
+
+	if title == "" {
+		return "", "", fmt.Errorf("%w: title must not be empty", ErrInvalidInput)
+	}
+	if utf8.RuneCountInString(title) > maxTitleLen {
+		return "", "", fmt.Errorf("%w: title must be at most %d characters", ErrInvalidInput, maxTitleLen)
+	}
+	if utf8.RuneCountInString(description) > maxDescriptionLen {
+		return "", "", fmt.Errorf("%w: description must be at most %d characters", ErrInvalidInput, maxDescriptionLen)
+	}
+
+	return title, description, nil
+}
+
+// validatePriority returns fallback if priority is empty (the "not
+// provided" sentinel both CreateTask and UpdateTask use — a real Priority
+// value is never the empty string), or priority itself if it names a
+// valid Priority. Otherwise it returns ErrInvalidInput.
+func validatePriority(priority string, fallback Priority) (Priority, error) {
+	if priority == "" {
+		return fallback, nil
+	}
+	p := Priority(priority)
+	if !validPriorities[p] {
+		return "", fmt.Errorf("%w: priority must be one of low, medium, high", ErrInvalidInput)
+	}
+	return p, nil
+}

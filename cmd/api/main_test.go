@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JonasBorgesLM/task-api/task"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // discardLogger returns a logger that silently discards all output.
@@ -253,22 +254,12 @@ func TestHealthEndpoint(t *testing.T) {
 
 // --- Readiness check ---
 
-// pingerRepository is a minimal task.Repository that also implements
-// task.Pinger, letting these tests drive registerReadinessRoute's Pinger
-// branch with a controllable error instead of a real PostgreSQL instance.
-type pingerRepository struct {
-	task.Repository
-	pingErr error
-}
-
-func (r *pingerRepository) Ping(context.Context) error { return r.pingErr }
-
-// TestReadinessEndpoint_NonPinger_AlwaysReady verifies that a Repository
-// which doesn't implement task.Pinger (memoryRepository, in production) is
-// always reported ready — there's nothing external for it to check.
-func TestReadinessEndpoint_NonPinger_AlwaysReady(t *testing.T) {
+// TestReadinessEndpoint_NilDB_AlwaysReady verifies that the in-memory-store
+// configuration (db == nil, see openDatabase) is always reported ready —
+// there's nothing external to check.
+func TestReadinessEndpoint_NilDB_AlwaysReady(t *testing.T) {
 	mux := http.NewServeMux()
-	registerReadinessRoute(mux, task.NewMemoryRepository(), discardLogger())
+	registerReadinessRoute(mux, nil, discardLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
 	w := httptest.NewRecorder()
@@ -287,33 +278,28 @@ func TestReadinessEndpoint_NonPinger_AlwaysReady(t *testing.T) {
 	}
 }
 
-// TestReadinessEndpoint_PingerHealthy_ReturnsOK verifies the 200 path when
-// the repository's Ping succeeds.
-func TestReadinessEndpoint_PingerHealthy_ReturnsOK(t *testing.T) {
-	mux := http.NewServeMux()
-	registerReadinessRoute(mux, &pingerRepository{Repository: task.NewMemoryRepository()}, discardLogger())
-
-	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("GET /health/ready status = %d, want %d", w.Code, http.StatusOK)
+// TestReadinessEndpoint_UnreachableDB_ReturnsServiceUnavailable verifies
+// that a *sql.DB whose Ping fails makes GET /health/ready report 503
+// instead of the always-200 GET /health — this is the whole point of the
+// readiness check: an orchestrator can act on this distinction to stop
+// routing traffic to this replica.
+//
+// A closed *sql.DB is used to get a deterministic Ping failure ("sql:
+// database is closed") without needing a real, unreachable PostgreSQL
+// instance: sql.Open never dials anything (see openDatabase's doc
+// comment), so opening then immediately closing a pool needs no network
+// access at all and keeps this a unit test.
+func TestReadinessEndpoint_UnreachableDB_ReturnsServiceUnavailable(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://unreachable/db")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
 	}
-}
-
-// TestReadinessEndpoint_PingerFailing_ReturnsServiceUnavailable verifies
-// that a repository whose Ping fails (e.g. PostgreSQL unreachable) makes
-// GET /health/ready report 503 instead of the always-200 GET /health —
-// this is the whole point of the readiness check: an orchestrator can act
-// on this distinction to stop routing traffic to this replica.
-func TestReadinessEndpoint_PingerFailing_ReturnsServiceUnavailable(t *testing.T) {
-	mux := http.NewServeMux()
-	repo := &pingerRepository{
-		Repository: task.NewMemoryRepository(),
-		pingErr:    errors.New("connection refused"),
+	if err := db.Close(); err != nil {
+		t.Fatalf("db.Close: %v", err)
 	}
-	registerReadinessRoute(mux, repo, discardLogger())
+
+	mux := http.NewServeMux()
+	registerReadinessRoute(mux, db, discardLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
 	w := httptest.NewRecorder()

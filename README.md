@@ -1,105 +1,35 @@
 # Task API
 
-A small, production-shaped HTTP REST API for task management, written in Go — a compact reference for how a real Go service is put together: layered architecture, a swappable persistence layer (in-memory or PostgreSQL, behind one interface), structured logging, graceful shutdown, health/readiness checks, and a test suite that keeps unit and integration tests genuinely separate.
+A small, production-shaped multi-user task manager, written in Go — a compact reference for how a real Go service is put together: layered architecture, session-based authentication, a swappable persistence layer (in-memory or PostgreSQL, behind one interface per domain), structured logging, graceful shutdown, health/readiness checks, and a test suite that keeps unit and integration tests genuinely separate.
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Project Structure](#project-structure)
-4. [Requirements](#requirements)
-5. [Configuration](#configuration)
-6. [Running Locally](#running-locally)
-7. [Running with Docker](#running-with-docker)
-8. [Testing](#testing)
-9. [Migrations](#migrations)
-10. [Seeding](#seeding)
-11. [API](#api)
-12. [Graceful Shutdown](#graceful-shutdown)
-13. [Observability](#observability)
-14. [Design Decisions](#design-decisions)
-15. [Future Improvements](#future-improvements)
+1. [Why this project](#why-this-project)
+2. [Requirements](#requirements)
+3. [Configuration](#configuration)
+4. [Running Locally](#running-locally)
+5. [Running with Docker](#running-with-docker)
+6. [Testing](#testing)
+7. [Migrations](#migrations)
+8. [Seeding](#seeding)
+9. [API](#api)
+10. [Learn more](#learn-more)
 
-## Overview
+## Why this project
 
-Task API manages the lifecycle of a task: a title, an optional description, and a status (`pending` or `done`) — create, read (single and list, with pagination), update, mark-complete, delete.
+Every task belongs to exactly one user, authenticated with a bearer session token (`POST /auth/login`); tasks move through four states (`pending` → `in_progress`/`done`/`cancelled`, with real transition rules — not just a status field) and carry a priority. The functional surface stays intentionally small. What's worth looking at is what's *underneath* it:
 
-The functional surface is intentionally small. The point of the project is what's *underneath* it: a layered architecture where each layer depends only on an interface, never a concrete implementation; a persistence layer swappable between an in-memory store and PostgreSQL without the business logic or HTTP layer knowing which one is in use; explicit configuration and dependency wiring with no hidden globals; and a development workflow (Docker, migrations, CI, tests) that mirrors how this would actually be operated.
+- **Swappable persistence with zero business-logic coupling.** `Service` and `Handler` (in both the `task` and `user` domains) never import PostgreSQL — the in-memory store and the PostgreSQL store implement the exact same `Repository` interface, and swapping one for the other requires no change above the repository layer.
+- **Real production concerns, already handled.** Graceful shutdown, liveness/readiness checks, structured JSON logs correlated by request ID, panic recovery, optimistic concurrency control on every update, embedded schema migrations, and a seed tool for a non-trivial local dataset.
+- **A test suite you can actually trust.** Fakes instead of a mocking framework, real concurrent goroutines (run under `-race`) for every concurrency-sensitive path, and a hard build-tag boundary between tests that need PostgreSQL and tests that don't.
+- **A minimal, auditable dependency footprint.** Two runtime dependencies (`pgx` for PostgreSQL, `golang.org/x/crypto` for password hashing), both pure Go — which is what lets the Docker image be a static binary on `scratch`: no shell, no libc, nothing to patch.
 
-For AI agents (or new contributors) working in this codebase, see **[CLAUDE.md](CLAUDE.md)** — architecture rules, conventions, and things not to change casually.
-
-## Architecture
-
-Three layers, each depending only on the layer below it, and only through an interface:
-
-```
-HTTP Request
-     │
-     ▼
-┌─────────────┐
-│   Handler   │  Decodes HTTP requests, calls Service, encodes responses
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│   Service   │  Validates input, applies business rules, manages timestamps and IDs
-└──────┬──────┘
-       ▼
-┌─────────────┐
-│ Repository  │  Persists and retrieves tasks — interface only
-└──────┬──────┘
-       │ implemented by
-       ├──────────────────────┐
-       ▼                      ▼
-┌────────────────┐   ┌─────────────────────┐
-│ memoryRepository│   │  postgresRepository │
-│ (in-process,    │   │  (*sql.DB, real     │
-│  no external    │   │   PostgreSQL)       │
-│  dependency)    │   │                     │
-└────────────────┘   └─────────────────────┘
-```
-
-`cmd/api/main.go` is the **Composition Root** — the only place that instantiates concrete types and wires them together. `Service` and `Handler` depend only on the `Repository` interface (`task/repository.go`) and are completely unaware PostgreSQL exists; only the small standalone binaries in `cmd/` (`api`, `migrate`, `seed`) import a PostgreSQL package. Swapping `memoryRepository` for `postgresRepository` — or adding a third implementation — requires zero changes to business logic or HTTP handling.
-
-## Project Structure
-
-```
-task-api/
-├── cmd/
-│   ├── api/
-│   │   ├── main.go                   # Composition Root: wires Repository→Service→Handler, starts the HTTP server
-│   │   ├── health.go                 # GET /health (liveness) and GET /health/ready (readiness)
-│   │   └── *_test.go                 # Server lifecycle + full-stack HTTP tests
-│   ├── migrate/
-│   │   └── main.go                   # Standalone CLI: applies/reverts PostgreSQL migrations
-│   └── seed/
-│       ├── main.go                   # Standalone CLI: populates the tasks table via the real Service
-│       └── data.go                   # Word lists + randomTask() — the random title/description generator
-├── config/                # Environment variable loading and validation (the only package that reads os.Getenv)
-├── middleware/             # RequestID, Logging, Recovery — composed via Chain()
-├── task/
-│   ├── task.go                       # Domain model: Task struct, Status type
-│   ├── errors.go                     # Domain error sentinels (ErrNotFound, ErrInvalidInput, ErrAlreadyExists, ErrConflict)
-│   ├── repository.go                 # Repository interface — the boundary Service depends on
-│   ├── memory_repository.go          # In-memory implementation (sync.RWMutex, CAS-based optimistic concurrency)
-│   ├── postgres_repository.go        # PostgreSQL implementation (*sql.DB, transactions, parameterized queries)
-│   ├── postgres_repository_test.go   # Integration tests — build-tagged `integration`, need real PostgreSQL
-│   ├── postgres_migrate.go           # Embedded migration runner (RunMigrations / RunMigrationsDown)
-│   ├── migrations/                   # *.up.sql / *.down.sql, embedded into the binary
-│   ├── service.go                    # Business logic: validation, ID generation, timestamps
-│   ├── handler.go                    # HTTP handlers, route registration, pagination param parsing
-│   └── integration_test.go           # Full-stack HTTP tests using the *real* memoryRepository (no external dependency)
-├── docs/openapi.yaml       # Full API contract — every endpoint, schema, status code, example
-├── docker-compose.yml      # Local stack: PostgreSQL, and optionally the API itself
-├── Dockerfile              # Multi-stage build → static binary on `scratch`
-├── Makefile                # `make help` for the full command list
-├── CLAUDE.md               # Guidance for AI agents / contributors working in this repo
-└── .env.example
-```
+For AI agents (or new contributors) working in this codebase, see **[CLAUDE.md](CLAUDE.md)** — architecture rules, conventions, and things not to change casually. For the full project structure, the rationale behind each design decision, and the roadmap, see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**. For the full API contract, see **[docs/openapi.yaml](docs/openapi.yaml)**.
 
 ## Requirements
 
 - **Go 1.26+**, matching `go.mod`.
-- **No external dependency for the core application or the in-memory store** — `task`, `config`, `middleware`, and the entire unit test suite are standard library only. The single runtime dependency is [`pgx/v5`](https://github.com/jackc/pgx), used only when `DATABASE_URL` is configured.
+- **No external dependency for the core application or the in-memory store** — the entire unit test suite runs without one. The two runtime dependencies, [`pgx/v5`](https://github.com/jackc/pgx) and [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) (bcrypt), only matter once `DATABASE_URL` is configured / a password is hashed.
 - **[Docker](https://www.docker.com/) and Docker Compose** (optional) — to run PostgreSQL locally without installing it directly.
 - **[`staticcheck`](https://staticcheck.dev/)** (optional) — used by `make lint`; installed automatically on first use if missing.
 
@@ -127,8 +57,9 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `DB_MAX_IDLE_CONNS` | Max idle connections kept in the pool | `25` |
 | `DB_CONN_MAX_LIFETIME` | Max lifetime of a pooled connection | `5m` |
 | `DB_AUTO_MIGRATE` | Apply pending migrations automatically on startup | `true` |
+| `AUTH_SESSION_TTL` | How long a `POST /auth/login` token stays valid | `24h` |
 
-`config.Load()` returns an error (and the process refuses to start) if a timeout isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
+`config.Load()` returns an error (and the process refuses to start) if a timeout/TTL isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
 ## Running Locally
 
@@ -176,9 +107,9 @@ docker run --rm -p 8080:8080 \
 
 | | Unit | Integration |
 |---|---|---|
-| Exercises | `Service`/`Handler` (fakes), `memoryRepository`, `config`, `middleware`, a full HTTP stack over the real `memoryRepository` | `postgresRepository` against **real PostgreSQL** |
+| Exercises | `Service`/`Handler` (fakes), `memoryRepository`, `config`, `middleware`, a full HTTP stack over the real in-memory repositories — for both `task` and `user` | `postgresRepository` (both domains) against **real PostgreSQL** |
 | External dependency | None | PostgreSQL (`TEST_DATABASE_URL`) |
-| Isolated by | Default build | `//go:build integration` on `task/postgres_repository_test.go` — not even compiled by a plain `go test ./...` |
+| Isolated by | Default build | `//go:build integration` on every `*/postgres_repository_test.go` — not even compiled by a plain `go test ./...` |
 | Speed | Milliseconds | Needs a live database |
 
 ```bash
@@ -191,13 +122,13 @@ make test-integration     # integration tests
 make test-integration-race
 ```
 
-`task/integration_test.go` (no build tag) is a full-stack HTTP test — real `Handler` → real `Service` → real `memoryRepository` — and despite the name has no external dependency; it's part of the unit suite because it validates that the layers are wired together correctly, not that PostgreSQL works. The dividing line for "integration" here is *needs a real external service*, not *spans more than one layer*.
+`internal/task/integration_test.go` (no build tag) is a full-stack HTTP test — real `Handler` → real `Service` → real in-memory `Repository`, for both `task` and `user`, including the real register/login flow — and despite the name has no external dependency; it's part of the unit suite because it validates that the layers (and both domains' auth wiring) are wired together correctly, not that PostgreSQL works. The dividing line for "integration" here is *needs a real external service*, not *spans more than one layer*.
 
-Concurrency-sensitive paths (optimistic-concurrency conflicts) are exercised with real concurrent goroutines under `-race`, both against `memoryRepository` and against real PostgreSQL.
+Concurrency-sensitive paths (optimistic-concurrency conflicts) are exercised with real concurrent goroutines under `-race`, both against the in-memory store and against real PostgreSQL.
 
 ## Migrations
 
-The `tasks` table schema lives in `task/migrations/0001_create_tasks_table.{up,down}.sql`, embedded into the binary (`embed.FS`) so it needs no files deployed alongside it. Applied migrations are tracked in `schema_migrations`; each migration runs inside its own transaction.
+The schema lives in `internal/platform/migrate/migrations/*.{up,down}.sql`, embedded into the binary (`embed.FS`) so it needs no files deployed alongside it — shared by both the `task` and `user` domains (one `*sql.DB`, one `schema_migrations` bookkeeping table). Applied migrations are tracked in `schema_migrations`; each migration runs inside its own transaction.
 
 - **Automatic** (default, `DB_AUTO_MIGRATE=true`): applied on API startup whenever `DATABASE_URL` is set.
 - **Manual**, via the standalone `cmd/migrate` CLI — for reverting (the server only ever migrates forward) or when `DB_AUTO_MIGRATE=false` (recommended with more than one replica, so migrations run once as an explicit deploy step instead of racing on every instance's boot):
@@ -212,86 +143,69 @@ Both are safe to re-run: `migrate-up` with nothing pending changes nothing; `mig
 
 ## Seeding
 
-`cmd/seed` populates the `tasks` table with randomly generated tasks (varied titles, descriptions, and `pending`/`done` status) for local development and manual testing against a non-trivial dataset. Every task is created through the real `Service.CreateTask`/`CompleteTask` — the same validation, ID generation, and timestamp logic every other write path uses — so seeded data is indistinguishable from data created through the API.
+`cmd/seed` populates the database with demo users and randomly generated tasks (varied titles, descriptions, statuses and priorities) for local development and manual testing against a non-trivial, multi-user dataset. Every user is created through the real `user.Service.Register`, and every task through `task.Service.CreateTask`/`TransitionStatus` — the same validation, ID generation, and timestamp logic every other write path uses — so seeded data is indistinguishable from data created through the API.
 
 It requires PostgreSQL: seeding the in-memory store would vanish the moment the process exits, with nothing left to have observed it. It applies pending migrations itself before inserting, so it works against a freshly created, empty database with no separate `migrate-up` step.
 
 ```bash
-make db-up                    # if not already running
-make seed                      # create 20 random tasks
-make seed SEED_COUNT=200       # create 200
-make seed-reset                # empty the table first, then seed
+make db-up                                             # if not already running
+make seed                                               # 5 demo users, 10 tasks each (password: password123)
+make seed SEED_USERS=20 SEED_TASKS_PER_USER=50          # override the defaults
+make seed-reset                                         # wipe users/sessions/tasks first, then reseed
+make db-reset                                           # wipe users/sessions/tasks, seed nothing
 ```
 
-For direct control over the flags (`-count`, `-done-ratio`, `-reset`):
+For direct control over the flags (`-users`, `-tasks-per-user`, `-password`, `-reset`):
 
 ```bash
 DATABASE_URL="postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable" \
-  go run ./cmd/seed -count=50 -done-ratio=0.5
+  go run ./cmd/seed -users=10 -tasks-per-user=25
 ```
 
 ## API
 
-All endpoints accept/return `application/json`; every response carries an `X-Request-Id` header for log correlation. **Full request/response schemas, validation rules, and examples: [docs/openapi.yaml](docs/openapi.yaml).**
+All endpoints accept/return `application/json`; every response carries an `X-Request-Id` header for log correlation. Every `/tasks/*` route requires `Authorization: Bearer <token>` (obtained from `POST /auth/login`) and is scoped to the authenticated caller's own tasks — a task ID that exists but belongs to someone else returns `404`, identically to one that doesn't exist at all. **Full request/response schemas, validation rules, and examples: [docs/openapi.yaml](docs/openapi.yaml).**
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/tasks` | Create a task |
-| `GET` | `/tasks` | List tasks, oldest first (`?limit=`, `?offset=`) |
-| `GET` | `/tasks/{id}` | Get a task by ID |
-| `PUT` | `/tasks/{id}` | Update title/description |
-| `PATCH` | `/tasks/{id}/done` | Mark as done (idempotent) |
-| `DELETE` | `/tasks/{id}` | Delete a task |
-| `GET` | `/health` | Liveness — always `200` while the process runs |
-| `GET` | `/health/ready` | Readiness — `200` if the backing store is reachable, `503` if not |
-| `GET` | `/debug/vars` | Runtime stats (`expvar`) — see [Observability](#observability) |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/auth/register` | — | Create a user account |
+| `POST` | `/auth/login` | — | Authenticate, receive a bearer session token |
+| `POST` | `/auth/logout` | required | Invalidate the current session token |
+| `GET` | `/auth/me` | required | Get the authenticated user |
+| `POST` | `/tasks` | required | Create a task |
+| `GET` | `/tasks` | required | List the caller's tasks, oldest first (`?limit=`, `?offset=`) |
+| `GET` | `/tasks/{id}` | required | Get a task by ID |
+| `PUT` | `/tasks/{id}` | required | Update title/description/priority |
+| `PATCH` | `/tasks/{id}/status` | required | Move a task to a new status (`pending`/`in_progress`/`done`/`cancelled`) |
+| `PATCH` | `/tasks/{id}/done` | required | Mark as done (idempotent shortcut for `.../status`) |
+| `DELETE` | `/tasks/{id}` | required | Delete a task |
+| `GET` | `/health` | — | Liveness — always `200` while the process runs |
+| `GET` | `/health/ready` | — | Readiness — `200` if the database is reachable, `503` if not |
+| `GET` | `/debug/vars` | — | Runtime stats (`expvar`) |
 
-Errors always use the same envelope, `{"error": "description of the problem"}`. Common codes: `400` invalid input, `404` unknown task ID, `409` optimistic-concurrency conflict (re-fetch and retry), `500` unexpected failure (details logged server-side, never in the response).
+Errors always use the same envelope, `{"error": "description of the problem"}`. Common codes: `400` invalid input, `401` missing/invalid session token, `404` unknown or not-yours task ID, `409` optimistic-concurrency conflict or illegal status transition (re-fetch and retry), `429` too many requests to `/auth/register`/`/auth/login` from the same client (rate limited — wait and retry), `500` unexpected failure (details logged server-side, never in the response).
 
 **Quick walkthrough:**
 
 ```bash
-ID=$(curl -s -X POST localhost:8080/tasks -H 'Content-Type: application/json' \
-  -d '{"title":"Buy groceries","description":"Milk, eggs, bread"}' | jq -r .id)
+curl -s -X POST localhost:8080/auth/register -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"correct horse battery staple"}'
 
-curl -s localhost:8080/tasks/$ID                       # → 200, the task
-curl -s "localhost:8080/tasks?limit=10&offset=0"        # → 200, [ ... ]
-curl -s -X PATCH localhost:8080/tasks/$ID/done          # → 200, status: done
+TOKEN=$(curl -s -X POST localhost:8080/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"correct horse battery staple"}' | jq -r .token)
+
+ID=$(curl -s -X POST localhost:8080/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"title":"Buy groceries","description":"Milk, eggs, bread","priority":"high"}' | jq -r .id)
+
+curl -s localhost:8080/tasks/$ID -H "Authorization: Bearer $TOKEN"                              # → 200, the task
+curl -s -X PATCH localhost:8080/tasks/$ID/status -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"status":"in_progress"}'                              # → 200, status: in_progress
 curl -s -o /dev/null -w '%{http_code}\n' \
-  -X DELETE localhost:8080/tasks/$ID                    # → 204
+  -X DELETE localhost:8080/tasks/$ID -H "Authorization: Bearer $TOKEN"                           # → 204
 ```
 
-## Graceful Shutdown
+## Learn more
 
-On `SIGINT`/`SIGTERM`: the server stops accepting new connections immediately, lets in-flight requests finish (bounded by `HTTP_SHUTDOWN_TIMEOUT`), then releases `Repository` resources (e.g. closes the PostgreSQL pool) — in that order, so a request in flight is never cut off from its database connection mid-shutdown. If requests don't finish before the timeout, shutdown returns an error and the process exits non-zero; a clean shutdown logs `shutdown completed` and exits `0`.
-
-## Observability
-
-- **Structured JSON logging** (`log/slog`), level controlled by `LOG_LEVEL`, one logger instance injected everywhere — no global mutable logger.
-- **One access log line per request** (`middleware.Logging`): method, path, status, duration, request ID. This is the single source of truth for request outcomes — routine errors (`404`/`400`/`409`) aren't logged again elsewhere.
-- **Request correlation** (`X-Request-Id`, `middleware.RequestID`): generated or propagated from the client, echoed in the response header, attached to every log line for that request.
-- **Panic recovery** (`middleware.Recovery`): logs the panic and stack trace, returns a generic `500` — never leaks internals to the client.
-- **Unexpected-error logging**: `Handler` logs, once, only errors it has no specific HTTP mapping for (genuine `500`s), with request ID/method/path attached.
-- **`GET /debug/vars`**: stdlib `expvar` — command line, memory/GC stats, goroutine counts. Baseline visibility with no external dependency; see [Future Improvements](#future-improvements) for a richer metrics surface.
-
-## Design Decisions
-
-- **`Service` owns all business rules** (validation, ID generation, timestamps); `Handler` only translates HTTP; `Repository` only stores data. Title/description length is checked in Unicode characters (`utf8.RuneCountInString`), not bytes.
-- **`Repository.FindAll` owns ordering and pagination**, not `Service` — so `postgresRepository` can push `ORDER BY … LIMIT … OFFSET …` into the query instead of fetching the whole table on every list request.
-- **IDs and timestamps are assigned by `Service`**, never by storage or the client — `Repository` receives an already fully-formed `Task`; request bodies don't even expose these fields.
-- **`PATCH /tasks/{id}/done` is idempotent** — calling it on an already-`done` task is a no-op read, never a write, so it can't conflict.
-- **Optimistic concurrency via a `Version` field** (internal, never on the wire): `Update` rejects a write whose `Version` no longer matches the stored value with `ErrConflict` (`409`) instead of silently overwriting a concurrent change. `memoryRepository` does this with a compare-and-swap under its mutex; `postgresRepository` with `SELECT … FOR UPDATE` inside a transaction.
-- **`context.Context` propagates end-to-end**, all the way into every `*sql.DB`/`*sql.Tx` call, so a canceled request aborts its in-flight query instead of running to completion for a client that's gone.
-- **Request bodies are capped at 1 MiB** (`http.MaxBytesReader`) so an oversized payload is rejected instead of fully buffered.
-- **PostgreSQL via `database/sql` + `pgx/v5`'s `stdlib` driver**, not `pgx`'s native pool: `*sql.DB`'s pooling/lifecycle primitives fully cover this project's needs, and `pgx` is pure Go (no cgo) — which is what lets `Dockerfile` build a static binary into `scratch`.
-- **Migrations use a small embedded runner** (`task/postgres_migrate.go`), not a dedicated tool — a single-table schema didn't justify the dependency. `.up.sql`/`.down.sql` naming still follows the common convention.
-
-Full rationale for each of these — including the PostgreSQL schema, indexing, and transaction design — lives in the code's own doc comments (start at `task/repository.go`, `task/postgres_repository.go`, and `task/migrations/0001_create_tasks_table.up.sql`).
-
-## Future Improvements
-
-- **Authentication and authorization** — JWT or API key middleware.
-- **Application-level metrics** — `GET /debug/vars` gives baseline Go runtime stats; request count/latency/error-rate per route needs dedicated instrumentation (e.g. Prometheus).
-- **Distributed tracing** — OpenTelemetry, for end-to-end request tracing.
-- **Task filtering** — filter `GET /tasks` by status (the natural point to also add a `status` index).
-- **`golangci-lint` in CI** — currently `staticcheck` only, because the `golangci-lint` build available at the time predates the Go version pinned in `go.mod`.
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — project structure, the reasoning behind every non-obvious design decision (session tokens, ownership model, status transitions, and more), and what's deliberately deferred.
+- **[docs/openapi.yaml](docs/openapi.yaml)** — the full API contract.
+- **[CLAUDE.md](CLAUDE.md)** — conventions and rules for anyone (human or agent) changing this codebase.

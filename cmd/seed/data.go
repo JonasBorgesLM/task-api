@@ -1,6 +1,10 @@
 package main
 
-import "math/rand/v2"
+import (
+	"math/rand/v2"
+
+	"github.com/JonasBorgesLM/task-api/internal/task"
+)
 
 // verbs and subjects combine into believable, varied task titles — e.g.
 // "Buy groceries", "Fix the leaking faucet" — without a dependency (see
@@ -49,4 +53,43 @@ func randomTask() (title, description string) {
 	title = verbs[rand.IntN(len(verbs))] + " " + subjects[rand.IntN(len(subjects))]
 	description = descriptions[rand.IntN(len(descriptions))]
 	return title, description
+}
+
+// statusWeights gives each task.Status a roughly realistic share of seeded
+// tasks: mostly still active (pending/in_progress), a healthy fraction
+// actually finished, and cancelled kept rare — reflecting how an
+// established task list tends to look, rather than a uniform 25% each.
+var statusWeights = []struct {
+	status task.Status
+	weight float64
+}{
+	{task.StatusPending, 0.35},
+	{task.StatusInProgress, 0.25},
+	{task.StatusDone, 0.30},
+	{task.StatusCancelled, 0.10},
+}
+
+// randomStatus picks a task.Status according to statusWeights. The caller
+// creates every task as task.StatusPending (task.Service.CreateTask's only
+// option) and then, if this returns anything else, moves it there with
+// exactly one TransitionStatus call — every non-pending value here is
+// reachable in a single hop from pending (see Service's legalTransitions
+// table), so no multi-step transition sequence is ever needed.
+func randomStatus() task.Status {
+	roll := rand.Float64()
+	var cumulative float64
+	for _, sw := range statusWeights {
+		cumulative += sw.weight
+		if roll < cumulative {
+			return sw.status
+		}
+	}
+	return task.StatusPending // unreachable unless statusWeights' weights don't sum to 1
+}
+
+// randomPriority picks uniformly among the three Priority values — unlike
+// status, there's no realistic skew to model here.
+func randomPriority() task.Priority {
+	priorities := []task.Priority{task.PriorityLow, task.PriorityMedium, task.PriorityHigh}
+	return priorities[rand.IntN(len(priorities))]
 }

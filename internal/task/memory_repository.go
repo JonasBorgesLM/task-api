@@ -39,8 +39,10 @@ func (r *memoryRepository) Create(ctx context.Context, task Task) error {
 	return nil
 }
 
-// FindByID returns the task with the given ID. Returns ErrNotFound if absent.
-func (r *memoryRepository) FindByID(ctx context.Context, id string) (Task, error) {
+// FindByID returns the task with the given ID, scoped to userID — see
+// Repository's doc comment on ownership. Returns ErrNotFound if absent or
+// owned by a different user.
+func (r *memoryRepository) FindByID(ctx context.Context, id, userID string) (Task, error) {
 	if err := ctx.Err(); err != nil {
 		return Task{}, err
 	}
@@ -49,18 +51,18 @@ func (r *memoryRepository) FindByID(ctx context.Context, id string) (Task, error
 	defer r.mu.RUnlock()
 
 	task, ok := r.store[id]
-	if !ok {
+	if !ok || task.UserID != userID {
 		return Task{}, ErrNotFound
 	}
 
 	return task, nil
 }
 
-// FindAll returns a snapshot of tasks ordered by CreatedAt ascending (ties
-// broken by ID) — the store is a Go map, so this ordering is applied here
-// rather than relied upon from iteration — windowed to at most limit
-// results starting at offset, per Repository's contract.
-func (r *memoryRepository) FindAll(ctx context.Context, limit, offset int) ([]Task, error) {
+// FindAll returns a snapshot of userID's tasks ordered by CreatedAt
+// ascending (ties broken by ID) — the store is a Go map, so this ordering
+// is applied here rather than relied upon from iteration — windowed to at
+// most limit results starting at offset, per Repository's contract.
+func (r *memoryRepository) FindAll(ctx context.Context, userID string, limit, offset int) ([]Task, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -70,6 +72,9 @@ func (r *memoryRepository) FindAll(ctx context.Context, limit, offset int) ([]Ta
 
 	tasks := make([]Task, 0, len(r.store))
 	for _, task := range r.store {
+		if task.UserID != userID {
+			continue
+		}
 		tasks = append(tasks, task)
 	}
 
@@ -102,7 +107,8 @@ func paginateTasks(tasks []Task, limit, offset int) []Task {
 }
 
 // Update replaces an existing task. Returns ErrNotFound if the ID does not
-// exist, and ErrConflict if task.Version does not match the stored
+// exist or belongs to a different user than task.UserID (see Repository's
+// doc comment), and ErrConflict if task.Version does not match the stored
 // Version — i.e. the task was modified by another writer since task was
 // read. On success the stored Version is incremented.
 func (r *memoryRepository) Update(ctx context.Context, task Task) error {
@@ -114,7 +120,7 @@ func (r *memoryRepository) Update(ctx context.Context, task Task) error {
 	defer r.mu.Unlock()
 
 	stored, ok := r.store[task.ID]
-	if !ok {
+	if !ok || stored.UserID != task.UserID {
 		return ErrNotFound
 	}
 	if task.Version != stored.Version {
@@ -126,8 +132,9 @@ func (r *memoryRepository) Update(ctx context.Context, task Task) error {
 	return nil
 }
 
-// Delete removes the task with the given ID. Returns ErrNotFound if absent.
-func (r *memoryRepository) Delete(ctx context.Context, id string) error {
+// Delete removes the task with the given ID, scoped to userID. Returns
+// ErrNotFound if absent or owned by a different user.
+func (r *memoryRepository) Delete(ctx context.Context, id, userID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -135,7 +142,8 @@ func (r *memoryRepository) Delete(ctx context.Context, id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, ok := r.store[id]; !ok {
+	stored, ok := r.store[id]
+	if !ok || stored.UserID != userID {
 		return ErrNotFound
 	}
 

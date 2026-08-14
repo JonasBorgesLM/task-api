@@ -1,4 +1,10 @@
-package task
+// Package migrate applies and reverts the application's PostgreSQL schema
+// migrations. It is a platform concern, not owned by any single domain
+// package — internal/task and internal/user share one schema_migrations
+// bookkeeping table and one embedded set of migration files, applied by
+// this package's RunMigrations before either domain's postgresRepository
+// serves a query.
+package migrate
 
 import (
 	"context"
@@ -16,7 +22,8 @@ import (
 // schema_migrations records no applied migration to roll back.
 var ErrNoMigrationsToRevert = errors.New("no migrations to revert")
 
-// migrationFiles embeds every migration under task/migrations — both
+// migrationFiles embeds every migration under this package's migrations/ —
+// both
 // *.up.sql (applied by RunMigrations, automatically on every process
 // startup when DB_AUTO_MIGRATE is enabled) and *.down.sql (applied by
 // RunMigrationsDown, only ever run explicitly via `make migrate-down` /

@@ -25,6 +25,8 @@
 //	                        as a Go duration string (default: 5m)
 //	DB_AUTO_MIGRATE         Whether to apply pending PostgreSQL migrations on
 //	                        startup: true or false (default: true)
+//	AUTH_SESSION_TTL        How long a session token issued by POST /auth/login
+//	                        remains valid, as a Go duration string (default: 24h)
 package config
 
 import (
@@ -49,6 +51,7 @@ const (
 	defaultDBMaxIdleConns  = 25
 	defaultDBConnMaxLife   = 5 * time.Minute
 	defaultDBAutoMigrate   = true
+	defaultAuthSessionTTL  = 24 * time.Hour
 )
 
 // Config holds all application configuration values. It is independent of
@@ -98,9 +101,14 @@ type Config struct {
 	DBConnMaxLifetime time.Duration
 
 	// DBAutoMigrate controls whether the application applies pending
-	// PostgreSQL migrations (see task.RunMigrations) on startup. Unused
+	// PostgreSQL migrations (see migrate.RunMigrations) on startup. Unused
 	// when DatabaseURL is empty.
 	DBAutoMigrate bool
+
+	// AuthSessionTTL is how long a session token issued by
+	// user.Service.CreateSession (POST /auth/login) remains valid before
+	// user.Service.ValidateToken rejects it.
+	AuthSessionTTL time.Duration
 }
 
 // Load reads configuration from environment variables and applies defaults
@@ -132,6 +140,7 @@ func Load() (Config, error) {
 		DBMaxIdleConns:    defaultDBMaxIdleConns,
 		DBConnMaxLifetime: defaultDBConnMaxLife,
 		DBAutoMigrate:     defaultDBAutoMigrate,
+		AuthSessionTTL:    defaultAuthSessionTTL,
 	}
 
 	if raw := os.Getenv("HTTP_ADDR"); raw != "" {
@@ -175,6 +184,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.DBAutoMigrate, err = parseBool("DB_AUTO_MIGRATE", defaultDBAutoMigrate); err != nil {
+		return Config{}, err
+	}
+	if cfg.AuthSessionTTL, err = parseDuration("AUTH_SESSION_TTL", defaultAuthSessionTTL); err != nil {
 		return Config{}, err
 	}
 

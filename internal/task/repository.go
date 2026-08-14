@@ -4,7 +4,15 @@ import (
 	"context"
 )
 
-// Repository defines the contract for task persistence.
+// Repository defines the contract for task persistence. Every method that
+// reads or writes an existing task takes the owning userID and scopes the
+// operation to it: a task belonging to a different user is reported as
+// ErrNotFound, never a distinct "forbidden" error — this deliberately
+// avoids leaking whether a given task ID exists at all to a caller who
+// doesn't own it. Ownership filtering is pushed into the query itself in
+// postgresRepository (WHERE ... AND user_id = $N), the same reasoning as
+// FindAll's pagination window below: fetch only what the caller could
+// possibly be allowed to see, don't fetch-then-check in Go.
 //
 // FindAll returns tasks ordered deterministically by CreatedAt ascending,
 // ties broken by ID, starting at offset and containing at most limit
@@ -21,23 +29,14 @@ import (
 // if the stored task's Version no longer matches, i.e. some other writer
 // updated it in between. On success the stored Version is incremented, so
 // the caller's next Update must use the Task returned by this call (or a
-// fresh read) rather than reusing the pre-write value.
+// fresh read) rather than reusing the pre-write value. Update takes no
+// separate userID parameter — task.UserID (set from a prior ownership-checked
+// FindByID) is what's checked against the stored row; a mismatch is
+// ErrNotFound, same as FindByID/Delete.
 type Repository interface {
 	Create(ctx context.Context, task Task) error
-	FindByID(ctx context.Context, id string) (Task, error)
-	FindAll(ctx context.Context, limit, offset int) ([]Task, error)
+	FindByID(ctx context.Context, id, userID string) (Task, error)
+	FindAll(ctx context.Context, userID string, limit, offset int) ([]Task, error)
 	Update(ctx context.Context, task Task) error
-	Delete(ctx context.Context, id string) error
-}
-
-// Pinger is implemented by Repository implementations that can verify
-// their backing store is actually reachable, as opposed to merely
-// constructed. It is deliberately not part of the Repository interface
-// itself: memoryRepository has nothing external to check (it is always
-// reachable by construction), and Service/Handler never need this
-// capability to serve a normal request — only a readiness check does (see
-// cmd/api/health.go's registerReadinessRoute), via a type assertion
-// against the concrete Repository in use.
-type Pinger interface {
-	Ping(ctx context.Context) error
+	Delete(ctx context.Context, id, userID string) error
 }

@@ -54,16 +54,6 @@ func NewPostgresRepository(db *sql.DB) Repository {
 	return &postgresRepository{db: db}
 }
 
-// Ping verifies that the underlying PostgreSQL connection pool can reach
-// the database right now, satisfying the Pinger interface. It is used by
-// cmd/api/health.go's readiness endpoint, not by any request path here —
-// postgresRepository's other methods rely on *sql.DB's own connection
-// handling and surface a failure to reach the database as a normal query
-// error instead.
-func (r *postgresRepository) Ping(ctx context.Context) error {
-	return r.db.PingContext(ctx)
-}
-
 // Create persists a new task. Returns ErrAlreadyExists if the ID is
 // already taken. The stored Version always starts at 1, regardless of
 // what the caller set on task.Version — matching memoryRepository's
@@ -75,12 +65,13 @@ func (r *postgresRepository) Ping(ctx context.Context) error {
 // column's type at the wire level.
 func (r *postgresRepository) Create(ctx context.Context, task Task) error {
 	const query = `
-		INSERT INTO tasks (id, title, description, status, created_at, updated_at, version)
-		VALUES ($1::uuid, $2, $3, $4, $5, $6, 1)
+		INSERT INTO tasks (id, user_id, title, description, status, priority, created_at, updated_at, version)
+		VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, 1)
 	`
 
 	_, err := r.db.ExecContext(ctx, query,
-		task.ID, task.Title, task.Description, string(task.Status), task.CreatedAt, task.UpdatedAt,
+		task.ID, task.UserID, task.Title, task.Description, string(task.Status), string(task.Priority),
+		task.CreatedAt, task.UpdatedAt,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -92,16 +83,17 @@ func (r *postgresRepository) Create(ctx context.Context, task Task) error {
 	return nil
 }
 
-// FindByID returns the task with the given ID. Returns ErrNotFound if
-// absent.
-func (r *postgresRepository) FindByID(ctx context.Context, id string) (Task, error) {
+// FindByID returns the task with the given ID, scoped to userID — see
+// Repository's doc comment on ownership. Returns ErrNotFound if absent or
+// owned by a different user.
+func (r *postgresRepository) FindByID(ctx context.Context, id, userID string) (Task, error) {
 	const query = `
-		SELECT id::text, title, description, status, created_at, updated_at, version
+		SELECT id::text, user_id::text, title, description, status, priority, created_at, updated_at, version
 		FROM tasks
-		WHERE id = $1::uuid
+		WHERE id = $1::uuid AND user_id = $2::uuid
 	`
 
-	task, err := scanTask(r.db.QueryRowContext(ctx, query, id))
+	task, err := scanTask(r.db.QueryRowContext(ctx, query, id, userID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Task{}, ErrNotFound
@@ -112,8 +104,9 @@ func (r *postgresRepository) FindByID(ctx context.Context, id string) (Task, err
 	return task, nil
 }
 
-// FindAll returns tasks ordered by (created_at, id) — per Repository's
-// contract — windowed to at most limit results starting at offset.
+// FindAll returns userID's tasks ordered by (created_at, id) — per
+// Repository's contract — windowed to at most limit results starting at
+// offset.
 //
 // The window is applied in the query itself (LIMIT/OFFSET), not by
 // fetching every row and slicing in Go: for a table with far more rows
@@ -121,15 +114,16 @@ func (r *postgresRepository) FindByID(ctx context.Context, id string) (Task, err
 // (roughly) offset+limit rows and one that reads and transfers the entire
 // table on every call. limit < 0 ("no limit") is passed as SQL NULL, which
 // PostgreSQL's LIMIT clause treats as "no limit" — i.e. LIMIT NULL is
-// equivalent to omitting LIMIT entirely. The ORDER BY lets this use
-// idx_tasks_created_at_id instead of an in-database sort as the table
-// grows.
-func (r *postgresRepository) FindAll(ctx context.Context, limit, offset int) ([]Task, error) {
+// equivalent to omitting LIMIT entirely. The WHERE user_id = $1 + ORDER BY
+// lets this use idx_tasks_user_id_created_at_id instead of an in-database
+// sort or a full-table scan as the table grows.
+func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, offset int) ([]Task, error) {
 	const query = `
-		SELECT id::text, title, description, status, created_at, updated_at, version
+		SELECT id::text, user_id::text, title, description, status, priority, created_at, updated_at, version
 		FROM tasks
+		WHERE user_id = $1::uuid
 		ORDER BY created_at, id
-		LIMIT $1::bigint OFFSET $2::bigint
+		LIMIT $2::bigint OFFSET $3::bigint
 	`
 
 	// limit < 0 ("no limit") must reach the query as SQL NULL, not as a
@@ -139,7 +133,7 @@ func (r *postgresRepository) FindAll(ctx context.Context, limit, offset int) ([]
 		limitArg = limit
 	}
 
-	rows, err := r.db.QueryContext(ctx, query, limitArg, offset)
+	rows, err := r.db.QueryContext(ctx, query, userID, limitArg, offset)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find all tasks: %w", err)
 	}
@@ -174,6 +168,13 @@ func (r *postgresRepository) FindAll(ctx context.Context, limit, offset int) ([]
 // first. Locking the row makes the second transaction's SELECT block
 // until the first commits (or rolls back), so it observes the
 // already-incremented Version and correctly returns ErrConflict instead.
+//
+// The locked SELECT's WHERE clause also filters by user_id, exactly like
+// FindByID/Delete, so a caller updating a task it doesn't own never
+// acquires the lock at all — it falls straight into sql.ErrNoRows and
+// ErrNotFound below, instead of briefly holding a row-level lock on
+// another user's task (and contending with that user's own concurrent
+// Update) only to be rejected a moment later anyway.
 func (r *postgresRepository) Update(ctx context.Context, task Task) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -182,8 +183,10 @@ func (r *postgresRepository) Update(ctx context.Context, task Task) error {
 	defer tx.Rollback() //nolint:errcheck // no-op once Commit has succeeded
 
 	var currentVersion int
-	err = tx.QueryRowContext(ctx, `SELECT version FROM tasks WHERE id = $1::uuid FOR UPDATE`, task.ID).
-		Scan(&currentVersion)
+	err = tx.QueryRowContext(ctx,
+		`SELECT version FROM tasks WHERE id = $1::uuid AND user_id = $2::uuid FOR UPDATE`,
+		task.ID, task.UserID,
+	).Scan(&currentVersion)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
@@ -196,11 +199,11 @@ func (r *postgresRepository) Update(ctx context.Context, task Task) error {
 
 	const query = `
 		UPDATE tasks
-		SET title = $1, description = $2, status = $3, updated_at = $4, version = version + 1
-		WHERE id = $5::uuid
+		SET title = $1, description = $2, status = $3, priority = $4, updated_at = $5, version = version + 1
+		WHERE id = $6::uuid
 	`
 	if _, err := tx.ExecContext(ctx, query,
-		task.Title, task.Description, string(task.Status), task.UpdatedAt, task.ID,
+		task.Title, task.Description, string(task.Status), string(task.Priority), task.UpdatedAt, task.ID,
 	); err != nil {
 		return fmt.Errorf("postgres: update task: %w", err)
 	}
@@ -212,10 +215,10 @@ func (r *postgresRepository) Update(ctx context.Context, task Task) error {
 	return nil
 }
 
-// Delete removes the task with the given ID. Returns ErrNotFound if
-// absent.
-func (r *postgresRepository) Delete(ctx context.Context, id string) error {
-	result, err := r.db.ExecContext(ctx, `DELETE FROM tasks WHERE id = $1::uuid`, id)
+// Delete removes the task with the given ID, scoped to userID. Returns
+// ErrNotFound if absent or owned by a different user.
+func (r *postgresRepository) Delete(ctx context.Context, id, userID string) error {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM tasks WHERE id = $1::uuid AND user_id = $2::uuid`, id, userID)
 	if err != nil {
 		return fmt.Errorf("postgres: delete task: %w", err)
 	}
@@ -239,21 +242,24 @@ type taskScanner interface {
 }
 
 // scanTask reads one row in the fixed column order every query above
-// selects: id, title, description, status, created_at, updated_at,
-// version.
+// selects: id, user_id, title, description, status, priority, created_at,
+// updated_at, version.
 func scanTask(row taskScanner) (Task, error) {
 	var (
-		task   Task
-		status string
+		task     Task
+		status   string
+		priority string
 	)
 
 	if err := row.Scan(
-		&task.ID, &task.Title, &task.Description, &status, &task.CreatedAt, &task.UpdatedAt, &task.Version,
+		&task.ID, &task.UserID, &task.Title, &task.Description, &status, &priority,
+		&task.CreatedAt, &task.UpdatedAt, &task.Version,
 	); err != nil {
 		return Task{}, err
 	}
 
 	task.Status = Status(status)
+	task.Priority = Priority(priority)
 	return task, nil
 }
 
