@@ -27,6 +27,15 @@
 //	                        startup: true or false (default: true)
 //	AUTH_SESSION_TTL        How long a session token issued by POST /auth/login
 //	                        remains valid, as a Go duration string (default: 24h)
+//	CORS_ALLOWED_ORIGINS    Comma-separated list of origins (e.g.
+//	                        http://localhost:8082) a browser-based client is
+//	                        allowed to call this API from. Unset (the
+//	                        default) disables CORS entirely: no
+//	                        Access-Control-* headers are added and behavior
+//	                        is unchanged from before this setting existed —
+//	                        the right default for a server-to-server or
+//	                        same-origin client, which is every client this
+//	                        API served until CORS support was added.
 package config
 
 import (
@@ -109,6 +118,12 @@ type Config struct {
 	// user.Service.CreateSession (POST /auth/login) remains valid before
 	// user.Service.ValidateToken rejects it.
 	AuthSessionTTL time.Duration
+
+	// CORSAllowedOrigins is the set of origins a browser-based client may
+	// call this API from (see middleware.CORS). A nil/empty slice — the
+	// zero value, and what every test building a bare config.Config{}
+	// gets — disables CORS entirely.
+	CORSAllowedOrigins []string
 }
 
 // Load reads configuration from environment variables and applies defaults
@@ -189,6 +204,8 @@ func Load() (Config, error) {
 	if cfg.AuthSessionTTL, err = parseDuration("AUTH_SESSION_TTL", defaultAuthSessionTTL); err != nil {
 		return Config{}, err
 	}
+
+	cfg.CORSAllowedOrigins = parseCommaSeparated("CORS_ALLOWED_ORIGINS")
 
 	return cfg, nil
 }
@@ -291,4 +308,25 @@ func parseLogLevel(name string, def slog.Level) (slog.Level, error) {
 	default:
 		return 0, fmt.Errorf("config: %s %q is not a valid log level (want debug, info, warn, or error)", name, raw)
 	}
+}
+
+// parseCommaSeparated reads the environment variable name and splits it on
+// commas, trimming whitespace from each entry and dropping empty ones —
+// so "a, b,,c" and "a,b,c" parse identically, and "" or " " parse to nil.
+// Unlike this package's other parse* helpers, there is no invalid input to
+// reject: any string is a valid (if possibly empty) list, so this never
+// returns an error.
+func parseCommaSeparated(name string) []string {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return nil
+	}
+
+	var out []string
+	for _, entry := range strings.Split(raw, ",") {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			out = append(out, entry)
+		}
+	}
+	return out
 }

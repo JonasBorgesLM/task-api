@@ -113,7 +113,7 @@ check: fmt-check vet lint test-race ## Run everything the CI quality gate runs (
 docker-build: ## Build the production API image (see Dockerfile)
 	docker build -t task-api:latest .
 
-docker-up: ## Start the full stack (API + PostgreSQL) via docker compose
+docker-up: ## Start the full stack (API + PostgreSQL + Swagger UI at :8082) via docker compose
 	docker compose up -d --build
 
 docker-down: ## Stop and remove every container docker compose started (data volume is kept)

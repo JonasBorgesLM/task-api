@@ -195,10 +195,17 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	// RequestID must run first so Logging and Recovery can read the
 	// request ID from the request context, and Logging must wrap Recovery
 	// (not the other way around) so it still logs an accurate status code
-	// for requests that panicked and were recovered.
+	// for requests that panicked and were recovered. CORS sits between
+	// them, inside Logging (so a preflight request it answers directly
+	// still gets an access log line) but outside Recovery (so the
+	// Access-Control-Allow-Origin header it sets survives even a handler
+	// panic — Recovery's 500 doesn't clear headers set earlier in the
+	// chain). It is a no-op end to end unless CORS_ALLOWED_ORIGINS is set;
+	// see middleware.CORS.
 	rootHandler := middleware.Chain(
 		middleware.RequestID,
 		middleware.Logging(logger),
+		middleware.CORS(cfg.CORSAllowedOrigins),
 		middleware.Recovery(logger),
 	)(mux)
 

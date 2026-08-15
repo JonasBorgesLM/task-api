@@ -381,3 +381,132 @@ func TestIntegration_DebugVars_RequiresAuth(t *testing.T) {
 		}
 	}
 }
+
+// --- CORS ---
+//
+// These specifically exercise the real newServer wiring — not just
+// middleware.CORS in isolation (see internal/middleware/cors_test.go) —
+// because the failure mode CORS exists to fix (a browser-based Swagger UI
+// on one origin, http://localhost:8082, unable to call the API on
+// another, http://localhost:8080) only shows up once CORS is positioned
+// correctly relative to routing: a preflight OPTIONS request for a route
+// that only registers POST/GET/etc. must be answered before mux dispatch,
+// not 404 from it.
+
+func TestIntegration_CORS_Disabled_NoHeaders(t *testing.T) {
+	// testConfig() leaves CORSAllowedOrigins unset — the default every
+	// deployment has until CORS_ALLOWED_ORIGINS is explicitly configured.
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/health", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Origin", "http://localhost:8082")
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("CORS disabled but Access-Control-Allow-Origin = %q, want none", got)
+	}
+}
+
+func TestIntegration_CORS_Enabled_AllowedOrigin_ActualRequest(t *testing.T) {
+	cfg := testConfig()
+	cfg.CORSAllowedOrigins = []string{"http://localhost:8082"}
+	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/health", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Origin", "http://localhost:8082")
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "http://localhost:8082" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, "http://localhost:8082")
+	}
+}
+
+// TestIntegration_CORS_Enabled_PreflightForRegisteredRoute is the exact
+// scenario this feature was built for: a browser about to POST /tasks
+// (which registers no OPTIONS handler of its own — see
+// task.Handler.RegisterRoutes) sends a preflight OPTIONS request first.
+// Before CORS existed, that request 404'd from mux with no
+// Access-Control-* headers, so the browser blocked the real POST from
+// ever being sent.
+func TestIntegration_CORS_Enabled_PreflightForRegisteredRoute(t *testing.T) {
+	cfg := testConfig()
+	cfg.CORSAllowedOrigins = []string{"http://localhost:8082"}
+	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodOptions, srv.URL+"/tasks", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Origin", "http://localhost:8082")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS /tasks: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("preflight status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "http://localhost:8082" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, "http://localhost:8082")
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") {
+		t.Errorf("Access-Control-Allow-Methods = %q, want it to include POST", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "authorization") {
+		t.Errorf("Access-Control-Allow-Headers = %q, want it to include Authorization", got)
+	}
+}
+
+// TestIntegration_CORS_Enabled_DisallowedOrigin_PreflightStill404s proves
+// enabling CORS for one origin doesn't change behavior for every other
+// origin: an unlisted origin's preflight still falls through to mux
+// exactly as it always did (no route registers OPTIONS, so 404), with no
+// Access-Control-Allow-Origin header handed out.
+func TestIntegration_CORS_Enabled_DisallowedOrigin_PreflightStill404s(t *testing.T) {
+	cfg := testConfig()
+	cfg.CORSAllowedOrigins = []string{"http://localhost:8082"}
+	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodOptions, srv.URL+"/tasks", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Origin", "http://evil.example")
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS /tasks: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("disallowed origin got Access-Control-Allow-Origin = %q, want none", got)
+	}
+}

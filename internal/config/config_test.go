@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 )
@@ -31,6 +32,9 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if cfg.LogLevel != defaultLogLevel {
 		t.Errorf("Load() LogLevel = %v, want %v", cfg.LogLevel, defaultLogLevel)
+	}
+	if cfg.CORSAllowedOrigins != nil {
+		t.Errorf("Load() CORSAllowedOrigins = %v, want nil (CORS disabled by default)", cfg.CORSAllowedOrigins)
 	}
 }
 
@@ -376,5 +380,55 @@ func TestLoad_DotenvPath_MissingFileIsNotAnError(t *testing.T) {
 
 	if _, err := Load(); err != nil {
 		t.Fatalf("Load() with a missing DOTENV_PATH file: unexpected error: %v", err)
+	}
+}
+
+// --- CORS_ALLOWED_ORIGINS ---
+
+func TestLoad_CORSAllowedOrigins_Unset(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.CORSAllowedOrigins != nil {
+		t.Errorf("Load() CORSAllowedOrigins = %v, want nil", cfg.CORSAllowedOrigins)
+	}
+}
+
+func TestLoad_CORSAllowedOrigins_Single(t *testing.T) {
+	t.Setenv("CORS_ALLOWED_ORIGINS", "http://localhost:8082")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	want := []string{"http://localhost:8082"}
+	if !slices.Equal(cfg.CORSAllowedOrigins, want) {
+		t.Errorf("Load() CORSAllowedOrigins = %v, want %v", cfg.CORSAllowedOrigins, want)
+	}
+}
+
+func TestLoad_CORSAllowedOrigins_MultipleWithWhitespace(t *testing.T) {
+	t.Setenv("CORS_ALLOWED_ORIGINS", "http://localhost:8082, https://app.example.com ,,http://localhost:3000")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	want := []string{"http://localhost:8082", "https://app.example.com", "http://localhost:3000"}
+	if !slices.Equal(cfg.CORSAllowedOrigins, want) {
+		t.Errorf("Load() CORSAllowedOrigins = %v, want %v", cfg.CORSAllowedOrigins, want)
+	}
+}
+
+func TestLoad_CORSAllowedOrigins_EmptyString_IsUnset(t *testing.T) {
+	t.Setenv("CORS_ALLOWED_ORIGINS", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.CORSAllowedOrigins != nil {
+		t.Errorf("Load() CORSAllowedOrigins = %v, want nil", cfg.CORSAllowedOrigins)
 	}
 }
