@@ -197,13 +197,21 @@ func (r *postgresRepository) Update(ctx context.Context, task Task) error {
 		return ErrConflict
 	}
 
+	// user_id is repeated here even though the locked SELECT above already
+	// proved ownership: this statement is then correct on its own terms,
+	// rather than only in combination with a check several lines earlier.
+	// If that SELECT is ever refactored (or its WHERE clause relaxed), an
+	// ownership bug here would be a silent cross-tenant write, which is
+	// exactly the class of mistake worth making structurally impossible
+	// rather than relying on a reviewer noticing.
 	const query = `
 		UPDATE tasks
 		SET title = $1, description = $2, status = $3, priority = $4, updated_at = $5, version = version + 1
-		WHERE id = $6::uuid
+		WHERE id = $6::uuid AND user_id = $7::uuid
 	`
 	if _, err := tx.ExecContext(ctx, query,
-		task.Title, task.Description, string(task.Status), string(task.Priority), task.UpdatedAt, task.ID,
+		task.Title, task.Description, string(task.Status), string(task.Priority), task.UpdatedAt,
+		task.ID, task.UserID,
 	); err != nil {
 		return fmt.Errorf("postgres: update task: %w", err)
 	}

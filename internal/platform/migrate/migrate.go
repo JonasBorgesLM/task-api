@@ -82,7 +82,7 @@ func RunMigrations(ctx context.Context, db *sql.DB) error {
 // This is the counterpart to RunMigrations used for manual rollback (see
 // cmd/migrate and `make migrate-down`). The application itself never
 // calls it — only RunMigrations runs automatically, from
-// cmd/api/main.go's buildRepository.
+// cmd/api/main.go's openDatabase.
 func RunMigrationsDown(ctx context.Context, db *sql.DB) error {
 	if err := ensureMigrationsTable(ctx, db); err != nil {
 		return fmt.Errorf("postgres: ensure schema_migrations table: %w", err)

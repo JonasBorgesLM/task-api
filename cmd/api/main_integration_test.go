@@ -313,14 +313,23 @@ func TestIntegration_ReadinessEndpoint(t *testing.T) {
 }
 
 // TestIntegration_DebugVars verifies that newServer registers the stdlib
-// expvar handler at GET /debug/vars, giving at least baseline runtime
-// observability (goroutine count, memstats, GC stats) without pulling in
-// an external metrics dependency.
+// expvar handler at GET /debug/vars, giving baseline runtime observability
+// (goroutine count, memstats, GC stats) without pulling in an external
+// metrics dependency — and that, unlike /health and /health/ready, it is
+// only reachable with a valid session token.
 func TestIntegration_DebugVars(t *testing.T) {
 	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
 	defer srv.Close()
 
-	resp, err := srv.Client().Get(srv.URL + "/debug/vars")
+	token := registerAndLogin(t, srv)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/debug/vars", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatalf("GET /debug/vars: %v", err)
 	}
@@ -337,6 +346,38 @@ func TestIntegration_DebugVars(t *testing.T) {
 	for _, key := range []string{"cmdline", "memstats"} {
 		if _, ok := body[key]; !ok {
 			t.Errorf("/debug/vars response is missing expected key %q", key)
+		}
+	}
+}
+
+// TestIntegration_DebugVars_RequiresAuth guards the other half of the
+// contract: expvar leaks the process command line and full runtime
+// statistics, so an unauthenticated caller must not reach it. The health
+// routes are deliberately public (an orchestrator probe has no token to
+// present) — this asserts /debug/vars is not.
+func TestIntegration_DebugVars_RequiresAuth(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/debug/vars")
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauthenticated GET /debug/vars status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+
+	// The runtime detail expvar would have served must not appear in the
+	// rejection body.
+	rejected, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	for _, leaked := range []string{"cmdline", "memstats"} {
+		if strings.Contains(string(rejected), leaked) {
+			t.Errorf("unauthenticated rejection leaked %q: %s", leaked, rejected)
 		}
 	}
 }

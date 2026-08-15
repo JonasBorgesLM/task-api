@@ -53,6 +53,21 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Restart on crash, but stay down after an explicit `docker compose
+    # stop` / `down`. The API exits non-zero when it cannot reach
+    # PostgreSQL at startup (see openDatabase's Ping), so without this a
+    # transient database blip during boot leaves the container dead until
+    # someone notices.
+    restart: unless-stopped
+    # There is deliberately no healthcheck here. The runtime image is
+    # built FROM scratch (see Dockerfile) and contains nothing but the
+    # binary — no shell, no curl, no wget — so every shell- or
+    # tool-based Compose healthcheck would fail regardless of whether the
+    # API is actually healthy. The application does expose GET
+    # /health/ready for this purpose; a real orchestrator (Kubernetes,
+    # ECS, a load balancer) probes it over HTTP without needing anything
+    # installed inside the container, which is the correct place for that
+    # check to live.
 
 volumes:
   task-api-postgres-data:

@@ -256,6 +256,46 @@ func TestUpdate(t *testing.T) {
 	}
 }
 
+// TestUpdate_PreservesCreatedAt pins down a contract both Repository
+// implementations must agree on: Update never changes CreatedAt. The
+// PostgreSQL implementation gets this for free (its UPDATE statement
+// doesn't list created_at), so without this the in-memory one could
+// silently accept a mutated CreatedAt and let a bug pass every unit test
+// while diverging against a real database.
+func TestUpdate_PreservesCreatedAt(t *testing.T) {
+	repo := NewMemoryRepository()
+	task := newTestTask("1", "Original title")
+
+	if err := repo.Create(context.Background(), task); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	current, err := repo.FindByID(context.Background(), "1", testUserID)
+	if err != nil {
+		t.Fatalf("FindByID() unexpected error: %v", err)
+	}
+	originalCreatedAt := current.CreatedAt
+
+	// A caller attempts to move CreatedAt a year into the past.
+	current.Title = "Updated title"
+	current.CreatedAt = originalCreatedAt.Add(-365 * 24 * time.Hour)
+
+	if err := repo.Update(context.Background(), current); err != nil {
+		t.Fatalf("Update() unexpected error: %v", err)
+	}
+
+	got, err := repo.FindByID(context.Background(), "1", testUserID)
+	if err != nil {
+		t.Fatalf("FindByID() unexpected error: %v", err)
+	}
+	if !got.CreatedAt.Equal(originalCreatedAt) {
+		t.Errorf("Update() changed CreatedAt: got %v, want %v", got.CreatedAt, originalCreatedAt)
+	}
+	if got.Title != "Updated title" {
+		t.Errorf("Update() title = %q, want %q — the rest of the update must still apply", got.Title, "Updated title")
+	}
+}
+
 // TestUpdate_WrongUser_ReturnsErrNotFound verifies that Update rejects a
 // task whose UserID doesn't match the stored row's owner, before even
 // looking at Version.

@@ -111,6 +111,16 @@ func paginateTasks(tasks []Task, limit, offset int) []Task {
 // doc comment), and ErrConflict if task.Version does not match the stored
 // Version — i.e. the task was modified by another writer since task was
 // read. On success the stored Version is incremented.
+//
+// CreatedAt is deliberately carried over from the stored task rather than
+// taken from the caller's copy: the PostgreSQL implementation's UPDATE
+// statement simply doesn't list created_at among the columns it writes, so
+// it is structurally incapable of changing it. Assigning the caller's
+// struct wholesale here would let this implementation change a value the
+// other one silently ignores, and the two Repositories must not disagree
+// about what Update is allowed to touch — otherwise a bug that mutated
+// CreatedAt would pass every unit test (which run against this
+// implementation) and only diverge in production.
 func (r *memoryRepository) Update(ctx context.Context, task Task) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -127,6 +137,7 @@ func (r *memoryRepository) Update(ctx context.Context, task Task) error {
 		return ErrConflict
 	}
 
+	task.CreatedAt = stored.CreatedAt
 	task.Version = stored.Version + 1
 	r.store[task.ID] = task
 	return nil

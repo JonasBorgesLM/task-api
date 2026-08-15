@@ -1,0 +1,28 @@
+-- Adds the two indexes the sessions table was missing. Before this
+-- migration it carried only its primary key (token_hash), which serves
+-- Repository.FindSessionByTokenHash — the per-request lookup — but leaves
+-- both of the table's other access paths as sequential scans, confirmed
+-- with EXPLAIN against a real database:
+--
+--     DELETE FROM sessions WHERE expires_at < now();  ->  Seq Scan
+--     SELECT 1 FROM sessions WHERE user_id = '...';    ->  Seq Scan
+--
+--   - expires_at backs Repository.DeleteExpiredSessions, which
+--     user.Service.PruneExpiredSessions runs on a timer (hourly — see
+--     cmd/api/main.go's sessionCleanupInterval). Without this index that
+--     periodic job reads the entire sessions table every pass, and the
+--     table only grows with the number of logins the deployment has ever
+--     served.
+--
+--   - user_id backs the ON DELETE CASCADE declared in
+--     0003_create_sessions_table.up.sql. PostgreSQL does *not* create an
+--     index on a foreign key's referencing column automatically, so
+--     deleting a user had to scan all of sessions to find the rows to
+--     cascade to.
+--
+-- Both are plain B-tree indexes on a single column: these are range/
+-- equality filters with no accompanying ORDER BY, so there is nothing a
+-- composite index would add here (unlike idx_tasks_user_id_created_at_id,
+-- which exists precisely to serve a filter *and* an ordering together).
+CREATE INDEX idx_sessions_expires_at ON sessions (expires_at);
+CREATE INDEX idx_sessions_user_id ON sessions (user_id);

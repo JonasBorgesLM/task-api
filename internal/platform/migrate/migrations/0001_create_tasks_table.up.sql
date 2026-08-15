@@ -42,12 +42,17 @@ CREATE TABLE tasks (
     CONSTRAINT tasks_status_check CHECK (status IN ('pending', 'done'))
 );
 
--- Supports Service.ListTasks' deterministic ordering (CreatedAt ascending,
--- ties broken by ID) without a sort step as the table grows:
--- postgresRepository.FindAll issues its SELECT pre-ordered by
--- (created_at, id) so it can use this index directly instead of sorting
--- the full result set in Postgres. Service still applies its own sort on
--- the returned slice regardless — Repository makes no ordering guarantee
--- callers may rely on — so this index is a performance optimization only,
--- not a substitute for that contract.
+-- Supports the deterministic ordering (created_at ascending, ties broken
+-- by id) that Repository.FindAll guarantees: it issues its SELECT
+-- pre-ordered by (created_at, id) so PostgreSQL can walk this index
+-- directly instead of sorting the full result set as the table grows.
+--
+-- Historical note: when this migration was written, ordering was applied
+-- by Service on the returned slice and Repository promised nothing about
+-- it, making this index a pure optimization. That contract has since
+-- moved — ordering (and the LIMIT/OFFSET window) is now Repository's
+-- responsibility, so the ORDER BY this index serves is load-bearing, not
+-- decorative. See the Repository interface's doc comment in
+-- internal/task/repository.go for the current contract; 0004 supersedes
+-- this index itself with a user_id-leading one.
 CREATE INDEX idx_tasks_created_at_id ON tasks (created_at, id);

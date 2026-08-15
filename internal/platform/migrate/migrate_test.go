@@ -17,6 +17,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"os"
 	"testing"
 	"time"
@@ -97,16 +98,50 @@ func appliedMigrationCount(t *testing.T, db *sql.DB) int {
 	return n
 }
 
-// wantMigrationCount is the number of migration files under migrations/ —
-// kept as one named constant so every assertion below states its
-// expectation the same way; if a migration is added, every one of these
-// tests fails loudly with a mismatched count instead of silently checking
-// a stale number.
-const wantMigrationCount = 5
+// indexExists reports whether an index of the given name exists on table.
+func indexExists(t *testing.T, db *sql.DB, table, index string) bool {
+	t.Helper()
+	var exists bool
+	err := db.QueryRowContext(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_indexes
+			WHERE schemaname = 'public' AND tablename = $1 AND indexname = $2
+		)
+	`, table, index).Scan(&exists)
+	if err != nil {
+		t.Fatalf("check index %s on %q exists: %v", index, table, err)
+	}
+	return exists
+}
+
+// embeddedMigrationCount is the number of *.up.sql files this package
+// embeds, derived from migrationFiles rather than hardcoded.
+//
+// The invariant these tests care about is "every embedded migration gets
+// applied and recorded" — deriving the number states exactly that. A
+// hardcoded constant would instead make every test in this file fail
+// whenever a migration is added, for a reason unrelated to what any of
+// them actually verify, and with a message ("has 6 rows, want 5") that
+// describes the bookkeeping rather than the problem. Assertions that
+// genuinely depend on a *specific* migration's contents stay explicit
+// about which one they mean — see the step-by-step revert test below.
+func embeddedMigrationCount(t *testing.T) int {
+	t.Helper()
+
+	paths, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
+	if err != nil {
+		t.Fatalf("list embedded migrations: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no embedded migrations found — the //go:embed pattern is broken")
+	}
+	return len(paths)
+}
 
 func TestPostgres_RunMigrations_AppliesAllAndIsIdempotent(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
+	wantMigrationCount := embeddedMigrationCount(t)
 
 	if err := RunMigrations(ctx, db); err != nil {
 		t.Fatalf("RunMigrations() unexpected error: %v", err)
@@ -145,22 +180,49 @@ func TestPostgres_RunMigrationsDown_NoMigrationsToRevert(t *testing.T) {
 	}
 }
 
-// TestPostgres_RunMigrationsDown_RevertsMostRecentMigration verifies reverting the
-// single most recently applied migration (0005) actually undoes its
-// specific schema change — not just that RunMigrationsDown returns nil.
+// TestPostgres_RunMigrationsDown_RevertsMostRecentMigration verifies that
+// each RunMigrationsDown call undoes exactly one migration's own schema
+// change — not just that it returns nil — by stepping back through the
+// two most recent ones and checking what each specifically did:
+//
+//	0006_add_sessions_indexes            -> its two indexes are dropped
+//	0005_expand_task_status_and_priority -> priority column and the widened
+//	                                        status CHECK are undone
 func TestPostgres_RunMigrationsDown_RevertsMostRecentMigration(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
+	wantMigrationCount := embeddedMigrationCount(t)
 
 	if err := RunMigrations(ctx, db); err != nil {
 		t.Fatalf("RunMigrations() unexpected error: %v", err)
 	}
+
+	// --- Revert 0006_add_sessions_indexes ---
+	for _, index := range []string{"idx_sessions_expires_at", "idx_sessions_user_id"} {
+		if !indexExists(t, db, "sessions", index) {
+			t.Fatalf("index %s does not exist after RunMigrations — test setup is wrong", index)
+		}
+	}
+
 	if err := RunMigrationsDown(ctx, db); err != nil {
 		t.Fatalf("RunMigrationsDown() unexpected error: %v", err)
 	}
-
 	if got := appliedMigrationCount(t, db); got != wantMigrationCount-1 {
 		t.Errorf("schema_migrations has %d rows after one RunMigrationsDown, want %d", got, wantMigrationCount-1)
+	}
+	for _, index := range []string{"idx_sessions_expires_at", "idx_sessions_user_id"} {
+		if indexExists(t, db, "sessions", index) {
+			t.Errorf("index %s still exists after reverting 0006_add_sessions_indexes", index)
+		}
+	}
+
+	// --- Revert 0005_expand_task_status_and_priority ---
+	if err := RunMigrationsDown(ctx, db); err != nil {
+		t.Fatalf("RunMigrationsDown() (second) unexpected error: %v", err)
+	}
+
+	if got := appliedMigrationCount(t, db); got != wantMigrationCount-2 {
+		t.Errorf("schema_migrations has %d rows after two RunMigrationsDown, want %d", got, wantMigrationCount-2)
 	}
 	if columnExists(t, db, "tasks", "priority") {
 		t.Error("priority column still exists after reverting 0005_expand_task_status_and_priority")
@@ -193,6 +255,7 @@ func TestPostgres_RunMigrationsDown_RevertsMostRecentMigration(t *testing.T) {
 func TestPostgres_RunMigrationsDown_FullRoundTrip(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
+	wantMigrationCount := embeddedMigrationCount(t)
 
 	if err := RunMigrations(ctx, db); err != nil {
 		t.Fatalf("RunMigrations() unexpected error: %v", err)

@@ -366,6 +366,11 @@ func TestPostgres_Update(t *testing.T) {
 	current.Status = StatusDone
 	current.Priority = PriorityHigh
 	current.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
+	// Actively attempt to move CreatedAt, mirroring
+	// TestUpdate_PreservesCreatedAt against the in-memory implementation:
+	// both Repositories must refuse to change it, and asserting that here
+	// only proves something if the test actually tries.
+	current.CreatedAt = task.CreatedAt.Add(-365 * 24 * time.Hour)
 
 	if err := repo.Update(context.Background(), current); err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)

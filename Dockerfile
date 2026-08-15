@@ -55,7 +55,7 @@ USER 65532:65532
 COPY --from=builder /out/task-api /task-api
 
 # Documents the port the application listens on by default (HTTP_ADDR
-# defaults to ":8080" — see config/config.go). This is metadata only; it
+# defaults to ":8080" — see internal/config/config.go). This is metadata only; it
 # does not publish the port. If HTTP_ADDR is overridden at `docker run`
 # time, publish the matching port instead (see .env.example for the full
 # list of supported environment variables — HTTP_ADDR, HTTP_READ_TIMEOUT,
