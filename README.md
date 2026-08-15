@@ -58,6 +58,7 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `DB_CONN_MAX_LIFETIME` | Max lifetime of a pooled connection | `5m` |
 | `DB_AUTO_MIGRATE` | Apply pending migrations automatically on startup | `true` |
 | `AUTH_SESSION_TTL` | How long a `POST /auth/login` token stays valid | `24h` |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call this API. Unset ⇒ CORS disabled | *(unset)* |
 
 `config.Load()` returns an error (and the process refuses to start) if a timeout/TTL isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
@@ -88,12 +89,19 @@ make build && ./bin/task-api         # build a standalone binary
 ```bash
 make docker-build   # build the image
 
-make docker-up       # full stack (API + PostgreSQL) via docker compose
+make docker-up       # full stack (API + PostgreSQL + Swagger UI) via docker compose
 curl http://localhost:8080/health
+open http://localhost:8082    # Swagger UI — browse and try every endpoint by hand
 make docker-down     # stop and remove everything (data volume is kept)
 
 make db-up            # PostgreSQL only — pair with `make run` on the host for faster edit/rebuild cycles
 ```
+
+### Swagger UI
+
+`docker-compose.yml` bundles [Swagger UI](https://github.com/swagger-api/swagger-ui) at **http://localhost:8082**, serving `docs/openapi.yaml` — mounted read-only, so editing the spec and reloading the page shows the change with no rebuild. "Try it out" works against the real `api` service with no extra setup: `CORS_ALLOWED_ORIGINS` defaults to `http://localhost:8082` specifically so the browser-based request Swagger UI's "Execute" button makes isn't blocked by CORS (see [Configuration](#configuration) and `docs/ARCHITECTURE.md`'s "Operational Behavior" section for why that's necessary — a browser enforces same-origin restrictions that a `curl` request from the same machine never hits).
+
+Register a user via `POST /auth/register`, log in via `POST /auth/login` to get a token, then click **Authorize** (top right) and paste it in as `Bearer <token>` to unlock every `/tasks/*` request.
 
 Run the built image standalone against any PostgreSQL instance:
 

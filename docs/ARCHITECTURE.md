@@ -95,7 +95,7 @@ task-api/
 ├── docs/
 │   ├── ARCHITECTURE.md     # this file
 │   └── openapi.yaml        # Full API contract — every endpoint, schema, status code, example
-├── docker-compose.yml      # Local stack: PostgreSQL, and optionally the API itself
+├── docker-compose.yml      # Local stack: PostgreSQL, the API, and a Swagger UI for manual testing
 ├── Dockerfile              # Multi-stage build → static binary on `scratch`
 ├── Makefile                # `make help` for the full command list
 ├── CLAUDE.md               # Guidance for AI agents / contributors working in this repo
@@ -165,6 +165,7 @@ cancelled        Y          N        N        -
 - Unexpected-error logging: each domain's `Handler` logs, once, only errors it has no specific HTTP mapping for (genuine `500`s), with request ID/method/path attached.
 - `GET /debug/vars`: stdlib `expvar` — command line, memory/GC stats, goroutine counts. Baseline visibility with no external dependency; see [Future Improvements](#future-improvements) for a richer metrics surface. Unlike the health routes it requires authentication: those must stay open because an orchestrator's probe carries no credentials, whereas whoever reads runtime internals can present a token.
 - **Dependency failures are not reported as auth failures.** `user.RequireAuth` answers `401` only when the session lookup says the token is unknown or expired; if the lookup itself fails (database unreachable, timeout), it answers `503` and logs the cause at `ERROR`. Collapsing both into `401` would tell clients holding valid tokens to discard them — stampeding the login endpoint, which needs the same unavailable database — and would hide a total outage behind `WARN`-level "client auth errors" that no `5xx` alert would ever catch.
+- **CORS (`middleware.CORS`)**: disabled by default (unset `CORS_ALLOWED_ORIGINS`) when running `go run ./cmd/api` directly — no `Access-Control-*` headers, no behavior change for the server-to-server/same-origin clients this API served exclusively before CORS support existed. `docker-compose.yml` sets it to `http://localhost:8082` by default instead, matching the Swagger UI it bundles at that port, so "Try it out" works with no extra setup — see README's "Swagger UI" section. Positioned inside `Logging` but outside `Recovery` in the middleware chain (`cmd/api/main.go`) so a preflight `OPTIONS` request it answers directly still gets an access log line, and so the `Access-Control-Allow-Origin` header it sets survives even a handler panic. It intercepts `OPTIONS` ahead of `mux` dispatch specifically because a route registered only for `GET`/`POST`/etc. has no `OPTIONS` handler of its own — an unhandled preflight would otherwise `404`.
 
 ## Future Improvements
 
@@ -175,7 +176,6 @@ Deliberately deferred — either not yet needed at this project's scale, or a de
 - **Distributed tracing** — OpenTelemetry, for end-to-end request tracing.
 - **Task filtering and search** — filter `GET /tasks` by `status`/`priority`, or search by title (the natural point to also add matching indexes).
 - **Distributed rate limiting** — `middleware.RateLimiter` (see "Rate limiting on authentication endpoints" above) is in-process and single-instance; a horizontally-scaled deployment needs a shared store (e.g. Redis) instead, so every replica enforces the same budget rather than each having its own.
-- **CORS** — needed the moment a browser-based frontend calls this API from a different origin; not needed for a server-to-server or same-origin client.
 - **API versioning** (`/v1/tasks`) — worth introducing before shipping a real external client (mobile app, third-party integration) that can't update in lockstep with the API.
 - **BFF (Backend-for-Frontend) layer** — not justified yet with a single core resource, but the natural next architectural step once there's more than one downstream service to aggregate, or once a web client and a mobile client need meaningfully different payload shapes (dashboard aggregation vs. lean/offline-friendly responses). The groundwork is already compatible: stable core API, token-based auth, ownership already enforced server-side.
 - **Reconsidering session tokens vs. JWT** — worth revisiting if/when multiple independently-deployed services need to verify a caller's identity without a shared database, which is exactly the case a stateless token is built for (see "Authentication" above for the trade-off as it stands today).
