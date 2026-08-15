@@ -1,6 +1,6 @@
 // Command migrate applies or reverts PostgreSQL migrations against
 // DATABASE_URL, independently of the API server. It exists for two cases
-// the server's own automatic migration (cmd/api/main.go's buildRepository,
+// the server's own automatic migration (cmd/api/main.go's openDatabase,
 // controlled by DB_AUTO_MIGRATE) doesn't cover:
 //
 //   - Reverting a migration (migrate.RunMigrationsDown) — the server only

@@ -120,7 +120,15 @@ make coverage             # unit tests + per-function coverage report
 make db-up                # start PostgreSQL
 make test-integration     # integration tests
 make test-integration-race
+make coverage-full        # unit + integration, true cross-package coverage
 ```
+
+`make coverage` reports only what runs without a database, and `go test
+-cover` credits coverage solely to each package's own tests — so
+integration-tagged files (`postgresRepository`, `migrate`) show 0% purely
+because they aren't compiled, and cross-package helpers show 0% despite
+being fully exercised. `make coverage-full` measures both together
+(`-tags=integration -coverpkg=./...`); that is the number worth quoting.
 
 `internal/task/integration_test.go` (no build tag) is a full-stack HTTP test — real `Handler` → real `Service` → real in-memory `Repository`, for both `task` and `user`, including the real register/login flow — and despite the name has no external dependency; it's part of the unit suite because it validates that the layers (and both domains' auth wiring) are wired together correctly, not that PostgreSQL works. The dividing line for "integration" here is *needs a real external service*, not *spans more than one layer*.
 
@@ -162,6 +170,8 @@ DATABASE_URL="postgres://task_api:task_api@localhost:5432/task_api?sslmode=disab
   go run ./cmd/seed -users=10 -tasks-per-user=25
 ```
 
+> **`-reset` is irreversible** — it `TRUNCATE`s `users`, `sessions` and `tasks`. It is refused outright unless `DATABASE_URL` points at `localhost`/`127.0.0.1`/`::1`, so a copy-pasted production connection string fails safely instead of emptying it. Add `-allow-remote-reset` to override that when the target really is what you meant. (`make seed-reset` / `make db-reset` point at localhost and are unaffected.)
+
 ## API
 
 All endpoints accept/return `application/json`; every response carries an `X-Request-Id` header for log correlation. Every `/tasks/*` route requires `Authorization: Bearer <token>` (obtained from `POST /auth/login`) and is scoped to the authenticated caller's own tasks — a task ID that exists but belongs to someone else returns `404`, identically to one that doesn't exist at all. **Full request/response schemas, validation rules, and examples: [docs/openapi.yaml](docs/openapi.yaml).**
@@ -181,9 +191,9 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `DELETE` | `/tasks/{id}` | required | Delete a task |
 | `GET` | `/health` | — | Liveness — always `200` while the process runs |
 | `GET` | `/health/ready` | — | Readiness — `200` if the database is reachable, `503` if not |
-| `GET` | `/debug/vars` | — | Runtime stats (`expvar`) |
+| `GET` | `/debug/vars` | required | Runtime stats (`expvar`) — authenticated, unlike the health routes |
 
-Errors always use the same envelope, `{"error": "description of the problem"}`. Common codes: `400` invalid input, `401` missing/invalid session token, `404` unknown or not-yours task ID, `409` optimistic-concurrency conflict or illegal status transition (re-fetch and retry), `429` too many requests to `/auth/register`/`/auth/login` from the same client (rate limited — wait and retry), `500` unexpected failure (details logged server-side, never in the response).
+Errors always use the same envelope, `{"error": "description of the problem"}`. Common codes: `400` invalid input, `401` missing/invalid session token, `503` a dependency (the database) is unavailable — the token is fine, retry, `404` unknown or not-yours task ID, `409` optimistic-concurrency conflict or illegal status transition (re-fetch and retry), `429` too many requests to `/auth/register`/`/auth/login` from the same client (rate limited — wait and retry), `500` unexpected failure (details logged server-side, never in the response).
 
 **Quick walkthrough:**
 

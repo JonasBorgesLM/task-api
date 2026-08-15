@@ -58,7 +58,7 @@ func newIntegrationServer(t *testing.T) (*httptest.Server, string) {
 
 	userSvc := user.NewService(user.NewMemoryRepository(), 24*time.Hour)
 	userHandler := user.NewHandler(userSvc, logger)
-	requireAuth := user.RequireAuth(userSvc)
+	requireAuth := user.RequireAuth(userSvc, logger)
 
 	// A generous limit here: these tests exercise the task/auth stack, not
 	// RateLimiter itself (see internal/middleware/rate_limit_test.go for

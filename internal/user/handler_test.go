@@ -270,7 +270,7 @@ func TestRegisterRoutes_PublicAndProtectedRoutes(t *testing.T) {
 	// RateLimiter itself (see internal/middleware/rate_limit_test.go for
 	// that).
 	noopRateLimit := middleware.NewRateLimiter(1000, time.Minute).Middleware()
-	h.RegisterRoutes(mux, RequireAuth(svc), noopRateLimit)
+	h.RegisterRoutes(mux, RequireAuth(svc, slog.New(slog.NewTextHandler(io.Discard, nil))), noopRateLimit)
 
 	cases := []struct {
 		name   string

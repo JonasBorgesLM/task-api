@@ -165,7 +165,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 
 	taskHandler := task.NewHandler(taskSvc, logger)
 	userHandler := user.NewHandler(userSvc, logger)
-	requireAuth := user.RequireAuth(userSvc)
+	requireAuth := user.RequireAuth(userSvc, logger)
 
 	// authRateLimiter guards only /auth/register and /auth/login (see
 	// userHandler.RegisterRoutes below) — it exists to blunt
@@ -176,7 +176,16 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	mux := http.NewServeMux()
 	registerHealthRoute(mux, logger)
 	registerReadinessRoute(mux, db, logger)
-	mux.Handle("GET /debug/vars", expvar.Handler())
+
+	// /debug/vars is authenticated, unlike the two health routes above.
+	// expvar exposes the process's command line and full runtime/GC
+	// statistics — internal operational detail with no reason to be
+	// world-readable, and a free fingerprint of the deployment for anyone
+	// probing it. The health routes stay public because an orchestrator's
+	// probe has no credentials to offer; expvar has no such constraint,
+	// since the humans and scrapers who read it can carry a token.
+	mux.Handle("GET /debug/vars", requireAuth(expvar.Handler()))
+
 	userHandler.RegisterRoutes(mux, requireAuth, authRateLimiter.Middleware())
 	taskHandler.RegisterRoutes(mux, requireAuth)
 

@@ -72,7 +72,7 @@ func countRows(t *testing.T, db *sql.DB, table string) int {
 func TestPostgres_Seed_SeedsUsersAndTasks(t *testing.T) {
 	db := setUpTestDB(t)
 
-	if err := run(2, "password12345", 3, false); err != nil {
+	if err := run(seedOptions{users: 2, password: "password12345", tasksPerUser: 3}); err != nil {
 		t.Fatalf("run() unexpected error: %v", err)
 	}
 
@@ -99,10 +99,10 @@ func TestPostgres_Seed_SeedsUsersAndTasks(t *testing.T) {
 func TestPostgres_Seed_ReusesExistingUsersAcrossRuns(t *testing.T) {
 	db := setUpTestDB(t)
 
-	if err := run(2, "password12345", 3, false); err != nil {
+	if err := run(seedOptions{users: 2, password: "password12345", tasksPerUser: 3}); err != nil {
 		t.Fatalf("first run() unexpected error: %v", err)
 	}
-	if err := run(2, "password12345", 3, false); err != nil {
+	if err := run(seedOptions{users: 2, password: "password12345", tasksPerUser: 3}); err != nil {
 		t.Fatalf("second run() unexpected error: %v", err)
 	}
 
@@ -121,11 +121,11 @@ func TestPostgres_Seed_ReusesExistingUsersAcrossRuns(t *testing.T) {
 func TestPostgres_Seed_PasswordMismatchOnReuse_ReturnsError(t *testing.T) {
 	setUpTestDB(t)
 
-	if err := run(1, "password12345", 1, false); err != nil {
+	if err := run(seedOptions{users: 1, password: "password12345", tasksPerUser: 1}); err != nil {
 		t.Fatalf("first run() unexpected error: %v", err)
 	}
 
-	err := run(1, "a-completely-different-password", 1, false)
+	err := run(seedOptions{users: 1, password: "a-completely-different-password", tasksPerUser: 1})
 	if err == nil {
 		t.Fatal("run() with a mismatched -password on an already-seeded account: expected an error, got nil")
 	}
@@ -137,10 +137,10 @@ func TestPostgres_Seed_PasswordMismatchOnReuse_ReturnsError(t *testing.T) {
 func TestPostgres_Seed_ResetWipesAllTables(t *testing.T) {
 	db := setUpTestDB(t)
 
-	if err := run(2, "password12345", 3, false); err != nil {
+	if err := run(seedOptions{users: 2, password: "password12345", tasksPerUser: 3}); err != nil {
 		t.Fatalf("run() unexpected error: %v", err)
 	}
-	if err := run(0, "", 0, true); err != nil {
+	if err := run(seedOptions{users: 0, reset: true}); err != nil {
 		t.Fatalf("run() with -reset -users=0: unexpected error: %v", err)
 	}
 
@@ -158,7 +158,7 @@ func TestPostgres_Seed_ResetWipesAllTables(t *testing.T) {
 func TestPostgres_Seed_UsersZero_IsNoOp(t *testing.T) {
 	db := setUpTestDB(t)
 
-	if err := run(0, "", 0, false); err != nil {
+	if err := run(seedOptions{users: 0}); err != nil {
 		t.Fatalf("run() with -users=0: unexpected error: %v", err)
 	}
 

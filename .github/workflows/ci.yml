@@ -105,8 +105,21 @@ jobs:
       # and internal/platform/migrate's tests in particular DROP TABLE the
       # schema other packages' tests assume is already migrated; running
       # them concurrently is a real, observed source of spurious failures.
+      #
+      # No `-run Postgres` filter: the build tag already selects what runs
+      # here, and filtering by name on top of it silently skipped any
+      # integration test not named TestPostgres_*.
       - name: Test (integration)
-        run: go test -p 1 -tags=integration ./... -run Postgres -v
+        run: go test -p 1 -tags=integration ./... -v
 
       - name: Test (integration, race detector)
-        run: go test -p 1 -tags=integration -race ./... -run Postgres
+        run: go test -p 1 -tags=integration -race ./...
+
+      # Reported separately from "Test (unit, coverage)" because that step
+      # cannot see integration-tagged files (not compiled) and attributes
+      # coverage only within each package. This is the number that
+      # reflects what the suite actually exercises.
+      - name: Test (true coverage, unit + integration)
+        run: |
+          go test -p 1 -tags=integration -coverpkg=./... -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -1

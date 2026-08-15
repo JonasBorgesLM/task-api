@@ -1,5 +1,5 @@
 .PHONY: help run build tidy clean \
-        test test-race test-integration test-integration-race coverage \
+        test test-race test-integration test-integration-race coverage coverage-full \
         fmt fmt-check vet lint check \
         docker-build docker-up docker-down db-up \
         migrate-up migrate-down seed seed-reset db-reset
@@ -56,15 +56,35 @@ test-race: ## Run unit tests with the race detector enabled
 # is already migrated and stable — running two packages' integration
 # suites concurrently against the same database is a real, observed
 # source of spurious failures, not just a theoretical race.
+#
+# There is deliberately no `-run Postgres` filter: the `integration` build
+# tag already decides what belongs here, and selecting by name on top of
+# that meant any integration test not named TestPostgres_* was silently
+# skipped — passing CI without ever executing. Unit tests in the same
+# packages run too, which costs a few seconds and removes a way to be
+# wrong.
 test-integration: ## Run PostgreSQL integration tests (needs `make db-up` first)
-	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -p 1 -tags=integration ./... -run Postgres -v
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -p 1 -tags=integration ./... -v
 
 test-integration-race: ## Run PostgreSQL integration tests with the race detector (needs `make db-up` first)
-	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -p 1 -tags=integration -race ./... -run Postgres
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -p 1 -tags=integration -race ./...
 
 coverage: ## Run unit tests and print a per-function coverage report
 	go test -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out
+
+# The plain `coverage` target above measures only what runs without a
+# database, and `go test -cover` attributes coverage solely to each
+# package's own tests. Both understate this codebase substantially: the
+# integration-tagged postgresRepository/migrate files report 0% simply
+# because they aren't compiled, and helpers exercised across package
+# boundaries (internal/middleware's context plumbing, driven by
+# internal/user and internal/task) report 0% despite being fully covered.
+# -tags=integration plus -coverpkg=./... measures what is actually tested.
+coverage-full: ## Run unit + integration tests and report true cross-package coverage (needs `make db-up` first)
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -p 1 -tags=integration \
+		-coverpkg=./... -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out | tail -1
 
 ##@ Code Quality
 
