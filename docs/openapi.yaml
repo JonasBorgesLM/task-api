@@ -17,7 +17,7 @@ info:
     `internal/task/handler.go`+`service.go`+`repository.go` and
     `internal/user/handler.go`+`service.go`+`repository.go` as of the
     current codebase — no aspirational or planned behavior is included.
-  version: "2.0.0"
+  version: "2.1.0"
   license:
     name: MIT
     url: https://github.com/JonasBorgesLM/task-api/blob/main/LICENSE
@@ -36,6 +36,8 @@ tags:
     description: Task lifecycle management (create, read, update, status transitions, delete) — every operation is scoped to the authenticated caller's own tasks
   - name: Health
     description: Liveness and readiness checks, for process supervisors and load balancers
+  - name: Observability
+    description: Runtime statistics for operators — authenticated, unlike the health checks
 
 security:
   - bearerAuth: []
@@ -52,6 +54,10 @@ paths:
         POST /auth/login afterwards to obtain a session token.
       requestBody:
         required: true
+        description: >
+          Request bodies larger than 1 MiB are rejected, surfacing as the
+          same 400 "invalid request body" response as malformed JSON —
+          the same cap the task endpoints apply.
         content:
           application/json:
             schema:
@@ -119,10 +125,16 @@ paths:
         protected endpoint.
       requestBody:
         required: true
+        description: >
+          Request bodies larger than 1 MiB are rejected, surfacing as the
+          same 400 "invalid request body" response as malformed JSON.
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: alice@example.com
+              password: correct horse battery staple
       responses:
         '200':
           description: Authenticated successfully.
@@ -179,8 +191,17 @@ paths:
       summary: Invalidate the current session token
       description: >
         Deletes the session backing the bearer token used for this
-        request. Idempotent: logging out a token that's already invalid
-        or expired still returns 204.
+        request.
+
+        Repeating it with the *same* token returns 401, not 204: the
+        endpoint requires authentication, and the first call already
+        destroyed the session that authenticates it. The idempotency here
+        is server-side — deleting an already-absent session is not treated
+        as an error internally — but it is not observable through this
+        endpoint, because a request carrying an unknown or expired token
+        is rejected before it reaches the handler. Clients should treat
+        both 204 and 401 as "the session is gone", which is the outcome
+        logout is asking for either way.
       responses:
         '204':
           description: Logged out. No response body.
@@ -191,6 +212,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /auth/me:
     get:
@@ -209,8 +232,27 @@ paths:
                 $ref: '#/components/schemas/User'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >
+            The token authenticated successfully but its owning user no
+            longer exists. Only reachable if the account was removed out
+            of band (direct SQL, `cmd/seed -reset`) between the session
+            lookup and this read — this API exposes no endpoint that
+            deletes a user, and deleting one normally cascades its
+            sessions away, which would produce a 401 instead.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: user not found
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /tasks:
     post:
@@ -306,6 +348,8 @@ paths:
                 error: task already exists
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
     get:
       tags: [Tasks]
@@ -327,7 +371,10 @@ paths:
         - name: limit
           in: query
           required: false
-          description: Maximum number of tasks to return.
+          description: >
+            Maximum number of tasks to return. Sending the parameter with
+            an empty value (`?limit=`) is treated as omitting it, not as
+            an error.
           schema:
             type: integer
             minimum: 0
@@ -335,7 +382,10 @@ paths:
         - name: offset
           in: query
           required: false
-          description: Number of tasks to skip before collecting `limit` results.
+          description: >
+            Number of tasks to skip before collecting `limit` results.
+            Sending the parameter with an empty value (`?offset=`) is
+            treated as omitting it, not as an error.
           schema:
             type: integer
             minimum: 0
@@ -383,6 +433,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /tasks/{id}:
     get:
@@ -415,6 +467,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
     put:
       tags: [Tasks]
@@ -504,6 +558,8 @@ paths:
                 error: task was modified concurrently, please retry
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
     delete:
       tags: [Tasks]
@@ -524,6 +580,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /tasks/{id}/status:
     patch:
@@ -606,6 +664,8 @@ paths:
                     error: task was modified concurrently, please retry
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /tasks/{id}/done:
     patch:
@@ -622,10 +682,14 @@ paths:
 
         This operation is **idempotent**: calling it on a task that is
         already `done` returns 200 with the task unchanged, and does
-        *not* refresh `updated_at` or write to the repository. Calling it
-        on any other status legally reachable to `done` (see the Status
-        schema's transition table — every status can reach `done` in one
-        hop) sets `status` to `done` and refreshes `updated_at`.
+        *not* refresh `updated_at` or write to the repository.
+
+        It is *not* a universal shortcut: it applies the same transition
+        rules as PATCH /tasks/{id}/status, so it only succeeds from a
+        status that can legally reach `done` — `pending` and
+        `in_progress`. A `cancelled` task cannot be completed in one hop
+        (see the Status schema's transition table) and returns 409; move
+        it back to `pending` first.
       parameters:
         - $ref: '#/components/parameters/TaskID'
       responses:
@@ -654,11 +718,15 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           description: >
-            Optimistic concurrency conflict: another request updated this
+            Either the task's current status cannot legally reach `done`
+            in one hop — only `cancelled` can't (see the Status schema's
+            transition table); move it back to `pending` first — or an
+            optimistic concurrency conflict: another request updated this
             task between when this request's caller last read it and this
-            write. Never returned when the task was already `done` — that
-            path is idempotent and never writes. The caller should
-            re-fetch the task and retry.
+            write, in which case the caller should re-fetch and retry.
+
+            Neither is ever returned when the task is already `done`:
+            that path is idempotent and never writes.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -666,10 +734,64 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-              example:
-                error: task was modified concurrently, please retry
+              examples:
+                invalidTransition:
+                  summary: Task is cancelled, which cannot reach done directly
+                  value:
+                    error: 'complete task: invalid status transition: cannot move from "cancelled" to "done"'
+                concurrencyConflict:
+                  summary: Optimistic concurrency conflict
+                  value:
+                    error: task was modified concurrently, please retry
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /debug/vars:
+    get:
+      tags: [Observability]
+      operationId: getDebugVars
+      summary: Runtime statistics (expvar)
+      description: >
+        The Go standard library's `expvar` handler: the process command
+        line and full runtime/GC statistics (`memstats`, allocation
+        counters, and any other published variables) as JSON. Baseline
+        operational visibility with no external metrics dependency.
+
+        Unlike GET /health and GET /health/ready, this endpoint
+        **requires authentication** — it exposes internal runtime detail
+        and fingerprints the deployment, and unlike an orchestrator's
+        probe (which has no credentials to present), whoever reads these
+        numbers can carry a token.
+
+        The response shape is defined by `expvar`, not by this API: it is
+        an open-ended JSON object whose keys depend on what the runtime
+        and the process publish, so it is intentionally not modelled as a
+        fixed schema here.
+      responses:
+        '200':
+          description: Current runtime statistics.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                description: Open-ended expvar payload; keys are runtime-defined.
+              example:
+                cmdline: ["/task-api"]
+                memstats:
+                  Alloc: 1452712
+                  TotalAlloc: 1452712
+                  Sys: 12802312
+                  HeapObjects: 6415
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /health:
     get:
@@ -685,6 +807,9 @@ paths:
       responses:
         '200':
           description: The process is alive.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
           content:
             application/json:
               schema:
@@ -710,6 +835,9 @@ paths:
       responses:
         '200':
           description: The backing store is reachable.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
           content:
             application/json:
               schema:
@@ -717,7 +845,13 @@ paths:
               example:
                 status: ok
         '503':
-          description: The backing store is not reachable.
+          description: >
+            The backing store is not reachable. Distinct from the 503 an
+            authenticated endpoint returns: this one is the readiness
+            verdict itself, not a failed session lookup.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
           content:
             application/json:
               schema:
@@ -743,12 +877,25 @@ components:
       required: true
       description: >
         Server-generated task identifier (a UUIDv4 as produced by
-        CreateTask), scoped to the authenticated caller. The API does not
-        validate that `id` is a well-formed UUID — any string is accepted
-        and looked up as-is. A syntactically invalid id, a well-formed but
-        unknown id, and a well-formed id that belongs to a *different*
-        user all result in 404, identically — the API never reveals
-        whether a task ID exists if the caller doesn't own it.
+        CreateTask), scoped to the authenticated caller.
+
+        A well-formed but unknown id and a well-formed id belonging to a
+        *different* user both result in 404, identically — the API never
+        reveals whether a task ID exists if the caller doesn't own it.
+
+        A **malformed** id (not a syntactically valid UUID) is a separate
+        case and currently yields **500**, not 404: the API performs no
+        UUID validation of its own, so the value reaches PostgreSQL, whose
+        `::uuid` cast rejects it as a query error rather than as "no rows"
+        (`internal/task/postgres_repository.go`;
+        `TestPostgres_FindByID_MalformedID` pins this behavior down). Note
+        this is backend-dependent — the in-memory store, used when
+        DATABASE_URL is unset, returns 404 for the same input. This is a
+        known rough edge rather than an intended contract: malformed
+        client input should be a 4xx, and the two backends should agree.
+        It is documented here because this document describes what the
+        implementation does, not what it ought to do; see the project
+        README/ARCHITECTURE for the tracked follow-up.
       schema:
         type: string
       example: f47ac10b-58cc-4372-a567-0e02b2c3d479
@@ -979,9 +1126,14 @@ components:
             with 400 if longer than 2000 characters.
           example: Milk, eggs, bread
         priority:
-          allOf:
-            - $ref: '#/components/schemas/Priority'
-          description: Optional. Defaults to `medium` if omitted.
+          type: string
+          enum: [low, medium, high, ""]
+          description: >
+            Optional. Defaults to `medium` when omitted **or** sent as an
+            empty string — the server treats "" as "not provided" rather
+            than rejecting it, which is why "" appears in this enum even
+            though it is not a valid stored Priority value.
+          example: high
       required:
         - title
 
@@ -1007,9 +1159,14 @@ components:
             with 400 if longer than 2000 characters.
           example: Don't forget olive oil
         priority:
-          allOf:
-            - $ref: '#/components/schemas/Priority'
-          description: Optional. Omitted or empty leaves the task's current priority unchanged.
+          type: string
+          enum: [low, medium, high, ""]
+          description: >
+            Optional. Omitted **or** sent as an empty string leaves the
+            task's current priority unchanged — "" is the server's
+            "not provided" sentinel, which is why it appears in this enum
+            even though it is not a valid stored Priority value.
+          example: high
       required:
         - title
 
@@ -1097,3 +1254,27 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             error: internal server error
+
+    ServiceUnavailable:
+      description: >
+        The session lookup that authenticates this request could not be
+        performed — the database is unreachable, timed out, or the request
+        was canceled. **This says nothing about the caller's token:** a
+        perfectly valid, unexpired token gets this response too, so the
+        client must NOT discard its credentials and re-authenticate. Retry
+        the same request with the same token once the service recovers
+        (GET /health/ready reports when that is).
+
+        Returned only by endpoints that require authentication, since it
+        originates in the session lookup itself. POST /auth/register and
+        POST /auth/login perform no such lookup, so the same underlying
+        database failure surfaces there as a 500 instead.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: service temporarily unavailable, please retry
