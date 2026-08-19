@@ -17,7 +17,20 @@ info:
     `internal/task/handler.go`+`service.go`+`repository.go` and
     `internal/user/handler.go`+`service.go`+`repository.go` as of the
     current codebase — no aspirational or planned behavior is included.
-  version: "2.1.0"
+
+
+    Every response from every endpoint — including error responses and
+    responses produced before routing, such as a `404` for an unknown path
+    — additionally carries a fixed set of security headers
+    (`middleware.SecurityHeaders`): `Content-Security-Policy: default-src
+    'none'; frame-ancestors 'none'`, `X-Frame-Options: DENY`, and
+    `X-Content-Type-Options: nosniff`. They are constant, identical
+    everywhere, and are not part of the API contract a client programs
+    against, so they are documented here once rather than repeated on each
+    response. `Strict-Transport-Security` joins them only when the
+    deployment sets `HSTS_MAX_AGE` — see docs/ARCHITECTURE.md's
+    "Operational Behavior" for why that one is opt-in.
+  version: "2.2.0"
   license:
     name: MIT
     url: https://github.com/JonasBorgesLM/task-api/blob/main/LICENSE
