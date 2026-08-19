@@ -36,6 +36,12 @@
 //	                        the right default for a server-to-server or
 //	                        same-origin client, which is every client this
 //	                        API served until CORS support was added.
+//	HSTS_MAX_AGE            How long browsers should refuse to reach this
+//	                        API over plaintext, as a Go duration string
+//	                        (e.g. 8760h for a year). Unset (the default)
+//	                        omits Strict-Transport-Security entirely; set
+//	                        it only when HTTPS actually terminates in front
+//	                        of this process. See middleware.SecurityHeaders.
 package config
 
 import (
@@ -124,6 +130,14 @@ type Config struct {
 	// zero value, and what every test building a bare config.Config{}
 	// gets — disables CORS entirely.
 	CORSAllowedOrigins []string
+
+	// HSTSMaxAge is the max-age carried by the Strict-Transport-Security
+	// response header (see middleware.SecurityHeaders). Zero — the zero
+	// value, and what every test building a bare config.Config{} gets —
+	// omits the header entirely, which is the correct default for a
+	// process that serves plain HTTP and cannot know whether TLS
+	// terminates in front of it.
+	HSTSMaxAge time.Duration
 }
 
 // Load reads configuration from environment variables and applies defaults
@@ -206,6 +220,15 @@ func Load() (Config, error) {
 	}
 
 	cfg.CORSAllowedOrigins = parseCommaSeparated("CORS_ALLOWED_ORIGINS")
+
+	// Defaulted to 0 rather than to a duration: unset means "do not send
+	// Strict-Transport-Security at all", not "send a shorter one". A value
+	// that is set still has to be positive, which parseDuration enforces —
+	// HSTS_MAX_AGE=0 is a contradiction (a header asking to be forgotten
+	// immediately), so it is rejected rather than read as "disabled".
+	if cfg.HSTSMaxAge, err = parseDuration("HSTS_MAX_AGE", 0); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
 }

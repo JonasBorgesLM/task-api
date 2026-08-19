@@ -432,3 +432,48 @@ func TestLoad_CORSAllowedOrigins_EmptyString_IsUnset(t *testing.T) {
 		t.Errorf("Load() CORSAllowedOrigins = %v, want nil", cfg.CORSAllowedOrigins)
 	}
 }
+
+// --- HSTS_MAX_AGE ---
+
+func TestLoad_HSTSMaxAge_Unset_DisablesTheHeader(t *testing.T) {
+	// Zero is the "do not send Strict-Transport-Security" signal
+	// middleware.SecurityHeaders reads, not merely a short max-age.
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.HSTSMaxAge != 0 {
+		t.Errorf("Load() HSTSMaxAge = %v, want 0", cfg.HSTSMaxAge)
+	}
+}
+
+func TestLoad_HSTSMaxAge_Set(t *testing.T) {
+	t.Setenv("HSTS_MAX_AGE", "8760h")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if want := 8760 * time.Hour; cfg.HSTSMaxAge != want {
+		t.Errorf("Load() HSTSMaxAge = %v, want %v", cfg.HSTSMaxAge, want)
+	}
+}
+
+func TestLoad_HSTSMaxAge_Invalid(t *testing.T) {
+	t.Setenv("HSTS_MAX_AGE", "one-year")
+
+	if _, err := Load(); err == nil {
+		t.Error("Load() error = nil, want an error for a non-duration HSTS_MAX_AGE")
+	}
+}
+
+func TestLoad_HSTSMaxAge_ZeroIsRejected(t *testing.T) {
+	// "Disabled" is expressed by leaving the variable unset. An explicit
+	// zero asks browsers to forget the policy immediately, which is a
+	// contradiction worth reporting rather than quietly reading as "off".
+	t.Setenv("HSTS_MAX_AGE", "0s")
+
+	if _, err := Load(); err == nil {
+		t.Error("Load() error = nil, want an error for HSTS_MAX_AGE=0s")
+	}
+}

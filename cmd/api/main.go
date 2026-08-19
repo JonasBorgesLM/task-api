@@ -202,9 +202,17 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	// panic — Recovery's 500 doesn't clear headers set earlier in the
 	// chain). It is a no-op end to end unless CORS_ALLOWED_ORIGINS is set;
 	// see middleware.CORS.
+	//
+	// SecurityHeaders sits outside CORS, and therefore outside everything
+	// that can answer a request without reaching the mux: it has to run
+	// before the preflight CORS short-circuits, before the 500 Recovery
+	// writes for a panicking handler, and before the router's own 404/405
+	// — a response that skips the handler is exactly the kind that would
+	// otherwise go out bare.
 	rootHandler := middleware.Chain(
 		middleware.RequestID,
 		middleware.Logging(logger),
+		middleware.SecurityHeaders(cfg.HSTSMaxAge),
 		middleware.CORS(cfg.CORSAllowedOrigins),
 		middleware.Recovery(logger),
 	)(mux)

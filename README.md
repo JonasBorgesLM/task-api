@@ -59,8 +59,9 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `DB_AUTO_MIGRATE` | Apply pending migrations automatically on startup | `true` |
 | `AUTH_SESSION_TTL` | How long a `POST /auth/login` token stays valid | `24h` |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call this API. Unset ⇒ CORS disabled | *(unset)* |
+| `HSTS_MAX_AGE` | `Strict-Transport-Security` max-age, as a Go duration (e.g. `8760h`). Unset ⇒ header omitted; set it only when HTTPS terminates in front of this process | *(unset)* |
 
-`config.Load()` returns an error (and the process refuses to start) if a timeout/TTL isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
+`config.Load()` returns an error (and the process refuses to start) if a timeout/TTL/max-age isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
 ## Running Locally
 
