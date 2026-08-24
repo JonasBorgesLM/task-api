@@ -24,7 +24,29 @@ import (
 // time a subsequent request validates them (see openDatabase/config.Load,
 // the only production path that actually defaults it).
 func testConfig() config.Config {
-	return config.Config{AuthSessionTTL: time.Hour}
+	return config.Config{
+		AuthSessionTTL: time.Hour,
+
+		// Rate limits belong to the same category as AuthSessionTTL: a
+		// zero value is not "unset, use a default" but an actively
+		// hostile setting. ratelimit.New clamps a burst below 1 up to 1
+		// and treats a non-positive refill rate as "never refills", so a
+		// bare config.Config{} yields a server that serves exactly one
+		// request per limiter and then answers 429 forever. That is the
+		// library failing closed on misconfiguration, which is the right
+		// behavior in production and a trap in a test helper.
+		//
+		// The values here are far above anything a test in this package
+		// generates, so a 429 in one of them is a real regression rather
+		// than the helper's own doing. The tests that exercise limiting
+		// on purpose set their own tight values.
+		RateLimitBurst:      1000,
+		RateLimitPerSec:     1000,
+		AuthRateLimitBurst:  1000,
+		AuthRateLimitPerSec: 1000,
+		UserRateLimitBurst:  1000,
+		UserRateLimitPerSec: 1000,
+	}
 }
 
 // newTestServer builds the same *http.Server newServer builds in
@@ -60,8 +82,16 @@ func newTestServer(t *testing.T, cfg config.Config, logger *slog.Logger) *http.S
 // task.Handler.RegisterRoutes.
 func registerAndLogin(t *testing.T, srv *httptest.Server) string {
 	t.Helper()
+	return registerAndLoginAs(t, srv, "integration@example.com")
+}
 
-	const body = `{"email":"integration@example.com","password":"password12345"}`
+// registerAndLoginAs is registerAndLogin for a caller that needs more
+// than one distinct account — per-user behavior cannot be observed with a
+// single identity.
+func registerAndLoginAs(t *testing.T, srv *httptest.Server, email string) string {
+	t.Helper()
+
+	body := `{"email":"` + email + `","password":"password12345"}`
 
 	regResp, err := srv.Client().Post(srv.URL+"/auth/register", "application/json", strings.NewReader(body))
 	if err != nil {
@@ -508,5 +538,224 @@ func TestIntegration_CORS_Enabled_DisallowedOrigin_PreflightStill404s(t *testing
 
 	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
 		t.Errorf("disallowed origin got Access-Control-Allow-Origin = %q, want none", got)
+	}
+}
+
+// --- rate limiting ---
+//
+// These drive the composed limiters through a real HTTP server rather
+// than the ratelimit package in isolation: what is worth pinning here is
+// not that a token bucket counts correctly (the library tests that) but
+// that the three tiers are mounted where newServer claims they are, in an
+// order that actually produces the intended key.
+//
+// Every config below sets a refill rate low enough to be irrelevant for
+// the handful of requests each test makes, so a bucket that starts empty
+// stays empty. A rate fast enough to refill mid-test would make these
+// pass or fail on timing.
+
+// rateLimitedConfig returns testConfig() with one tier tightened to the
+// given burst and effectively no refill.
+func rateLimitedConfig(tier string, burst int) config.Config {
+	cfg := testConfig()
+	switch tier {
+	case "global":
+		cfg.RateLimitBurst, cfg.RateLimitPerSec = burst, 0.001
+	case "auth":
+		cfg.AuthRateLimitBurst, cfg.AuthRateLimitPerSec = burst, 0.001
+	case "user":
+		cfg.UserRateLimitBurst, cfg.UserRateLimitPerSec = burst, 0.001
+	default:
+		panic("unknown tier " + tier)
+	}
+	return cfg
+}
+
+// TestIntegration_RateLimit_ProtectsTaskRoutes is the regression this
+// whole tier exists for: before the limiters were composed globally, only
+// /auth/register and /auth/login were bounded and every task route could
+// be called without limit.
+func TestIntegration_RateLimit_ProtectsTaskRoutes(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, rateLimitedConfig("user", 2), discardLogger()).Handler)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv)
+
+	var statuses []int
+	for range 3 {
+		resp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+"/tasks", ""))
+		if err != nil {
+			t.Fatalf("GET /tasks: %v", err)
+		}
+		resp.Body.Close()
+		statuses = append(statuses, resp.StatusCode)
+	}
+
+	if statuses[0] != http.StatusOK || statuses[1] != http.StatusOK {
+		t.Errorf("first two GET /tasks = %v, want both 200 (burst is 2)", statuses[:2])
+	}
+	if statuses[2] != http.StatusTooManyRequests {
+		t.Errorf("third GET /tasks = %d, want 429", statuses[2])
+	}
+}
+
+// TestIntegration_RateLimit_PerUserBucketsAreIndependent pins the key
+// function, not the counting: both users here share one client address,
+// so a limiter still keyed by address would reject the second user's
+// request and pass this test's premise by accident.
+func TestIntegration_RateLimit_PerUserBucketsAreIndependent(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, rateLimitedConfig("user", 1), discardLogger()).Handler)
+	defer srv.Close()
+
+	tokenA := registerAndLoginAs(t, srv, "user-a@example.com")
+	tokenB := registerAndLoginAs(t, srv, "user-b@example.com")
+
+	// Drain user A's bucket: one allowed, one rejected.
+	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		resp, err := srv.Client().Do(authedRequest(t, tokenA, http.MethodGet, srv.URL+"/tasks", ""))
+		if err != nil {
+			t.Fatalf("user A GET /tasks #%d: %v", i+1, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("user A GET /tasks #%d = %d, want %d", i+1, resp.StatusCode, want)
+		}
+	}
+
+	// User B is untouched by user A having exhausted theirs.
+	resp, err := srv.Client().Do(authedRequest(t, tokenB, http.MethodGet, srv.URL+"/tasks", ""))
+	if err != nil {
+		t.Fatalf("user B GET /tasks: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("user B GET /tasks = %d, want 200 — buckets are keyed by user, not by address", resp.StatusCode)
+	}
+}
+
+// TestIntegration_RateLimit_GlobalAppliesBeforeAuthentication covers why
+// the global tier cannot simply be replaced by the per-user one: an
+// unauthenticated caller has no user ID to key on, and the session lookup
+// RequireAuth performs is itself work worth bounding. A request rejected
+// here never reaches that lookup, so the response is 429 rather than 401.
+func TestIntegration_RateLimit_GlobalAppliesBeforeAuthentication(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, rateLimitedConfig("global", 1), discardLogger()).Handler)
+	defer srv.Close()
+
+	first, err := srv.Client().Get(srv.URL + "/tasks")
+	if err != nil {
+		t.Fatalf("first GET /tasks: %v", err)
+	}
+	first.Body.Close()
+	if first.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("first GET /tasks = %d, want 401 (within burst, so auth decides)", first.StatusCode)
+	}
+
+	second, err := srv.Client().Get(srv.URL + "/tasks")
+	if err != nil {
+		t.Fatalf("second GET /tasks: %v", err)
+	}
+	second.Body.Close()
+	if second.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("second GET /tasks = %d, want 429 — the global tier must reject before authentication runs", second.StatusCode)
+	}
+}
+
+// TestIntegration_RateLimit_AuthRoutesHaveTheirOwnTier checks that
+// /auth/login is bounded by the auth tier even when the global tier is
+// wide open — the two exist to answer different threats.
+func TestIntegration_RateLimit_AuthRoutesHaveTheirOwnTier(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, rateLimitedConfig("auth", 1), discardLogger()).Handler)
+	defer srv.Close()
+
+	const body = `{"email":"nobody@example.com","password":"wrong-password-here"}`
+
+	first, err := srv.Client().Post(srv.URL+"/auth/login", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("first POST /auth/login: %v", err)
+	}
+	first.Body.Close()
+	if first.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("first POST /auth/login = %d, want 401", first.StatusCode)
+	}
+
+	second, err := srv.Client().Post(srv.URL+"/auth/login", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("second POST /auth/login: %v", err)
+	}
+	second.Body.Close()
+	if second.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("second POST /auth/login = %d, want 429", second.StatusCode)
+	}
+}
+
+// TestIntegration_RateLimit_RejectionCarriesSecurityHeaders guards the
+// chain order: secureheaders is mounted outside the limiter precisely so
+// that a response the limiter writes itself — never reaching a handler —
+// still carries the headers.
+func TestIntegration_RateLimit_RejectionCarriesSecurityHeaders(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, rateLimitedConfig("global", 1), discardLogger()).Handler)
+	defer srv.Close()
+
+	// Not /health: that route deliberately bypasses the global limiter
+	// (see newServer), so it can never produce the 429 this test needs.
+	for range 2 {
+		resp, err := srv.Client().Get(srv.URL + "/tasks")
+		if err != nil {
+			t.Fatalf("GET /tasks: %v", err)
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			for _, name := range []string{"Content-Security-Policy", "X-Frame-Options", "X-Content-Type-Options"} {
+				if resp.Header.Get(name) == "" {
+					t.Errorf("429 response is missing %s", name)
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("never observed a 429 — the global limiter did not engage")
+}
+
+// TestIntegration_RateLimit_HealthProbesAreExempt pins the exemption that
+// keeps a traffic burst from being escalated into a restart loop: an
+// orchestrator reads 429 as "unhealthy" and kills the replica, so the
+// probes must answer 200 even once every other route is rejecting.
+func TestIntegration_RateLimit_HealthProbesAreExempt(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, rateLimitedConfig("global", 1), discardLogger()).Handler)
+	defer srv.Close()
+
+	// Drain the global bucket on a route that is subject to it.
+	for range 2 {
+		resp, err := srv.Client().Get(srv.URL + "/tasks")
+		if err != nil {
+			t.Fatalf("GET /tasks: %v", err)
+		}
+		resp.Body.Close()
+	}
+
+	// Confirm the bucket really is empty, so a 200 below means the
+	// exemption rather than a limiter that never engaged.
+	drained, err := srv.Client().Get(srv.URL + "/tasks")
+	if err != nil {
+		t.Fatalf("GET /tasks: %v", err)
+	}
+	drained.Body.Close()
+	if drained.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("GET /tasks = %d, want 429 — the bucket was expected to be empty by now", drained.StatusCode)
+	}
+
+	for _, path := range []string{"/health", "/health/ready"} {
+		resp, err := srv.Client().Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200 even with the global bucket empty", path, resp.StatusCode)
+		}
 	}
 }

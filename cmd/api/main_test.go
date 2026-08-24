@@ -11,10 +11,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/JonasBorgesLM/moat/secureheaders"
 
 	"github.com/JonasBorgesLM/task-api/internal/config"
 
@@ -353,7 +356,7 @@ func newTestHandler(t *testing.T, cfg config.Config) http.Handler {
 // ones — they never reach a domain handler, so they are what a chain
 // ordered wrongly would leave bare.
 func TestSecurityHeaders_OnEveryResponseThroughTheChain(t *testing.T) {
-	handler := newTestHandler(t, config.Config{})
+	handler := newTestHandler(t, testConfig())
 
 	tests := []struct {
 		name       string
@@ -367,7 +370,7 @@ func TestSecurityHeaders_OnEveryResponseThroughTheChain(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+		"Content-Security-Policy": "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 		"X-Frame-Options":         "DENY",
 		"X-Content-Type-Options":  "nosniff",
 	}
@@ -390,25 +393,18 @@ func TestSecurityHeaders_OnEveryResponseThroughTheChain(t *testing.T) {
 	}
 }
 
-// TestSecurityHeaders_HSTSFollowsConfig pins the opt-in: a default config
-// (a process serving plain HTTP, which is every default deployment of this
-// binary) must not claim a TLS guarantee, and setting HSTS_MAX_AGE must be
-// what turns it on. See middleware.SecurityHeaders' doc comment.
+// TestSecurityHeaders_HSTSFollowsConfig pins the policy: the header is
+// sent by default and HSTS_MAX_AGE=0 is the explicit opt-out. The header
+// is inert over plaintext (RFC 6797 §7.2 requires browsers to ignore it
+// there), and suppressing it based on r.TLS would disable it exactly
+// where it matters — behind the TLS-terminating proxy every real
+// deployment of this binary sits behind, where r.TLS is nil even for
+// requests the client made over HTTPS. See config.Config.HSTSMaxAge.
 func TestSecurityHeaders_HSTSFollowsConfig(t *testing.T) {
-	t.Run("absent by default", func(t *testing.T) {
-		handler := newTestHandler(t, config.Config{})
-
-		req := httptest.NewRequest(http.MethodGet, "/health", nil)
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
-
-		if got := w.Header().Get("Strict-Transport-Security"); got != "" {
-			t.Errorf("Strict-Transport-Security = %q, want it absent by default", got)
-		}
-	})
-
-	t.Run("present when configured", func(t *testing.T) {
-		handler := newTestHandler(t, config.Config{HSTSMaxAge: 365 * 24 * time.Hour})
+	t.Run("present by default", func(t *testing.T) {
+		cfg := testConfig()
+		cfg.HSTSMaxAge = 365 * 24 * time.Hour
+		handler := newTestHandler(t, cfg)
 
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		w := httptest.NewRecorder()
@@ -418,6 +414,59 @@ func TestSecurityHeaders_HSTSFollowsConfig(t *testing.T) {
 			t.Errorf("Strict-Transport-Security = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("carries no includeSubDomains or preload", func(t *testing.T) {
+		cfg := testConfig()
+		cfg.HSTSMaxAge = 365 * 24 * time.Hour
+		handler := newTestHandler(t, cfg)
+
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		got := w.Header().Get("Strict-Transport-Security")
+		if strings.Contains(strings.ToLower(got), "includesubdomains") {
+			t.Errorf("Strict-Transport-Security = %q, must not claim subdomains this process knows nothing about", got)
+		}
+		if strings.Contains(strings.ToLower(got), "preload") {
+			t.Errorf("Strict-Transport-Security = %q, must not opt into a near-irreversible preload list", got)
+		}
+	})
+
+	t.Run("zero opts out entirely", func(t *testing.T) {
+		cfg := testConfig()
+		cfg.HSTSMaxAge = 0
+		handler := newTestHandler(t, cfg)
+
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		// Absent, not "max-age=0": the latter tells a browser to forget
+		// a policy earlier responses established, which is a different
+		// and more destructive instruction than declining to send one.
+		if got := w.Header().Get("Strict-Transport-Security"); got != "" {
+			t.Errorf("Strict-Transport-Security = %q, want it absent when HSTSMaxAge is zero", got)
+		}
+	})
+}
+
+// TestSecurityHeaders_HSTSMaxAgeMatchesLibraryDefault guards the one
+// value config duplicates from the moat library rather than importing:
+// config.defaultHSTSMaxAge is unexported, so the assertion has to happen
+// from a package that can see both a loaded Config and the library.
+func TestSecurityHeaders_HSTSMaxAgeMatchesLibraryDefault(t *testing.T) {
+	t.Setenv("DOTENV_PATH", filepath.Join(t.TempDir(), "absent.env"))
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+
+	if cfg.HSTSMaxAge != secureheaders.DefaultHSTSMaxAge {
+		t.Errorf("config default HSTSMaxAge = %v, want secureheaders.DefaultHSTSMaxAge (%v) — the duplicated constant has drifted",
+			cfg.HSTSMaxAge, secureheaders.DefaultHSTSMaxAge)
+	}
 }
 
 // --- run() ---
