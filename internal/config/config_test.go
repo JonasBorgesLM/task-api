@@ -435,15 +435,17 @@ func TestLoad_CORSAllowedOrigins_EmptyString_IsUnset(t *testing.T) {
 
 // --- HSTS_MAX_AGE ---
 
-func TestLoad_HSTSMaxAge_Unset_DisablesTheHeader(t *testing.T) {
-	// Zero is the "do not send Strict-Transport-Security" signal
-	// middleware.SecurityHeaders reads, not merely a short max-age.
+func TestLoad_HSTSMaxAge_Unset_SendsTheHeader(t *testing.T) {
+	// Unset means "send it with the default max-age", not "omit it". The
+	// header is inert over plaintext, and the alternative — deciding per
+	// request from r.TLS — silently disables HSTS behind a
+	// TLS-terminating proxy, which is where this binary always runs.
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() unexpected error: %v", err)
 	}
-	if cfg.HSTSMaxAge != 0 {
-		t.Errorf("Load() HSTSMaxAge = %v, want 0", cfg.HSTSMaxAge)
+	if cfg.HSTSMaxAge != defaultHSTSMaxAge {
+		t.Errorf("Load() HSTSMaxAge = %v, want %v", cfg.HSTSMaxAge, defaultHSTSMaxAge)
 	}
 }
 
@@ -467,13 +469,117 @@ func TestLoad_HSTSMaxAge_Invalid(t *testing.T) {
 	}
 }
 
-func TestLoad_HSTSMaxAge_ZeroIsRejected(t *testing.T) {
-	// "Disabled" is expressed by leaving the variable unset. An explicit
-	// zero asks browsers to forget the policy immediately, which is a
-	// contradiction worth reporting rather than quietly reading as "off".
+func TestLoad_HSTSMaxAge_ZeroDisablesTheHeader(t *testing.T) {
+	// Zero is the documented opt-out for a service that is deliberately
+	// and permanently plaintext. It is the one duration in this config
+	// where zero is a setting rather than a mistake, which is why it has
+	// its own parser — the header is then omitted, not sent as
+	// max-age=0.
 	t.Setenv("HSTS_MAX_AGE", "0s")
 
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.HSTSMaxAge != 0 {
+		t.Errorf("Load() HSTSMaxAge = %v, want 0", cfg.HSTSMaxAge)
+	}
+}
+
+func TestLoad_HSTSMaxAge_NegativeIsRejected(t *testing.T) {
+	t.Setenv("HSTS_MAX_AGE", "-1h")
+
 	if _, err := Load(); err == nil {
-		t.Error("Load() error = nil, want an error for HSTS_MAX_AGE=0s")
+		t.Error("Load() error = nil, want an error for a negative HSTS_MAX_AGE")
+	}
+}
+
+// --- rate limits ---
+
+// TestLoad_RateLimits_Defaults pins that every tier gets a usable value
+// when nothing is set. A zero here would not mean "unlimited": ratelimit
+// treats a non-positive refill rate as a bucket that never refills, so a
+// tier defaulted to zero would serve one request and then reject
+// everything.
+func TestLoad_RateLimits_Defaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+
+	checks := []struct {
+		name  string
+		burst int
+		rate  float64
+	}{
+		{"global", cfg.RateLimitBurst, cfg.RateLimitPerSec},
+		{"auth", cfg.AuthRateLimitBurst, cfg.AuthRateLimitPerSec},
+		{"user", cfg.UserRateLimitBurst, cfg.UserRateLimitPerSec},
+	}
+	for _, c := range checks {
+		if c.burst <= 0 {
+			t.Errorf("%s burst = %d, want a positive default", c.name, c.burst)
+		}
+		if c.rate <= 0 {
+			t.Errorf("%s per-second = %v, want a positive default", c.name, c.rate)
+		}
+	}
+}
+
+func TestLoad_RateLimits_RejectNonPositive(t *testing.T) {
+	vars := []string{
+		"RATE_LIMIT_BURST",
+		"AUTH_RATE_LIMIT_BURST",
+		"USER_RATE_LIMIT_BURST",
+		"RATE_LIMIT_PER_SEC",
+		"AUTH_RATE_LIMIT_PER_SEC",
+		"USER_RATE_LIMIT_PER_SEC",
+	}
+	for _, name := range vars {
+		for _, value := range []string{"0", "-1"} {
+			t.Run(name+"="+value, func(t *testing.T) {
+				t.Setenv(name, value)
+
+				if _, err := Load(); err == nil {
+					t.Errorf("Load() error = nil, want an error for %s=%s", name, value)
+				}
+			})
+		}
+	}
+}
+
+func TestLoad_RateLimits_RejectNonNumeric(t *testing.T) {
+	t.Setenv("RATE_LIMIT_PER_SEC", "twenty")
+
+	if _, err := Load(); err == nil {
+		t.Error("Load() error = nil, want an error for a non-numeric RATE_LIMIT_PER_SEC")
+	}
+}
+
+// TestLoad_RateLimits_RejectNaN covers the value that would otherwise
+// parse cleanly and then poison every comparison it takes part in: NaN is
+// neither greater nor less than any limit, so a bucket configured with it
+// makes no decision at all.
+func TestLoad_RateLimits_RejectNaN(t *testing.T) {
+	t.Setenv("RATE_LIMIT_PER_SEC", "NaN")
+
+	if _, err := Load(); err == nil {
+		t.Error("Load() error = nil, want an error for RATE_LIMIT_PER_SEC=NaN")
+	}
+}
+
+func TestLoad_RateLimits_Set(t *testing.T) {
+	t.Setenv("RATE_LIMIT_BURST", "5")
+	t.Setenv("RATE_LIMIT_PER_SEC", "2.5")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.RateLimitBurst != 5 {
+		t.Errorf("RateLimitBurst = %d, want 5", cfg.RateLimitBurst)
+	}
+	if cfg.RateLimitPerSec != 2.5 {
+		t.Errorf("RateLimitPerSec = %v, want 2.5", cfg.RateLimitPerSec)
 	}
 }

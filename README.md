@@ -22,14 +22,14 @@ Every task belongs to exactly one user, authenticated with a bearer session toke
 - **Swappable persistence with zero business-logic coupling.** `Service` and `Handler` (in both the `task` and `user` domains) never import PostgreSQL — the in-memory store and the PostgreSQL store implement the exact same `Repository` interface, and swapping one for the other requires no change above the repository layer.
 - **Real production concerns, already handled.** Graceful shutdown, liveness/readiness checks, structured JSON logs correlated by request ID, panic recovery, optimistic concurrency control on every update, embedded schema migrations, and a seed tool for a non-trivial local dataset.
 - **A test suite you can actually trust.** Fakes instead of a mocking framework, real concurrent goroutines (run under `-race`) for every concurrency-sensitive path, and a hard build-tag boundary between tests that need PostgreSQL and tests that don't.
-- **A minimal, auditable dependency footprint.** Two runtime dependencies (`pgx` for PostgreSQL, `golang.org/x/crypto` for password hashing), both pure Go — which is what lets the Docker image be a static binary on `scratch`: no shell, no libc, nothing to patch.
+- **A minimal, auditable dependency footprint.** Three runtime dependencies (`pgx` for PostgreSQL, `golang.org/x/crypto` for password hashing, [`moat`](https://github.com/JonasBorgesLM/moat) for rate limiting and response security headers), all pure Go and `moat` itself dependency-free — which is what lets the Docker image be a static binary on `scratch`: no shell, no libc, nothing to patch.
 
 For AI agents (or new contributors) working in this codebase, see **[CLAUDE.md](CLAUDE.md)** — architecture rules, conventions, and things not to change casually. For the full project structure, the rationale behind each design decision, and the roadmap, see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**. For the full API contract, see **[docs/openapi.yaml](docs/openapi.yaml)**.
 
 ## Requirements
 
 - **Go 1.26+**, matching `go.mod`.
-- **No external dependency for the core application or the in-memory store** — the entire unit test suite runs without one. The two runtime dependencies, [`pgx/v5`](https://github.com/jackc/pgx) and [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) (bcrypt), only matter once `DATABASE_URL` is configured / a password is hashed.
+- **No external service needed for the core application or the in-memory store** — the entire unit test suite runs without one. Of the three runtime dependencies, [`pgx/v5`](https://github.com/jackc/pgx) matters only once `DATABASE_URL` is configured, [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) only when a password is hashed, and [`moat`](https://github.com/JonasBorgesLM/moat) is in the request path but talks to nothing outside the process.
 - **[Docker](https://www.docker.com/) and Docker Compose** (optional) — to run PostgreSQL locally without installing it directly.
 - **[`staticcheck`](https://staticcheck.dev/)** (optional) — used by `make lint`; installed automatically on first use if missing.
 
@@ -59,7 +59,10 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `DB_AUTO_MIGRATE` | Apply pending migrations automatically on startup | `true` |
 | `AUTH_SESSION_TTL` | How long a `POST /auth/login` token stays valid | `24h` |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call this API. Unset ⇒ CORS disabled | *(unset)* |
-| `HSTS_MAX_AGE` | `Strict-Transport-Security` max-age, as a Go duration (e.g. `8760h`). Unset ⇒ header omitted; set it only when HTTPS terminates in front of this process | *(unset)* |
+| `HSTS_MAX_AGE` | `Strict-Transport-Security` max-age, as a Go duration (e.g. `8760h`). `0` omits the header entirely, for a permanently-plaintext deployment. Never sent with `includeSubDomains` or `preload` | `8760h` (1 year) |
+| `RATE_LIMIT_BURST` / `RATE_LIMIT_PER_SEC` | Global token bucket, keyed by client address, in front of every route except the health probes | `60` / `20` |
+| `AUTH_RATE_LIMIT_BURST` / `AUTH_RATE_LIMIT_PER_SEC` | Tighter bucket for `POST /auth/register` and `POST /auth/login` together | `10` / `0.05` |
+| `USER_RATE_LIMIT_BURST` / `USER_RATE_LIMIT_PER_SEC` | Bucket keyed by authenticated user ID, on every route requiring a token | `120` / `40` |
 
 `config.Load()` returns an error (and the process refuses to start) if a timeout/TTL/max-age isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
@@ -202,7 +205,7 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `GET` | `/health/ready` | — | Readiness — `200` if the database is reachable, `503` if not |
 | `GET` | `/debug/vars` | required | Runtime stats (`expvar`) — authenticated, unlike the health routes |
 
-Errors always use the same envelope, `{"error": "description of the problem"}`. Common codes: `400` invalid input, `401` missing/invalid session token, `503` a dependency (the database) is unavailable — the token is fine, retry, `404` unknown or not-yours task ID, `409` optimistic-concurrency conflict or illegal status transition (re-fetch and retry), `429` too many requests to `/auth/register`/`/auth/login` from the same client (rate limited — wait and retry), `500` unexpected failure (details logged server-side, never in the response).
+Errors always use the same envelope, `{"error": "description of the problem"}`. Common codes: `400` invalid input, `401` missing/invalid session token, `503` a dependency (the database) is unavailable — the token is fine, retry, `404` unknown or not-yours task ID, `409` optimistic-concurrency conflict or illegal status transition (re-fetch and retry), `429` a rate limit was exceeded (wait and retry; `/health` and `/health/ready` are the only routes never rate limited), `500` unexpected failure (details logged server-side, never in the response).
 
 **Quick walkthrough:**
 

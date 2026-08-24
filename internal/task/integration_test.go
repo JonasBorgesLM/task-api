@@ -37,7 +37,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JonasBorgesLM/task-api/internal/middleware"
 	"github.com/JonasBorgesLM/task-api/internal/user"
 )
 
@@ -65,7 +64,10 @@ func newIntegrationServer(t *testing.T) (*httptest.Server, string) {
 	// that) — several tests here call registerAndLogin more than once
 	// (see TestIntegration_OwnershipIsolation), and a real, tight limit
 	// would make those flaky for reasons unrelated to what they check.
-	noopRateLimit := middleware.NewRateLimiter(1000, time.Minute).Middleware()
+	// A pass-through: these tests cover routing and auth, not rate
+	// limiting, and the limiter that guards these routes in production is
+	// composed in cmd/api (see newServer) rather than here.
+	noopRateLimit := func(next http.Handler) http.Handler { return next }
 
 	mux := http.NewServeMux()
 	userHandler.RegisterRoutes(mux, requireAuth, noopRateLimit)

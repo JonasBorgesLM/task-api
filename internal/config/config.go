@@ -47,6 +47,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -67,6 +68,37 @@ const (
 	defaultDBConnMaxLife   = 5 * time.Minute
 	defaultDBAutoMigrate   = true
 	defaultAuthSessionTTL  = 24 * time.Hour
+
+	// defaultHSTSMaxAge mirrors secureheaders.DefaultHSTSMaxAge — one
+	// year, the shortest span browsers and the preload list treat as a
+	// serious commitment. It is duplicated here rather than imported so
+	// that config keeps depending on nothing but the standard library;
+	// the value is asserted against the library's own constant in
+	// cmd/api's tests.
+	defaultHSTSMaxAge = 365 * 24 * time.Hour
+
+	// Rate-limit defaults, in token-bucket terms: burst is the depth of
+	// the bucket (how many requests may arrive at once) and perSec the
+	// rate it refills at (the sustained throughput allowed afterwards).
+	//
+	// Three tiers, from the broadest to the narrowest, because they
+	// answer different threats — see newServer in cmd/api/main.go for how
+	// they compose:
+	//
+	//   - Global, keyed by client IP: a coarse ceiling on any single
+	//     source, applied before authentication so it also bounds the
+	//     session lookup RequireAuth performs.
+	//   - Auth, keyed by client IP, on /auth/register and /auth/login
+	//     only: tight enough to blunt credential stuffing, loose enough
+	//     that a user retyping a password never notices.
+	//   - User, keyed by authenticated user ID: bounds what one account
+	//     can do regardless of how many addresses it connects from.
+	defaultRateLimitBurst     = 60
+	defaultRateLimitPerSec    = 20.0
+	defaultAuthRateLimitBurst = 10
+	defaultAuthRateLimitPer   = 0.05
+	defaultUserRateLimitBurst = 120
+	defaultUserRateLimitPer   = 40.0
 )
 
 // Config holds all application configuration values. It is independent of
@@ -132,12 +164,36 @@ type Config struct {
 	CORSAllowedOrigins []string
 
 	// HSTSMaxAge is the max-age carried by the Strict-Transport-Security
-	// response header (see middleware.SecurityHeaders). Zero — the zero
-	// value, and what every test building a bare config.Config{} gets —
-	// omits the header entirely, which is the correct default for a
-	// process that serves plain HTTP and cannot know whether TLS
-	// terminates in front of it.
+	// response header. Load defaults it to defaultHSTSMaxAge, so the
+	// header is sent unless an operator explicitly sets HSTS_MAX_AGE=0.
+	//
+	// Sending it unconditionally is safe even though this binary always
+	// serves plaintext: RFC 6797 §7.2 requires a user agent to ignore the
+	// header when it arrives over a non-secure transport, so a plaintext
+	// response carrying it changes nothing. The alternative — suppressing
+	// it unless r.TLS is set — looks more careful but is actively wrong
+	// here, because TLS terminates at a proxy and r.TLS is nil for
+	// requests that genuinely reached the client over HTTPS. That variant
+	// disables HSTS exactly where it was meant to apply.
+	//
+	// Zero is the documented opt-out for a service that is deliberately
+	// and permanently plaintext; it omits the header rather than sending
+	// max-age=0, which would instruct browsers to forget an existing
+	// policy.
 	HSTSMaxAge time.Duration
+
+	// Rate-limit tiers. Burst is the token bucket's depth, PerSec the
+	// rate it refills at; see the defaults above for what each tier is
+	// for and cmd/api/main.go's newServer for how they are composed.
+	// Every one of these must be positive — Load rejects zero and
+	// negative values rather than reading them as "unlimited", so a
+	// typo can only ever over-restrict.
+	RateLimitBurst      int
+	RateLimitPerSec     float64
+	AuthRateLimitBurst  int
+	AuthRateLimitPerSec float64
+	UserRateLimitBurst  int
+	UserRateLimitPerSec float64
 }
 
 // Load reads configuration from environment variables and applies defaults
@@ -170,6 +226,7 @@ func Load() (Config, error) {
 		DBConnMaxLifetime: defaultDBConnMaxLife,
 		DBAutoMigrate:     defaultDBAutoMigrate,
 		AuthSessionTTL:    defaultAuthSessionTTL,
+		HSTSMaxAge:        defaultHSTSMaxAge,
 	}
 
 	if raw := os.Getenv("HTTP_ADDR"); raw != "" {
@@ -221,12 +278,30 @@ func Load() (Config, error) {
 
 	cfg.CORSAllowedOrigins = parseCommaSeparated("CORS_ALLOWED_ORIGINS")
 
-	// Defaulted to 0 rather than to a duration: unset means "do not send
-	// Strict-Transport-Security at all", not "send a shorter one". A value
-	// that is set still has to be positive, which parseDuration enforces —
-	// HSTS_MAX_AGE=0 is a contradiction (a header asking to be forgotten
-	// immediately), so it is rejected rather than read as "disabled".
-	if cfg.HSTSMaxAge, err = parseDuration("HSTS_MAX_AGE", 0); err != nil {
+	// Unlike every other duration here, zero is meaningful rather than
+	// invalid: it is the explicit opt-out for a permanently-plaintext
+	// deployment (see Config.HSTSMaxAge). parseDuration rejects zero, so
+	// this one variable gets its own parser.
+	if cfg.HSTSMaxAge, err = parseNonNegativeDuration("HSTS_MAX_AGE", defaultHSTSMaxAge); err != nil {
+		return Config{}, err
+	}
+
+	if cfg.RateLimitBurst, err = parsePositiveInt("RATE_LIMIT_BURST", defaultRateLimitBurst); err != nil {
+		return Config{}, err
+	}
+	if cfg.RateLimitPerSec, err = parsePositiveFloat("RATE_LIMIT_PER_SEC", defaultRateLimitPerSec); err != nil {
+		return Config{}, err
+	}
+	if cfg.AuthRateLimitBurst, err = parsePositiveInt("AUTH_RATE_LIMIT_BURST", defaultAuthRateLimitBurst); err != nil {
+		return Config{}, err
+	}
+	if cfg.AuthRateLimitPerSec, err = parsePositiveFloat("AUTH_RATE_LIMIT_PER_SEC", defaultAuthRateLimitPer); err != nil {
+		return Config{}, err
+	}
+	if cfg.UserRateLimitBurst, err = parsePositiveInt("USER_RATE_LIMIT_BURST", defaultUserRateLimitBurst); err != nil {
+		return Config{}, err
+	}
+	if cfg.UserRateLimitPerSec, err = parsePositiveFloat("USER_RATE_LIMIT_PER_SEC", defaultUserRateLimitPer); err != nil {
 		return Config{}, err
 	}
 
@@ -291,6 +366,51 @@ func parsePositiveInt(name string, def int) (int, error) {
 	}
 
 	return n, nil
+}
+
+// parsePositiveFloat reads the environment variable name and parses it as
+// a floating-point number, returning def when the variable is unset. A
+// value that is not a number, or that is zero or negative, is an error:
+// a rate of zero would mean a bucket that never refills, which reads as
+// "misconfigured" far more often than it reads as "deliberately frozen".
+// NaN is rejected for the same reason — it silently poisons every
+// comparison downstream.
+func parsePositiveFloat(name string, def float64) (float64, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def, nil
+	}
+
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s %q is not a valid number: %w", name, raw, err)
+	}
+	if math.IsNaN(f) || f <= 0 {
+		return 0, fmt.Errorf("config: %s must be positive, got %q", name, raw)
+	}
+
+	return f, nil
+}
+
+// parseNonNegativeDuration is parseDuration for the one variable where
+// zero is a meaningful setting rather than a mistake: HSTS_MAX_AGE, where
+// it means "omit Strict-Transport-Security entirely". Negative values are
+// still rejected.
+func parseNonNegativeDuration(name string, def time.Duration) (time.Duration, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def, nil
+	}
+
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s %q is not a valid duration: %w", name, raw, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("config: %s must not be negative, got %q", name, raw)
+	}
+
+	return d, nil
 }
 
 // parseBool reads the environment variable name and parses it with

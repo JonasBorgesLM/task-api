@@ -64,14 +64,13 @@ func postgresTestConfig(t *testing.T) config.Config {
 		t.Logf("truncate tables (ignored, likely first run against this database): %v", err)
 	}
 
-	return config.Config{
-		DatabaseURL:       url,
-		DBMaxOpenConns:    5,
-		DBMaxIdleConns:    5,
-		DBConnMaxLifetime: time.Minute,
-		DBAutoMigrate:     true,
-		AuthSessionTTL:    time.Hour,
-	}
+	cfg := testConfig()
+	cfg.DatabaseURL = url
+	cfg.DBMaxOpenConns = 5
+	cfg.DBMaxIdleConns = 5
+	cfg.DBConnMaxLifetime = time.Minute
+	cfg.DBAutoMigrate = true
+	return cfg
 }
 
 // TestPostgres_ServerLifecycle drives newServer's real PostgreSQL wiring —

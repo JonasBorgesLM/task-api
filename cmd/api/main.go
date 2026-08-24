@@ -14,6 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/JonasBorgesLM/moat/ratelimit"
+	"github.com/JonasBorgesLM/moat/secureheaders"
+
 	"github.com/JonasBorgesLM/task-api/internal/config"
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 	"github.com/JonasBorgesLM/task-api/internal/platform/migrate"
@@ -172,15 +175,45 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	userHandler := user.NewHandler(userSvc, logger)
 	requireAuth := user.RequireAuth(userSvc, logger)
 
-	// authRateLimiter guards only /auth/register and /auth/login (see
-	// userHandler.RegisterRoutes below) — it exists to blunt
-	// credential-stuffing and registration-spam attempts against those two
-	// endpoints specifically, not as a general-purpose API rate limit.
-	authRateLimiter := middleware.NewRateLimiter(authRateLimitRequests, authRateLimitWindow)
+	// Three rate-limit tiers, each answering a threat the others cannot.
+	// All are token buckets over a bounded in-process store: a fixed
+	// window would let a client spend its whole quota at the end of one
+	// window and again at the start of the next, doubling the intended
+	// rate at every boundary.
+	//
+	// globalLimiter is keyed by RemoteAddr and wraps the entire mux, so it
+	// bounds a single source across every route — including the session
+	// lookup RequireAuth performs, which userLimiter by construction
+	// cannot protect (see below).
+	//
+	// authLimiter is much tighter and covers only /auth/register and
+	// /auth/login, where an unauthenticated caller can burn a bcrypt
+	// comparison per request.
+	//
+	// userLimiter is keyed by authenticated user ID rather than address,
+	// so one account cannot multiply its allowance by connecting from
+	// many hosts. It necessarily runs *after* RequireAuth — the user ID
+	// it keys on does not exist before then — which is precisely why
+	// globalLimiter has to exist in front rather than be replaced by it.
+	globalLimiter := ratelimit.New(cfg.RateLimitBurst, cfg.RateLimitPerSec)
+	authLimiter := ratelimit.New(cfg.AuthRateLimitBurst, cfg.AuthRateLimitPerSec)
+	userLimiter := ratelimit.New(
+		cfg.UserRateLimitBurst,
+		cfg.UserRateLimitPerSec,
+		ratelimit.WithKeyFunc(userIDKey),
+	)
+
+	// authenticated is what every non-public route is wrapped in:
+	// authenticate first, then charge the request to that user's bucket.
+	// The nesting order is load-bearing — userLimiter's key function
+	// reads the user ID that RequireAuth puts in the request context, so
+	// running the limiter on the outside would leave it with no key at
+	// all on every request.
+	authenticated := func(next http.Handler) http.Handler {
+		return requireAuth(userLimiter.Middleware(next))
+	}
 
 	mux := http.NewServeMux()
-	registerHealthRoute(mux, logger)
-	registerReadinessRoute(mux, db, logger)
 
 	// /debug/vars is authenticated, unlike the two health routes above.
 	// expvar exposes the process's command line and full runtime/GC
@@ -189,12 +222,30 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	// probing it. The health routes stay public because an orchestrator's
 	// probe has no credentials to offer; expvar has no such constraint,
 	// since the humans and scrapers who read it can carry a token.
-	mux.Handle("GET /debug/vars", requireAuth(expvar.Handler()))
+	mux.Handle("GET /debug/vars", authenticated(expvar.Handler()))
 
-	userHandler.RegisterRoutes(mux, requireAuth, authRateLimiter.Middleware())
-	taskHandler.RegisterRoutes(mux, requireAuth)
+	userHandler.RegisterRoutes(mux, authenticated, authLimiter.Middleware)
+	taskHandler.RegisterRoutes(mux, authenticated)
 
-	go runPeriodicCleanup(ctx, userSvc, authRateLimiter, logger)
+	// The liveness and readiness probes deliberately sit outside the
+	// global rate limiter, on an outer mux whose catch-all sends
+	// everything else through it. ServeMux prefers the more specific
+	// pattern, so the two health routes below win over "/".
+	//
+	// A rate-limited health check is an availability bug waiting to
+	// happen: an orchestrator reads 429 as "this replica is unhealthy"
+	// and kills a process that was serving perfectly well, converting a
+	// burst of client traffic into a restart loop. The probes are also
+	// the one caller that cannot back off and retry on its own schedule.
+	// They are cheap, they expose nothing (see registerReadinessRoute),
+	// and their volume is set by the orchestrator rather than by a
+	// client, so there is nothing here for a limiter to protect.
+	root := http.NewServeMux()
+	registerHealthRoute(root, logger)
+	registerReadinessRoute(root, db, logger)
+	root.Handle("/", globalLimiter.Middleware(mux))
+
+	go runPeriodicCleanup(ctx, userSvc, logger)
 
 	// Cross-cutting HTTP concerns, applied to every route. Order matters:
 	// RequestID must run first so Logging and Recovery can read the
@@ -208,19 +259,42 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	// chain). It is a no-op end to end unless CORS_ALLOWED_ORIGINS is set;
 	// see middleware.CORS.
 	//
-	// SecurityHeaders sits outside CORS, and therefore outside everything
+	// secureheaders sits outside CORS, and therefore outside everything
 	// that can answer a request without reaching the mux: it has to run
-	// before the preflight CORS short-circuits, before the 500 Recovery
-	// writes for a panicking handler, and before the router's own 404/405
-	// — a response that skips the handler is exactly the kind that would
-	// otherwise go out bare.
+	// before the preflight CORS short-circuits, before the 429 the rate
+	// limiter writes, before the 500 Recovery writes for a panicking
+	// handler, and before the router's own 404/405 — a response that
+	// skips the handler is exactly the kind that would otherwise go out
+	// bare.
+	//
+	// The global rate limiter is not a link in this chain: it is mounted
+	// on the outer mux's catch-all (see root above) so the health probes
+	// can bypass it. That placement also puts it inside CORS, which is
+	// what we want anyway — a 429 without Access-Control-Allow-Origin is
+	// one the browser refuses to expose to the calling script, surfacing
+	// as an opaque network error instead of a status the client can act
+	// on.
 	rootHandler := middleware.Chain(
 		middleware.RequestID,
 		middleware.Logging(logger),
-		middleware.SecurityHeaders(cfg.HSTSMaxAge),
+		secureheaders.Middleware(
+			// This API only ever returns JSON, so nothing it serves
+			// legitimately loads a script, stylesheet, image or font.
+			// "default-src 'none'" denies every fetch directive at once
+			// and is strictly tighter than the library's default of
+			// 'self'. base-uri, form-action and frame-ancestors do not
+			// inherit from default-src, so each is named explicitly.
+			secureheaders.WithCSP("default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
+			// includeSubdomains and preload stay off: this process knows
+			// its own scheme, not what else is served under the parent
+			// domain, and preload is close to irreversible. See
+			// config.Config.HSTSMaxAge for why the header itself is sent
+			// unconditionally.
+			secureheaders.WithHSTS(cfg.HSTSMaxAge, false, false),
+		),
 		middleware.CORS(cfg.CORSAllowedOrigins),
 		middleware.Recovery(logger),
-	)(mux)
+	)(root)
 
 	// HTTP server with explicit timeouts, sourced entirely from Config.
 	srv := &http.Server{
@@ -231,7 +305,19 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 		IdleTimeout:  cfg.IdleTimeout,
 	}
 
-	return srv, closeDB, nil
+	// Each Limiter owns the in-process store it created, and Close stops
+	// the goroutine that expires idle buckets in it. Closing the database
+	// alone would leave three of those running for the lifetime of the
+	// process — harmless in main(), a leak across a test suite that
+	// builds a server per test.
+	closeAll := func() error {
+		globalLimiter.Close()
+		authLimiter.Close()
+		userLimiter.Close()
+		return closeDB()
+	}
+
+	return srv, closeAll, nil
 }
 
 // openDatabase is the single place that decides whether the application
@@ -292,33 +378,46 @@ func openDatabase(cfg config.Config, logger *slog.Logger) (*sql.DB, error) {
 }
 
 const (
-	// authRateLimitRequests and authRateLimitWindow bound
-	// authRateLimiter (see newServer): at most this many requests to
-	// POST /auth/register or POST /auth/login combined, per client IP,
-	// within this window. Chosen to be generous enough that a legitimate
-	// user retrying a mistyped password a few times never notices it,
-	// while still meaningfully slowing down credential stuffing or
-	// registration spam against a single instance.
-	authRateLimitRequests = 20
-	authRateLimitWindow   = 5 * time.Minute
-
-	// sessionCleanupInterval is how often expired sessions and stale
-	// rate-limit windows are purged from memory — see
-	// runPeriodicCleanup. Both are already handled correctly on the
-	// per-request path regardless (ValidateToken rejects an expired
-	// session; the rate limiter's own window rollover ignores a stale
-	// counter) — this exists purely to bound memory/storage growth from
-	// entries nobody ever comes back to touch again.
+	// sessionCleanupInterval is how often expired sessions are purged
+	// from storage — see runPeriodicCleanup. Expiry is already enforced
+	// on the per-request path regardless (ValidateToken rejects and
+	// deletes an expired session on next use); this exists purely to
+	// reclaim sessions nobody ever comes back to touch again.
 	sessionCleanupInterval = 1 * time.Hour
 )
 
-// runPeriodicCleanup periodically prunes expired sessions (via userSvc)
-// and stale rate-limiter windows (via limiter) until ctx is canceled. A
-// failed pass is logged but never treated as fatal — both underlying
-// mechanisms remain correct on the per-request path even if a cleanup
-// pass is skipped or fails, so a transient DB hiccup here must not crash
-// the server or block request handling.
-func runPeriodicCleanup(ctx context.Context, userSvc *user.Service, limiter *middleware.RateLimiter, logger *slog.Logger) {
+// userIDKey keys the per-user rate limiter by the authenticated user's
+// ID, which user.RequireAuth places in the request context.
+//
+// It returns ratelimit.ErrNoKey rather than falling back to the client
+// address when no user is present. The fallback would look more forgiving
+// and be strictly worse: this limiter is only ever mounted behind
+// RequireAuth, so a request reaching it without a user ID means the
+// wiring changed underneath it, and silently re-keying by address would
+// hide that while quietly merging every such request into one shared
+// bucket. ErrNoKey makes the limiter fail closed and surface the
+// misconfiguration instead.
+func userIDKey(r *http.Request) (string, error) {
+	id, ok := middleware.UserIDFromContext(r.Context())
+	if !ok || id == "" {
+		return "", ratelimit.ErrNoKey
+	}
+	return id, nil
+}
+
+// runPeriodicCleanup periodically prunes expired sessions until ctx is
+// canceled. A failed pass is logged but never treated as fatal — session
+// expiry is enforced on the per-request path regardless (ValidateToken
+// rejects and deletes an expired session on next use), so a transient DB
+// hiccup here must not crash the server or block request handling.
+//
+// The rate limiters used to be swept here too. They no longer need it:
+// each owns a bounded store that caps how many buckets it tracks and
+// expires idle ones on its own, which is a stronger guarantee than a
+// periodic sweep of an unbounded map — a sweep every hour still leaves
+// 59 minutes for a client cycling through an IPv6 /64 to grow that map
+// without limit.
+func runPeriodicCleanup(ctx context.Context, userSvc *user.Service, logger *slog.Logger) {
 	ticker := time.NewTicker(sessionCleanupInterval)
 	defer ticker.Stop()
 
@@ -330,7 +429,6 @@ func runPeriodicCleanup(ctx context.Context, userSvc *user.Service, limiter *mid
 			if err := userSvc.PruneExpiredSessions(ctx); err != nil {
 				logger.Error("session cleanup failed", "error", err)
 			}
-			limiter.Prune(time.Now())
 		}
 	}
 }

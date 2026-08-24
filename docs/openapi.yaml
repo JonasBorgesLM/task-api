@@ -223,6 +223,8 @@ paths:
               $ref: '#/components/headers/XRequestID'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -262,6 +264,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: user not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -359,6 +363,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: task already exists
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -444,6 +450,8 @@ paths:
                 error: "invalid input: limit must be a non-negative integer"
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -478,6 +486,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -569,6 +579,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: task was modified concurrently, please retry
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -591,6 +603,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -675,6 +689,8 @@ paths:
                   summary: Optimistic concurrency conflict
                   value:
                     error: task was modified concurrently, please retry
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -756,6 +772,8 @@ paths:
                   summary: Optimistic concurrency conflict
                   value:
                     error: task was modified concurrently, please retry
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -806,6 +824,8 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
   /health:
     get:
       tags: [Health]
@@ -1222,11 +1242,23 @@ components:
 
     TooManyRequests:
       description: >
-        The client's IP has made too many requests to /auth/register or
-        /auth/login (combined — they share one rate-limit budget) within
-        the current window (see cmd/api/main.go's
-        authRateLimitRequests/authRateLimitWindow). Not returned by any
-        other endpoint. Wait and retry.
+        A rate limit was exceeded. Three token-bucket tiers can produce
+        this, and a client cannot tell them apart from the response alone:
+        a global one keyed by client address in front of every route; a
+        tighter one covering /auth/register and /auth/login together
+        (where each attempt costs a password hash comparison); and one
+        keyed by authenticated user on every route requiring a token, so
+        an account cannot multiply its allowance across hosts. All are
+        configurable — see RATE_LIMIT_*, AUTH_RATE_LIMIT_* and
+        USER_RATE_LIMIT_* in .env.example.
+
+        The only endpoints that never return this are GET /health and GET
+        /health/ready, which bypass rate limiting so that a burst of
+        client traffic cannot be read by an orchestrator as an unhealthy
+        replica.
+
+        Wait and retry; the response carries the standard rate-limit
+        headers describing when.
       headers:
         X-Request-Id:
           $ref: '#/components/headers/XRequestID'
