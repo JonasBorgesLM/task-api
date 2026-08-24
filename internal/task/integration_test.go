@@ -250,6 +250,60 @@ func TestIntegration_OwnershipIsolation(t *testing.T) {
 	assertStatus(t, ownerGet, http.StatusOK)
 }
 
+// TestIntegration_OwnershipIsolation_WriteRoutes covers the write verbs
+// that TestIntegration_OwnershipIsolation does not: PUT and both PATCH
+// routes. They are the ones where a missing ownership check is worst —
+// a read leak exposes a task, a write leak lets a stranger mutate one —
+// and PATCH /tasks/{id}/status in particular was added after the
+// ownership rules were written.
+//
+// The expected answer is 404, not 403: a non-owner must not be able to
+// tell an ID that exists from one that does not (see the Repository's
+// doc comment).
+func TestIntegration_OwnershipIsolation_WriteRoutes(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		suffix string
+		body   string
+	}{
+		{"update", http.MethodPut, "", `{"title":"Hijacked","description":"by a stranger"}`},
+		{"complete", http.MethodPatch, "/done", ""},
+		{"transition status", http.MethodPatch, "/status", `{"status":"cancelled"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, ownerToken := newIntegrationServer(t)
+			otherToken := registerAndLogin(t, srv, "someone-else@example.com")
+
+			created := decodeTask(t, doRequest(t, srv, ownerToken, http.MethodPost, "/tasks",
+				`{"title":"Owner's task","description":"untouched"}`))
+
+			resp := doRequest(t, srv, otherToken, tt.method, "/tasks/"+created.ID+tt.suffix, tt.body)
+			assertStatus(t, resp, http.StatusNotFound)
+
+			// A rejected write must also be a write that did not happen:
+			// a handler that returns 404 after having already persisted
+			// the change would pass the assertion above and still have
+			// let a stranger mutate the task.
+			after := decodeTask(t, doRequest(t, srv, ownerToken, http.MethodGet, "/tasks/"+created.ID, ""))
+			if after.Title != created.Title {
+				t.Errorf("title = %q after a rejected cross-user %s, want it unchanged (%q)", after.Title, tt.method, created.Title)
+			}
+			if after.Description != created.Description {
+				t.Errorf("description = %q after a rejected cross-user %s, want it unchanged (%q)", after.Description, tt.method, created.Description)
+			}
+			if after.Status != created.Status {
+				t.Errorf("status = %q after a rejected cross-user %s, want it unchanged (%q)", after.Status, tt.method, created.Status)
+			}
+			if after.UpdatedAt != created.UpdatedAt {
+				t.Errorf("updated_at moved after a rejected cross-user %s — something was written", tt.method)
+			}
+		})
+	}
+}
+
 // --- POST /tasks ---
 
 // TestIntegration_CreateTask_Valid also pins down the exact wire format:

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // fakeRepository is a test double for Repository.
@@ -717,3 +718,166 @@ func TestTransitionStatus_NotFound(t *testing.T) {
 // contract now, enforced and tested at that layer directly: see
 // TestFindAll_OrdersByCreatedAtThenID in memory_repository_test.go and
 // TestPostgres_FindAll_OrderedByCreatedAtThenID in postgres_repository_test.go.
+
+// --- input normalization ---
+
+// TestCreateTask_StripsControlCharactersFromTitle covers the characters
+// that are invisible in the request body and consequential once stored: a
+// NUL truncates the value for anything that later treats it as a C
+// string, and a raw escape sequence rewrites a terminal that prints a log
+// line carrying it.
+func TestCreateTask_StripsControlCharactersFromTitle(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"NUL", "Buy\x00 milk", "Buy milk"},
+		{"escape sequence", "Buy \x1b[31mmilk", "Buy [31mmilk"},
+		{"C1 control", "Buy \u0085milk", "Buy milk"},
+		{"zero-width joiner is left alone", "Buy \u200dmilk", "Buy \u200dmilk"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewService(&fakeRepository{})
+
+			task, err := svc.CreateTask(context.Background(), "u1", tt.input, "", "")
+			if err != nil {
+				t.Fatalf("CreateTask() unexpected error: %v", err)
+			}
+			if task.Title != tt.want {
+				t.Errorf("Title = %q, want %q", task.Title, tt.want)
+			}
+		})
+	}
+}
+
+// TestCreateTask_CollapsesWhitespaceInTitleOnly pins the asymmetry
+// between the two fields: a title is one line of display text, a
+// description is prose whose line breaks are content the user typed.
+func TestCreateTask_CollapsesWhitespaceInTitleOnly(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	task, err := svc.CreateTask(context.Background(), "u1",
+		"Buy    milk\tand\neggs",
+		"First paragraph.\n\nSecond paragraph.\n\t- indented item",
+		"")
+	if err != nil {
+		t.Fatalf("CreateTask() unexpected error: %v", err)
+	}
+
+	if want := "Buy milk and eggs"; task.Title != want {
+		t.Errorf("Title = %q, want %q", task.Title, want)
+	}
+	if want := "First paragraph.\n\nSecond paragraph.\n\t- indented item"; task.Description != want {
+		t.Errorf("Description = %q, want it preserved verbatim (%q)", task.Description, want)
+	}
+}
+
+// TestCreateTask_DescriptionKeepsLineBreaksButLosesControlChars is the
+// other half of the asymmetry: stripping still happens in a description,
+// it just spares the three whitespace characters that carry meaning.
+func TestCreateTask_DescriptionKeepsLineBreaksButLosesControlChars(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	task, err := svc.CreateTask(context.Background(), "u1", "Title",
+		"line one\n\x00line two\x1b", "")
+	if err != nil {
+		t.Fatalf("CreateTask() unexpected error: %v", err)
+	}
+
+	if want := "line one\nline two"; task.Description != want {
+		t.Errorf("Description = %q, want %q", task.Description, want)
+	}
+}
+
+// TestCreateTask_TitleOfOnlyControlCharactersIsRejected closes the gap
+// between stripping and validating: a title that is non-empty in the
+// request but empty once normalized must fail the same way an empty one
+// does, rather than being stored blank.
+func TestCreateTask_TitleOfOnlyControlCharactersIsRejected(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	_, err := svc.CreateTask(context.Background(), "u1", "\x00\x1b \t", "", "")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("CreateTask() error = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestCreateTask_LengthIsMeasuredAfterNormalization pins the ordering:
+// a title that only exceeds the limit because of characters that get
+// stripped must be accepted, since the limit applies to what is stored.
+func TestCreateTask_LengthIsMeasuredAfterNormalization(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	title := strings.Repeat("a", maxTitleLen) + strings.Repeat("\x00", 50)
+
+	task, err := svc.CreateTask(context.Background(), "u1", title, "", "")
+	if err != nil {
+		t.Fatalf("CreateTask() unexpected error: %v", err)
+	}
+	if got := utf8.RuneCountInString(task.Title); got != maxTitleLen {
+		t.Errorf("stored title length = %d, want %d", got, maxTitleLen)
+	}
+}
+
+// TestCreateTask_DoesNotStripMarkup guards the boundary the sanitize
+// package is explicit about: this is normalization, not an XSS defense.
+// Mangling markup here would corrupt legitimate input while providing no
+// real protection — encoding at the point of rendering is what does that.
+func TestCreateTask_DoesNotStripMarkup(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	const title = `Ben <the> Third & "co"`
+
+	task, err := svc.CreateTask(context.Background(), "u1", title, "", "")
+	if err != nil {
+		t.Fatalf("CreateTask() unexpected error: %v", err)
+	}
+	if task.Title != title {
+		t.Errorf("Title = %q, want it stored verbatim (%q)", task.Title, title)
+	}
+}
+
+// TestUpdateTask_NormalizesToo covers the other write path — the two
+// share validateTitleAndDescription, and a future refactor that gave
+// UpdateTask its own validation would silently skip normalization.
+func TestUpdateTask_NormalizesToo(t *testing.T) {
+	repo := &fakeRepository{
+		findByIDTask: Task{ID: "t1", UserID: "u1", Title: "Original", Status: StatusPending},
+	}
+	svc := NewService(repo)
+
+	updated, err := svc.UpdateTask(context.Background(), "u1", "t1", "Buy\x00 milk", "desc", "")
+	if err != nil {
+		t.Fatalf("UpdateTask() unexpected error: %v", err)
+	}
+	if want := "Buy milk"; updated.Title != want {
+		t.Errorf("Title = %q, want %q", updated.Title, want)
+	}
+}
+
+// TestCreateTask_LeavesBidirectionalFormatCharacters records a limit of
+// the current normalization rather than endorsing it: category Cf
+// characters — including the bidirectional overrides behind Trojan
+// Source-style spoofing — are not stripped, because the same block
+// contains the isolates that are the correct way to embed Hebrew or
+// Arabic in Latin text. Removing them wholesale would corrupt legitimate
+// input from the users who most need it.
+//
+// If a rule for these is ever added, this test is the one that should
+// fail and be rewritten, rather than the behavior changing unnoticed.
+func TestCreateTask_LeavesBidirectionalFormatCharacters(t *testing.T) {
+	svc := NewService(&fakeRepository{})
+
+	const title = "Buy \u202emilk"
+
+	task, err := svc.CreateTask(context.Background(), "u1", title, "", "")
+	if err != nil {
+		t.Fatalf("CreateTask() unexpected error: %v", err)
+	}
+	if task.Title != title {
+		t.Errorf("Title = %q, want %q — Cf characters are deliberately out of scope", task.Title, title)
+	}
+}

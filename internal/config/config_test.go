@@ -583,3 +583,62 @@ func TestLoad_RateLimits_Set(t *testing.T) {
 		t.Errorf("RateLimitPerSec = %v, want 2.5", cfg.RateLimitPerSec)
 	}
 }
+
+// --- TRUSTED_PROXIES ---
+
+func TestLoad_TrustedProxies_UnsetIsNil(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.TrustedProxies != nil {
+		t.Errorf("TrustedProxies = %v, want nil — no peer is trusted unless declared", cfg.TrustedProxies)
+	}
+}
+
+func TestLoad_TrustedProxies_AcceptsCIDRsAndBareAddresses(t *testing.T) {
+	t.Setenv("TRUSTED_PROXIES", "10.0.0.0/8, 2001:db8::/32, 192.168.1.7")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+
+	want := []string{"10.0.0.0/8", "2001:db8::/32", "192.168.1.7"}
+	if len(cfg.TrustedProxies) != len(want) {
+		t.Fatalf("TrustedProxies = %v, want %v", cfg.TrustedProxies, want)
+	}
+	for i := range want {
+		if cfg.TrustedProxies[i] != want[i] {
+			t.Errorf("TrustedProxies[%d] = %q, want %q", i, cfg.TrustedProxies[i], want[i])
+		}
+	}
+}
+
+func TestLoad_TrustedProxies_RejectsGarbage(t *testing.T) {
+	for _, value := range []string{"not-an-ip", "10.0.0.0/33", "10.0.0.0/8,nope"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("TRUSTED_PROXIES", value)
+
+			if _, err := Load(); err == nil {
+				t.Errorf("Load() error = nil, want an error for TRUSTED_PROXIES=%q", value)
+			}
+		})
+	}
+}
+
+// TestLoad_TrustedProxies_RejectsDefaultRoute covers the entry that looks
+// like configuration and is actually a bypass: trusting 0.0.0.0/0 makes
+// every client a proxy, so every client gets to choose its own
+// rate-limit identity.
+func TestLoad_TrustedProxies_RejectsDefaultRoute(t *testing.T) {
+	for _, value := range []string{"0.0.0.0/0", "::/0", "10.0.0.0/8,0.0.0.0/0"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("TRUSTED_PROXIES", value)
+
+			if _, err := Load(); err == nil {
+				t.Errorf("Load() error = nil, want a refusal for TRUSTED_PROXIES=%q", value)
+			}
+		})
+	}
+}

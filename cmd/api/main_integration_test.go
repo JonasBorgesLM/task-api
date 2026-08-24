@@ -759,3 +759,112 @@ func TestIntegration_RateLimit_HealthProbesAreExempt(t *testing.T) {
 		}
 	}
 }
+
+// --- trusted proxies ---
+
+// forgedRequest builds a request to path carrying an X-Forwarded-For the
+// client chose for itself. This is the shape of the attack the trusted
+// proxy list exists to constrain: a limiter that believes this header
+// unconditionally gives every request a fresh bucket.
+func forgedRequest(t *testing.T, url, forwardedFor string) *http.Request {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("X-Forwarded-For", forwardedFor)
+	return req
+}
+
+// TestIntegration_TrustedProxies_ForgedHeaderIgnoredWhenPeerIsNotTrusted
+// is the hostile case: with no trusted proxies configured, a client that
+// invents a new X-Forwarded-For per request must still land in the same
+// bucket. A regression here does not look like a failure — it looks like
+// a rate limiter that simply never triggers.
+func TestIntegration_TrustedProxies_ForgedHeaderIgnoredWhenPeerIsNotTrusted(t *testing.T) {
+	cfg := rateLimitedConfig("global", 1)
+	// Explicit: this is the default, and it is what the test is about.
+	cfg.TrustedProxies = nil
+
+	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
+	defer srv.Close()
+
+	first, err := srv.Client().Do(forgedRequest(t, srv.URL+"/tasks", "203.0.113.1"))
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	first.Body.Close()
+	if first.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("first request = %d, want 401 (within burst)", first.StatusCode)
+	}
+
+	// A different forged address. The peer is unchanged, so the bucket
+	// must be too.
+	second, err := srv.Client().Do(forgedRequest(t, srv.URL+"/tasks", "203.0.113.2"))
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	second.Body.Close()
+	if second.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("second request with a different forged X-Forwarded-For = %d, want 429 — the header must be ignored from an untrusted peer",
+			second.StatusCode)
+	}
+}
+
+// TestIntegration_TrustedProxies_HeaderHonouredWhenPeerIsTrusted is the
+// other half: once the peer really is a declared proxy, two clients
+// behind it must get separate buckets instead of collapsing into the
+// proxy's single one. httptest connects over loopback, so trusting
+// loopback is what makes this test's premise true.
+func TestIntegration_TrustedProxies_HeaderHonouredWhenPeerIsTrusted(t *testing.T) {
+	cfg := rateLimitedConfig("global", 1)
+	cfg.TrustedProxies = []string{"127.0.0.1/32", "::1/128"}
+
+	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
+	defer srv.Close()
+
+	// Drain the bucket belonging to the first client behind the proxy.
+	for i, want := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
+		resp, err := srv.Client().Do(forgedRequest(t, srv.URL+"/tasks", "203.0.113.1"))
+		if err != nil {
+			t.Fatalf("client 1 request #%d: %v", i+1, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("client 1 request #%d = %d, want %d", i+1, resp.StatusCode, want)
+		}
+	}
+
+	// A different client behind the same proxy is unaffected.
+	resp, err := srv.Client().Do(forgedRequest(t, srv.URL+"/tasks", "203.0.113.2"))
+	if err != nil {
+		t.Fatalf("client 2 request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("client 2 request = %d, want 401 — clients behind a trusted proxy must not share one bucket", resp.StatusCode)
+	}
+}
+
+// TestNewServer_RejectsDangerousTrustedProxies pins that a list which
+// would disable the limiter fails startup instead of being accepted. The
+// default route is the specific mistake: trusting 0.0.0.0/0 means every
+// client is a proxy, so every client picks its own key.
+func TestNewServer_RejectsDangerousTrustedProxies(t *testing.T) {
+	cfg := testConfig()
+	cfg.TrustedProxies = []string{"0.0.0.0/0"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, closeAll, err := newServer(ctx, cfg, discardLogger())
+	if err == nil {
+		if closeAll != nil {
+			closeAll()
+		}
+		_ = srv
+		t.Fatal("newServer() error = nil, want a refusal to trust the default route")
+	}
+}

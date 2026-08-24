@@ -49,6 +49,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -182,6 +183,25 @@ type Config struct {
 	// policy.
 	HSTSMaxAge time.Duration
 
+	// TrustedProxies lists the peers that are reverse proxies this
+	// deployment operates, as CIDRs ("10.0.0.0/8", "2001:db8::/32") or
+	// bare addresses. Empty — the zero value — means no peer is trusted
+	// and the rate limiters key on the peer address alone.
+	//
+	// This exists because the address-keyed tiers are only as good as
+	// their key. Behind a proxy the peer address is the *proxy's*, so
+	// every client collapses into one bucket; reading X-Forwarded-For
+	// unconditionally instead is worse, because the client writes that
+	// header and could then mint a fresh identity per request. A
+	// forwarding header becomes usable exactly when the peer is known to
+	// be your own infrastructure, which is what this list declares.
+	//
+	// Getting it wrong in the other direction is the dangerous mistake:
+	// listing a *client* range here hands those clients the ability to
+	// choose their own rate-limit identity. The default route is
+	// rejected outright for that reason.
+	TrustedProxies []string
+
 	// Rate-limit tiers. Burst is the token bucket's depth, PerSec the
 	// rate it refills at; see the defaults above for what each tier is
 	// for and cmd/api/main.go's newServer for how they are composed.
@@ -286,6 +306,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	if cfg.TrustedProxies, err = parseCIDRList("TRUSTED_PROXIES"); err != nil {
+		return Config{}, err
+	}
+
 	if cfg.RateLimitBurst, err = parsePositiveInt("RATE_LIMIT_BURST", defaultRateLimitBurst); err != nil {
 		return Config{}, err
 	}
@@ -366,6 +390,42 @@ func parsePositiveInt(name string, def int) (int, error) {
 	}
 
 	return n, nil
+}
+
+// parseCIDRList reads a comma-separated list of CIDRs or bare addresses
+// and returns them unchanged, having verified that each one parses. An
+// unset variable yields nil, which disables trusted-proxy handling
+// entirely.
+//
+// The entries are returned as strings rather than as netip.Prefix values
+// because the consumer (moat's realip.New) takes strings and applies its
+// own, authoritative checks. Parsing here is not a substitute for that —
+// it is what turns a typo into a startup failure naming the offending
+// entry, instead of a limiter that silently keys on the wrong thing.
+//
+// The default route is rejected: 0.0.0.0/0 or ::/0 makes every client a
+// trusted proxy, which does not harden the limiter, it removes it.
+func parseCIDRList(name string) ([]string, error) {
+	raw := parseCommaSeparated(name)
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	for _, entry := range raw {
+		if prefix, err := netip.ParsePrefix(entry); err == nil {
+			if prefix.Bits() == 0 {
+				return nil, fmt.Errorf("config: %s entry %q is the default route, which would trust every client as a proxy", name, entry)
+			}
+			continue
+		}
+		// A bare address is accepted too: "trust this one load balancer"
+		// is common and awkward to spell as a /32 or /128.
+		if _, err := netip.ParseAddr(entry); err != nil {
+			return nil, fmt.Errorf("config: %s entry %q is not a valid CIDR or IP address", name, entry)
+		}
+	}
+
+	return raw, nil
 }
 
 // parsePositiveFloat reads the environment variable name and parses it as
