@@ -2,12 +2,11 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
-
-	"github.com/JonasBorgesLM/task-api/task"
 )
 
 // readinessPingTimeout bounds how long GET /health/ready waits on the
@@ -37,25 +36,25 @@ func registerHealthRoute(mux *http.ServeMux, logger *slog.Logger) {
 }
 
 // registerReadinessRoute registers GET /health/ready on the given mux. It
-// reports whether repo's backing store is actually reachable, so an
-// orchestrator (a Kubernetes readiness probe, a load balancer health
-// check) can stop routing traffic to a replica whose database connection
-// is broken, instead of only detecting a hard process crash the way GET
-// /health does.
+// reports whether db is actually reachable, so an orchestrator (a
+// Kubernetes readiness probe, a load balancer health check) can stop
+// routing traffic to a replica whose database connection is broken,
+// instead of only detecting a hard process crash the way GET /health does.
 //
-// repo is checked through the optional Pinger interface (see
-// task.Pinger): memoryRepository doesn't implement it and has nothing to
-// verify, so a repo that isn't a Pinger is always reported ready.
-func registerReadinessRoute(mux *http.ServeMux, repo task.Repository, logger *slog.Logger) {
+// db is nil in the in-memory-store configuration (see openDatabase) — in
+// that case there is nothing external to check, so this always reports
+// ready. task.Repository and user.Repository both live on the same *sql.DB
+// when PostgreSQL is configured, so a single ping here covers both.
+func registerReadinessRoute(mux *http.ServeMux, db *sql.DB, logger *slog.Logger) {
 	mux.HandleFunc("GET /health/ready", func(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusOK
 		body := healthResponse{Status: "ok"}
 
-		if pinger, ok := repo.(task.Pinger); ok {
+		if db != nil {
 			ctx, cancel := context.WithTimeout(r.Context(), readinessPingTimeout)
 			defer cancel()
 
-			if err := pinger.Ping(ctx); err != nil {
+			if err := db.PingContext(ctx); err != nil {
 				status = http.StatusServiceUnavailable
 				body = healthResponse{Status: "unavailable"}
 			}

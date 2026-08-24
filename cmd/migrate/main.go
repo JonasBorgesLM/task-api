@@ -1,9 +1,9 @@
 // Command migrate applies or reverts PostgreSQL migrations against
 // DATABASE_URL, independently of the API server. It exists for two cases
-// the server's own automatic migration (cmd/api/main.go's buildRepository,
+// the server's own automatic migration (cmd/api/main.go's openDatabase,
 // controlled by DB_AUTO_MIGRATE) doesn't cover:
 //
-//   - Reverting a migration (task.RunMigrationsDown) — the server only
+//   - Reverting a migration (migrate.RunMigrationsDown) — the server only
 //     ever applies migrations forward.
 //   - Deployments that set DB_AUTO_MIGRATE=false (e.g. multiple API
 //     replicas, where every instance auto-migrating on boot is
@@ -27,8 +27,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/JonasBorgesLM/task-api/config"
-	"github.com/JonasBorgesLM/task-api/task"
+	"github.com/JonasBorgesLM/task-api/internal/config"
+	"github.com/JonasBorgesLM/task-api/internal/platform/migrate"
 
 	// Registers the "pgx" driver with database/sql, the same driver
 	// cmd/api/main.go uses — see its blank import for why this is the
@@ -74,14 +74,14 @@ func run(direction string) error {
 
 	switch direction {
 	case "up":
-		if err := task.RunMigrations(ctx, db); err != nil {
+		if err := migrate.RunMigrations(ctx, db); err != nil {
 			return fmt.Errorf("apply migrations: %w", err)
 		}
 		fmt.Println("migrations applied")
 
 	case "down":
-		if err := task.RunMigrationsDown(ctx, db); err != nil {
-			if errors.Is(err, task.ErrNoMigrationsToRevert) {
+		if err := migrate.RunMigrationsDown(ctx, db); err != nil {
+			if errors.Is(err, migrate.ErrNoMigrationsToRevert) {
 				fmt.Println("no migrations to revert")
 				return nil
 			}

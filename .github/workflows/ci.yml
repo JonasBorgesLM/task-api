@@ -15,10 +15,11 @@ jobs:
     name: Quality Gate
     runs-on: ubuntu-latest
 
-    # Backs postgresRepository's integration tests
-    # (task/postgres_repository_test.go, built only with -tags=integration
-    # — see the "Test (integration)" step below). Without this service and
-    # that step, those tests would never actually run in CI at all.
+    # Backs internal/task and internal/user's postgresRepository
+    # integration tests (*_postgres_repository_test.go, built only with
+    # -tags=integration — see the "Test (integration)" step below).
+    # Without this service and that step, those tests would never actually
+    # run in CI at all.
     services:
       postgres:
         image: postgres:17-alpine
@@ -73,16 +74,16 @@ jobs:
       # postgres_repository_test.go (the "integration" build tag excludes
       # it), so it's vetted separately here.
       - name: Vet (integration)
-        run: go vet -tags=integration ./task/...
+        run: go vet -tags=integration ./...
 
-      # staticcheck, not golangci-lint: see README's Future Improvements —
+      # staticcheck, not golangci-lint: see docs/ARCHITECTURE.md's Future Improvements —
       # the golangci-lint build available at the time of writing predates
       # the Go version pinned in go.mod and cannot type-check it.
       - name: Lint (staticcheck)
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@latest
           staticcheck ./...
-          staticcheck -tags=integration ./task/...
+          staticcheck -tags=integration ./...
 
       # Unit tests: memoryRepository, Service, Handler, config, middleware,
       # server lifecycle — everything that needs no external service.
@@ -97,10 +98,28 @@ jobs:
       - name: Test (unit, coverage)
         run: go test -cover ./...
 
-      # Integration tests: postgresRepository against the real postgres
-      # service container declared above.
+      # Integration tests: every integration-tagged package against the
+      # real postgres service container declared above. -p 1 forces
+      # packages to run sequentially rather than go test's default of one
+      # concurrent process per package — they share one database/schema,
+      # and internal/platform/migrate's tests in particular DROP TABLE the
+      # schema other packages' tests assume is already migrated; running
+      # them concurrently is a real, observed source of spurious failures.
+      #
+      # No `-run Postgres` filter: the build tag already selects what runs
+      # here, and filtering by name on top of it silently skipped any
+      # integration test not named TestPostgres_*.
       - name: Test (integration)
-        run: go test -tags=integration ./task/... -run Postgres -v
+        run: go test -p 1 -tags=integration ./... -v
 
       - name: Test (integration, race detector)
-        run: go test -tags=integration -race ./task/... -run Postgres
+        run: go test -p 1 -tags=integration -race ./...
+
+      # Reported separately from "Test (unit, coverage)" because that step
+      # cannot see integration-tagged files (not compiled) and attributes
+      # coverage only within each package. This is the number that
+      # reflects what the suite actually exercises.
+      - name: Test (true coverage, unit + integration)
+        run: |
+          go test -p 1 -tags=integration -coverpkg=./... -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -1

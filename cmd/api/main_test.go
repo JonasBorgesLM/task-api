@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,7 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JonasBorgesLM/task-api/task"
+	"github.com/JonasBorgesLM/task-api/internal/config"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // discardLogger returns a logger that silently discards all output.
@@ -253,22 +256,12 @@ func TestHealthEndpoint(t *testing.T) {
 
 // --- Readiness check ---
 
-// pingerRepository is a minimal task.Repository that also implements
-// task.Pinger, letting these tests drive registerReadinessRoute's Pinger
-// branch with a controllable error instead of a real PostgreSQL instance.
-type pingerRepository struct {
-	task.Repository
-	pingErr error
-}
-
-func (r *pingerRepository) Ping(context.Context) error { return r.pingErr }
-
-// TestReadinessEndpoint_NonPinger_AlwaysReady verifies that a Repository
-// which doesn't implement task.Pinger (memoryRepository, in production) is
-// always reported ready — there's nothing external for it to check.
-func TestReadinessEndpoint_NonPinger_AlwaysReady(t *testing.T) {
+// TestReadinessEndpoint_NilDB_AlwaysReady verifies that the in-memory-store
+// configuration (db == nil, see openDatabase) is always reported ready —
+// there's nothing external to check.
+func TestReadinessEndpoint_NilDB_AlwaysReady(t *testing.T) {
 	mux := http.NewServeMux()
-	registerReadinessRoute(mux, task.NewMemoryRepository(), discardLogger())
+	registerReadinessRoute(mux, nil, discardLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
 	w := httptest.NewRecorder()
@@ -287,33 +280,28 @@ func TestReadinessEndpoint_NonPinger_AlwaysReady(t *testing.T) {
 	}
 }
 
-// TestReadinessEndpoint_PingerHealthy_ReturnsOK verifies the 200 path when
-// the repository's Ping succeeds.
-func TestReadinessEndpoint_PingerHealthy_ReturnsOK(t *testing.T) {
-	mux := http.NewServeMux()
-	registerReadinessRoute(mux, &pingerRepository{Repository: task.NewMemoryRepository()}, discardLogger())
-
-	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("GET /health/ready status = %d, want %d", w.Code, http.StatusOK)
+// TestReadinessEndpoint_UnreachableDB_ReturnsServiceUnavailable verifies
+// that a *sql.DB whose Ping fails makes GET /health/ready report 503
+// instead of the always-200 GET /health — this is the whole point of the
+// readiness check: an orchestrator can act on this distinction to stop
+// routing traffic to this replica.
+//
+// A closed *sql.DB is used to get a deterministic Ping failure ("sql:
+// database is closed") without needing a real, unreachable PostgreSQL
+// instance: sql.Open never dials anything (see openDatabase's doc
+// comment), so opening then immediately closing a pool needs no network
+// access at all and keeps this a unit test.
+func TestReadinessEndpoint_UnreachableDB_ReturnsServiceUnavailable(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://unreachable/db")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
 	}
-}
-
-// TestReadinessEndpoint_PingerFailing_ReturnsServiceUnavailable verifies
-// that a repository whose Ping fails (e.g. PostgreSQL unreachable) makes
-// GET /health/ready report 503 instead of the always-200 GET /health —
-// this is the whole point of the readiness check: an orchestrator can act
-// on this distinction to stop routing traffic to this replica.
-func TestReadinessEndpoint_PingerFailing_ReturnsServiceUnavailable(t *testing.T) {
-	mux := http.NewServeMux()
-	repo := &pingerRepository{
-		Repository: task.NewMemoryRepository(),
-		pingErr:    errors.New("connection refused"),
+	if err := db.Close(); err != nil {
+		t.Fatalf("db.Close: %v", err)
 	}
-	registerReadinessRoute(mux, repo, discardLogger())
+
+	mux := http.NewServeMux()
+	registerReadinessRoute(mux, db, discardLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
 	w := httptest.NewRecorder()
@@ -330,6 +318,106 @@ func TestReadinessEndpoint_PingerFailing_ReturnsServiceUnavailable(t *testing.T)
 	if body["status"] != "unavailable" {
 		t.Errorf("GET /health/ready body status = %q, want %q", body["status"], "unavailable")
 	}
+}
+
+// --- Security headers, through the real middleware chain ---
+//
+// middleware.SecurityHeaders is unit-tested in its own package; what these
+// cover is the wiring, which is the part that can silently regress. A
+// header set by a middleware nobody composed into newServer's chain
+// protects nothing, and every assertion below goes through the chain
+// newServer actually builds rather than a chain the test assembles.
+
+// newTestHandler returns the fully wired root handler newServer builds for
+// cfg — middleware chain included — using the in-memory repositories
+// (cfg.DatabaseURL empty, see openDatabase).
+func newTestHandler(t *testing.T, cfg config.Config) http.Handler {
+	t.Helper()
+
+	srv, closeDB, err := newServer(t.Context(), cfg, discardLogger())
+	if err != nil {
+		t.Fatalf("newServer() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := closeDB(); err != nil {
+			t.Errorf("closeDB() error = %v", err)
+		}
+	})
+	return srv.Handler
+}
+
+// TestSecurityHeaders_OnEveryResponseThroughTheChain covers the three
+// unconditional headers on responses produced by three different parts of
+// the stack: a handler (200), the auth middleware rejecting a request
+// (401), and the router itself (404). The last two are the interesting
+// ones — they never reach a domain handler, so they are what a chain
+// ordered wrongly would leave bare.
+func TestSecurityHeaders_OnEveryResponseThroughTheChain(t *testing.T) {
+	handler := newTestHandler(t, config.Config{})
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+	}{
+		{"public route", http.MethodGet, "/health", http.StatusOK},
+		{"unauthenticated protected route", http.MethodGet, "/tasks", http.StatusUnauthorized},
+		{"unrouted path", http.MethodGet, "/no-such-route", http.StatusNotFound},
+	}
+
+	want := map[string]string{
+		"Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+		"X-Frame-Options":         "DENY",
+		"X-Content-Type-Options":  "nosniff",
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("%s %s status = %d, want %d", tt.method, tt.path, w.Code, tt.wantStatus)
+			}
+			for name, wantValue := range want {
+				if got := w.Header().Get(name); got != wantValue {
+					t.Errorf("%s %s: %s = %q, want %q", tt.method, tt.path, name, got, wantValue)
+				}
+			}
+		})
+	}
+}
+
+// TestSecurityHeaders_HSTSFollowsConfig pins the opt-in: a default config
+// (a process serving plain HTTP, which is every default deployment of this
+// binary) must not claim a TLS guarantee, and setting HSTS_MAX_AGE must be
+// what turns it on. See middleware.SecurityHeaders' doc comment.
+func TestSecurityHeaders_HSTSFollowsConfig(t *testing.T) {
+	t.Run("absent by default", func(t *testing.T) {
+		handler := newTestHandler(t, config.Config{})
+
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if got := w.Header().Get("Strict-Transport-Security"); got != "" {
+			t.Errorf("Strict-Transport-Security = %q, want it absent by default", got)
+		}
+	})
+
+	t.Run("present when configured", func(t *testing.T) {
+		handler := newTestHandler(t, config.Config{HSTSMaxAge: 365 * 24 * time.Hour})
+
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if got, want := w.Header().Get("Strict-Transport-Security"), "max-age=31536000"; got != want {
+			t.Errorf("Strict-Transport-Security = %q, want %q", got, want)
+		}
+	})
 }
 
 // --- run() ---

@@ -14,16 +14,23 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/JonasBorgesLM/task-api/config"
-	"github.com/JonasBorgesLM/task-api/middleware"
-	"github.com/JonasBorgesLM/task-api/task"
+	"github.com/JonasBorgesLM/task-api/internal/config"
+	"github.com/JonasBorgesLM/task-api/internal/middleware"
+	"github.com/JonasBorgesLM/task-api/internal/platform/migrate"
+	"github.com/JonasBorgesLM/task-api/internal/task"
+	"github.com/JonasBorgesLM/task-api/internal/user"
 
 	// Registers the "pgx" driver with database/sql under the name used by
-	// sql.Open below. This is the only file in the module that imports a
-	// PostgreSQL package directly — task.Repository, task.Service and
-	// task.Handler know nothing about PostgreSQL or database/sql; they
-	// depend only on the task.Repository interface (see
-	// buildRepository).
+	// sql.Open below. cmd/migrate and cmd/seed carry the same blank import
+	// for the *sql.DB each of them opens, and the two postgresRepository
+	// implementations import pgx/v5/pgconn to inspect SQLSTATE codes — a
+	// PostgreSQL import is expected in all of those places.
+	//
+	// What stays confined is the *decision*: openDatabase and newServer
+	// below are the only place that picks which Repository implementation
+	// backs the process. Every Service and Handler — task's and user's
+	// alike — knows nothing about PostgreSQL or database/sql, and depends
+	// solely on its own package's Repository interface.
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -56,18 +63,17 @@ func run(ctx context.Context, out io.Writer) error {
 
 	logger := slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: cfg.LogLevel}))
 
-	srv, closeRepo, err := newServer(cfg, logger)
+	srv, closeDB, err := newServer(ctx, cfg, logger)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
 	// Runs last, after the HTTP server has fully stopped serving requests
 	// (Shutdown below, and the serverErr drain that follows it) — closing
-	// the repository (e.g. the PostgreSQL connection pool) out from under
-	// a request still in flight would turn a clean shutdown into request
-	// failures for no reason.
+	// the database out from under a request still in flight would turn a
+	// clean shutdown into request failures for no reason.
 	defer func() {
-		if err := closeRepo(); err != nil {
-			logger.Error("failed to close repository", "error", err)
+		if err := closeDB(); err != nil {
+			logger.Error("failed to close database", "error", err)
 		}
 	}()
 
@@ -116,42 +122,103 @@ func run(ctx context.Context, out io.Writer) error {
 }
 
 // newServer builds the fully wired *http.Server described by cfg:
-// dependency wiring (Repository → Service → Handler), route registration,
-// and the cross-cutting middleware chain. It is used by run() and, so that
-// tests exercise the exact same wiring instead of re-deriving their own
-// copy of it, by tests that need a Handler without going through
-// ListenAndServe/Shutdown.
+// dependency wiring (Repository → Service → Handler for both task and
+// user), route registration, and the cross-cutting middleware chain. It is
+// used by run() and, so that tests exercise the exact same wiring instead
+// of re-deriving their own copy of it, by tests that need a Handler
+// without going through ListenAndServe/Shutdown.
 //
-// The returned close function releases whatever resources buildRepository
-// opened (a PostgreSQL connection pool, or nothing for the in-memory
-// store) and must be called exactly once, after the server is done
-// serving requests. newServer returns a non-nil error only if the
-// Repository itself could not be built (e.g. PostgreSQL is configured but
-// unreachable) — in that case both other return values are nil and there
-// is nothing to close.
-func newServer(cfg config.Config, logger *slog.Logger) (*http.Server, func() error, error) {
-	repo, closeRepo, err := buildRepository(cfg, logger)
+// ctx bounds the lifetime of the background maintenance goroutine started
+// here (see runPeriodicCleanup) — it stops the moment ctx is canceled,
+// same as the HTTP server itself is meant to.
+//
+// The returned close function releases whatever openDatabase opened (a
+// PostgreSQL connection pool, or nothing for the in-memory store) and must
+// be called exactly once, after the server is done serving requests.
+// newServer returns a non-nil error only if the database itself could not
+// be opened (e.g. PostgreSQL is configured but unreachable) — in that case
+// both other return values are nil and there is nothing to close.
+func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*http.Server, func() error, error) {
+	db, err := openDatabase(cfg, logger)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build repository: %w", err)
+		return nil, nil, fmt.Errorf("open database: %w", err)
+	}
+	closeDB := func() error { return nil }
+	if db != nil {
+		closeDB = db.Close
 	}
 
-	svc := task.NewService(repo)
-	handler := task.NewHandler(svc, logger)
+	// One *sql.DB backs both domains' postgresRepository — task and user
+	// live in the same database, so there is no reason to open two pools.
+	// db == nil (cfg.DatabaseURL unset) selects the in-memory
+	// implementation for both, unchanged from before this second domain
+	// existed.
+	var (
+		taskRepo task.Repository
+		userRepo user.Repository
+	)
+	if db == nil {
+		taskRepo = task.NewMemoryRepository()
+		userRepo = user.NewMemoryRepository()
+	} else {
+		taskRepo = task.NewPostgresRepository(db)
+		userRepo = user.NewPostgresRepository(db)
+	}
+
+	taskSvc := task.NewService(taskRepo)
+	userSvc := user.NewService(userRepo, cfg.AuthSessionTTL)
+
+	taskHandler := task.NewHandler(taskSvc, logger)
+	userHandler := user.NewHandler(userSvc, logger)
+	requireAuth := user.RequireAuth(userSvc, logger)
+
+	// authRateLimiter guards only /auth/register and /auth/login (see
+	// userHandler.RegisterRoutes below) — it exists to blunt
+	// credential-stuffing and registration-spam attempts against those two
+	// endpoints specifically, not as a general-purpose API rate limit.
+	authRateLimiter := middleware.NewRateLimiter(authRateLimitRequests, authRateLimitWindow)
 
 	mux := http.NewServeMux()
 	registerHealthRoute(mux, logger)
-	registerReadinessRoute(mux, repo, logger)
-	mux.Handle("GET /debug/vars", expvar.Handler())
-	handler.RegisterRoutes(mux)
+	registerReadinessRoute(mux, db, logger)
+
+	// /debug/vars is authenticated, unlike the two health routes above.
+	// expvar exposes the process's command line and full runtime/GC
+	// statistics — internal operational detail with no reason to be
+	// world-readable, and a free fingerprint of the deployment for anyone
+	// probing it. The health routes stay public because an orchestrator's
+	// probe has no credentials to offer; expvar has no such constraint,
+	// since the humans and scrapers who read it can carry a token.
+	mux.Handle("GET /debug/vars", requireAuth(expvar.Handler()))
+
+	userHandler.RegisterRoutes(mux, requireAuth, authRateLimiter.Middleware())
+	taskHandler.RegisterRoutes(mux, requireAuth)
+
+	go runPeriodicCleanup(ctx, userSvc, authRateLimiter, logger)
 
 	// Cross-cutting HTTP concerns, applied to every route. Order matters:
 	// RequestID must run first so Logging and Recovery can read the
 	// request ID from the request context, and Logging must wrap Recovery
 	// (not the other way around) so it still logs an accurate status code
-	// for requests that panicked and were recovered.
+	// for requests that panicked and were recovered. CORS sits between
+	// them, inside Logging (so a preflight request it answers directly
+	// still gets an access log line) but outside Recovery (so the
+	// Access-Control-Allow-Origin header it sets survives even a handler
+	// panic — Recovery's 500 doesn't clear headers set earlier in the
+	// chain). It is a no-op end to end unless CORS_ALLOWED_ORIGINS is set;
+	// see middleware.CORS.
+	//
+	// SecurityHeaders sits outside CORS, and therefore outside everything
+	// that can answer a request without reaching the mux: it has to run
+	// before the preflight CORS short-circuits, before the 500 Recovery
+	// writes for a panicking handler, and before the router's own 404/405
+	// — a response that skips the handler is exactly the kind that would
+	// otherwise go out bare.
 	rootHandler := middleware.Chain(
 		middleware.RequestID,
 		middleware.Logging(logger),
+		middleware.SecurityHeaders(cfg.HSTSMaxAge),
+		middleware.CORS(cfg.CORSAllowedOrigins),
 		middleware.Recovery(logger),
 	)(mux)
 
@@ -164,27 +231,27 @@ func newServer(cfg config.Config, logger *slog.Logger) (*http.Server, func() err
 		IdleTimeout:  cfg.IdleTimeout,
 	}
 
-	return srv, closeRepo, nil
+	return srv, closeDB, nil
 }
 
-// buildRepository is the single place that decides which task.Repository
-// implementation backs the application, so that decision never leaks into
-// task.Service or task.Handler — both depend only on the task.Repository
-// interface (see task/repository.go) and are unaware PostgreSQL exists.
+// openDatabase is the single place that decides whether the application
+// runs against PostgreSQL or the in-memory store, so that decision never
+// leaks into task.Service/task.Handler or user.Service/user.Handler — all
+// of them depend only on their own package's Repository interface and are
+// unaware PostgreSQL exists.
 //
 // When cfg.DatabaseURL is empty — the zero value, which is what every
-// existing test that builds a bare config.Config{} gets — it returns the
-// in-memory implementation, unchanged from before PostgreSQL support was
-// added. Otherwise it opens a PostgreSQL connection pool, applies pending
-// migrations (unless cfg.DBAutoMigrate is false), and returns a
-// PostgreSQL-backed Repository.
+// existing test that builds a bare config.Config{} gets — it returns a nil
+// *sql.DB and a nil error, which newServer reads as "use the in-memory
+// repositories". Otherwise it opens a PostgreSQL connection pool, applies
+// pending migrations (unless cfg.DBAutoMigrate is false), and returns the
+// pool.
 //
-// The returned close function must be called exactly once, after the
-// server has stopped serving requests, to release the connection pool (a
-// no-op for the in-memory store).
-func buildRepository(cfg config.Config, logger *slog.Logger) (task.Repository, func() error, error) {
+// The caller must Close the returned *sql.DB (when non-nil) exactly once,
+// after the server has stopped serving requests.
+func openDatabase(cfg config.Config, logger *slog.Logger) (*sql.DB, error) {
 	if cfg.DatabaseURL == "" {
-		return task.NewMemoryRepository(), func() error { return nil }, nil
+		return nil, nil
 	}
 
 	// "pgx" is the driver name github.com/jackc/pgx/v5/stdlib registers
@@ -192,7 +259,7 @@ func buildRepository(cfg config.Config, logger *slog.Logger) (task.Repository, f
 	// this file.
 	db, err := sql.Open("pgx", cfg.DatabaseURL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open database: %w", err)
+		return nil, fmt.Errorf("open database: %w", err)
 	}
 
 	db.SetMaxOpenConns(cfg.DBMaxOpenConns)
@@ -208,18 +275,62 @@ func buildRepository(cfg config.Config, logger *slog.Logger) (task.Repository, f
 	defer cancel()
 	if err := db.PingContext(pingCtx); err != nil {
 		db.Close()
-		return nil, nil, fmt.Errorf("ping database: %w", err)
+		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
 	if cfg.DBAutoMigrate {
 		migrateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := task.RunMigrations(migrateCtx, db); err != nil {
+		if err := migrate.RunMigrations(migrateCtx, db); err != nil {
 			db.Close()
-			return nil, nil, fmt.Errorf("run migrations: %w", err)
+			return nil, fmt.Errorf("run migrations: %w", err)
 		}
 		logger.Info("database migrations applied")
 	}
 
-	return task.NewPostgresRepository(db), db.Close, nil
+	return db, nil
+}
+
+const (
+	// authRateLimitRequests and authRateLimitWindow bound
+	// authRateLimiter (see newServer): at most this many requests to
+	// POST /auth/register or POST /auth/login combined, per client IP,
+	// within this window. Chosen to be generous enough that a legitimate
+	// user retrying a mistyped password a few times never notices it,
+	// while still meaningfully slowing down credential stuffing or
+	// registration spam against a single instance.
+	authRateLimitRequests = 20
+	authRateLimitWindow   = 5 * time.Minute
+
+	// sessionCleanupInterval is how often expired sessions and stale
+	// rate-limit windows are purged from memory — see
+	// runPeriodicCleanup. Both are already handled correctly on the
+	// per-request path regardless (ValidateToken rejects an expired
+	// session; the rate limiter's own window rollover ignores a stale
+	// counter) — this exists purely to bound memory/storage growth from
+	// entries nobody ever comes back to touch again.
+	sessionCleanupInterval = 1 * time.Hour
+)
+
+// runPeriodicCleanup periodically prunes expired sessions (via userSvc)
+// and stale rate-limiter windows (via limiter) until ctx is canceled. A
+// failed pass is logged but never treated as fatal — both underlying
+// mechanisms remain correct on the per-request path even if a cleanup
+// pass is skipped or fails, so a transient DB hiccup here must not crash
+// the server or block request handling.
+func runPeriodicCleanup(ctx context.Context, userSvc *user.Service, limiter *middleware.RateLimiter, logger *slog.Logger) {
+	ticker := time.NewTicker(sessionCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := userSvc.PruneExpiredSessions(ctx); err != nil {
+				logger.Error("session cleanup failed", "error", err)
+			}
+			limiter.Prune(time.Now())
+		}
+	}
 }

@@ -1,15 +1,18 @@
-# Full local development/testing stack: the API and a PostgreSQL instance
-# it talks to over the compose network. Not used by CI (which starts a
-# `postgres:` service container directly and runs the compiled test binary
-# outside Docker — see .github/workflows/ci.yml) and not itself part of
-# the production Dockerfile, which only describes the API image; where
-# that image's PostgreSQL actually runs in a real deployment is up to
-# that environment, addressed purely via DATABASE_URL.
+# Full local development/testing stack: the API, the PostgreSQL instance
+# it talks to, and a Swagger UI for exercising the API by hand from a
+# browser — all three over the compose network. Not used by CI (which
+# starts a `postgres:` service container directly and runs the compiled
+# test binary outside Docker — see .github/workflows/ci.yml) and not
+# itself part of the production Dockerfile, which only describes the API
+# image; where that image's PostgreSQL actually runs in a real deployment
+# is up to that environment, addressed purely via DATABASE_URL.
 #
 # Usage:
 #
 #   docker compose up -d --build     # or: make docker-up
 #   curl http://localhost:8080/health
+#   open http://localhost:8082        # Swagger UI — "Try it out" just works,
+#                                      # see swagger-ui/CORS_ALLOWED_ORIGINS below
 #   docker compose down               # or: make docker-down
 #
 # To run only PostgreSQL (e.g. because you're running the API with
@@ -17,9 +20,9 @@
 #
 #   docker compose up -d postgres     # or: make db-up
 #
-# The two services share one PostgreSQL container/volume; there is no
-# separate database for the "api" service's schema versus the "postgres
-# only" workflow above.
+# The api and postgres services share one PostgreSQL container/volume;
+# there is no separate database for the "api" service's schema versus the
+# "postgres only" workflow above.
 services:
   postgres:
     image: postgres:17-alpine
@@ -48,11 +51,55 @@ services:
       # would mean the api container itself.
       DATABASE_URL: postgres://task_api:task_api@postgres:5432/task_api?sslmode=disable
       HTTP_ADDR: ":8080"
+      # Defaults to the swagger-ui service's own origin below (port 8082
+      # on the host — see its ports:), so "Try it out" in the bundled
+      # Swagger UI works with zero extra setup (see
+      # config.Config.CORSAllowedOrigins). Compose reads .env
+      # automatically, so override it there — never commit .env, see
+      # .gitignore — to allow a different origin (a separately-run
+      # frontend on another port) instead, or set it to an empty value to
+      # disable CORS again.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8082}
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
+    # Restart on crash, but stay down after an explicit `docker compose
+    # stop` / `down`. The API exits non-zero when it cannot reach
+    # PostgreSQL at startup (see openDatabase's Ping), so without this a
+    # transient database blip during boot leaves the container dead until
+    # someone notices.
+    restart: unless-stopped
+    # There is deliberately no healthcheck here. The runtime image is
+    # built FROM scratch (see Dockerfile) and contains nothing but the
+    # binary — no shell, no curl, no wget — so every shell- or
+    # tool-based Compose healthcheck would fail regardless of whether the
+    # API is actually healthy. The application does expose GET
+    # /health/ready for this purpose; a real orchestrator (Kubernetes,
+    # ECS, a load balancer) probes it over HTTP without needing anything
+    # installed inside the container, which is the correct place for that
+    # check to live.
+
+  # Interactive API console for manual testing — not something the API
+  # itself needs at runtime, and not started by the production Dockerfile;
+  # purely a convenience for this compose-based dev stack. Serves
+  # docs/openapi.yaml (mounted read-only, so editing the spec on the host
+  # and reloading the page in the browser is enough to see the change — no
+  # rebuild) and lets "Try it out" call the real api service directly from
+  # the browser, which is what api's CORS_ALLOWED_ORIGINS default above
+  # exists to allow: without it, the browser blocks that cross-origin call
+  # even though the request itself reaches the API (this is the exact
+  # problem CORS support was added to solve — see docs/ARCHITECTURE.md).
+  swagger-ui:
+    image: swaggerapi/swagger-ui:v5.32.13
+    environment:
+      SWAGGER_JSON: /spec/openapi.yaml
+    volumes:
+      - ./docs/openapi.yaml:/spec/openapi.yaml:ro
+    ports:
+      - "8082:8080"
+    restart: unless-stopped
 
 volumes:
   task-api-postgres-data:

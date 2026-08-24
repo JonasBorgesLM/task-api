@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/JonasBorgesLM/task-api/internal/task"
+)
 
 // TestRandomTask_NeverEmptyTitle verifies that randomTask always produces a
 // non-empty title — task.Service.CreateTask rejects an empty title, so a
@@ -45,5 +49,51 @@ func TestRandomTask_ProducesVariety(t *testing.T) {
 	}
 	if len(seen) < 2 {
 		t.Fatalf("randomTask() produced only %d distinct title(s) across 50 calls, want variety", len(seen))
+	}
+}
+
+// TestRandomStatus_ProducesEveryValue verifies that, across enough calls,
+// randomStatus() eventually returns every task.Status statusWeights
+// assigns a nonzero weight to — a bug that zeroed out or misspelled one
+// entry would otherwise only show up as a subtly skewed seed dataset,
+// never a hard failure.
+func TestRandomStatus_ProducesEveryValue(t *testing.T) {
+	seen := make(map[task.Status]bool)
+	for range 2000 {
+		seen[randomStatus()] = true
+	}
+	for _, want := range []task.Status{task.StatusPending, task.StatusInProgress, task.StatusDone, task.StatusCancelled} {
+		if !seen[want] {
+			t.Errorf("randomStatus() never produced %q across 2000 calls", want)
+		}
+	}
+}
+
+// TestRandomStatus_NeverProducesUnknownValue guards statusWeights against
+// a typo'd task.Status literal — randomStatus() must only ever return one
+// of the four values Service actually understands.
+func TestRandomStatus_NeverProducesUnknownValue(t *testing.T) {
+	valid := map[task.Status]bool{
+		task.StatusPending: true, task.StatusInProgress: true,
+		task.StatusDone: true, task.StatusCancelled: true,
+	}
+	for range 500 {
+		if got := randomStatus(); !valid[got] {
+			t.Fatalf("randomStatus() returned %q, which is not a known task.Status", got)
+		}
+	}
+}
+
+// TestRandomPriority_ProducesEveryValue mirrors
+// TestRandomStatus_ProducesEveryValue for randomPriority().
+func TestRandomPriority_ProducesEveryValue(t *testing.T) {
+	seen := make(map[task.Priority]bool)
+	for range 500 {
+		seen[randomPriority()] = true
+	}
+	for _, want := range []task.Priority{task.PriorityLow, task.PriorityMedium, task.PriorityHigh} {
+		if !seen[want] {
+			t.Errorf("randomPriority() never produced %q across 500 calls", want)
+		}
 	}
 }

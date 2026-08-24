@@ -3,16 +3,34 @@ openapi: 3.0.3
 info:
   title: Task API
   description: >
-    A small HTTP REST API for task management, built with Go using only the
-    standard library. Each task has a title, an optional description, and a
-    status (`pending` or `done`). The API supports full lifecycle
-    management: create, read, update, complete and delete.
+    A small, multi-user HTTP REST API for task management, built with Go
+    using only the standard library plus pgx (PostgreSQL) and
+    golang.org/x/crypto (bcrypt). Every task belongs to exactly one user
+    and is only ever visible to that user. Each task has a title, an
+    optional description, a status (`pending`, `in_progress`, `done`, or
+    `cancelled`, following the transition rules below), and a priority
+    (`low`, `medium`, or `high`). Authentication is opaque bearer session
+    tokens, issued by POST /auth/login.
 
 
     This document describes exactly the behavior implemented in
-    `task/handler.go`, `task/service.go` and `task/repository.go` as of the
+    `internal/task/handler.go`+`service.go`+`repository.go` and
+    `internal/user/handler.go`+`service.go`+`repository.go` as of the
     current codebase — no aspirational or planned behavior is included.
-  version: "1.0.0"
+
+
+    Every response from every endpoint — including error responses and
+    responses produced before routing, such as a `404` for an unknown path
+    — additionally carries a fixed set of security headers
+    (`middleware.SecurityHeaders`): `Content-Security-Policy: default-src
+    'none'; frame-ancestors 'none'`, `X-Frame-Options: DENY`, and
+    `X-Content-Type-Options: nosniff`. They are constant, identical
+    everywhere, and are not part of the API contract a client programs
+    against, so they are documented here once rather than repeated on each
+    response. `Strict-Transport-Security` joins them only when the
+    deployment sets `HSTS_MAX_AGE` — see docs/ARCHITECTURE.md's
+    "Operational Behavior" for why that one is opt-in.
+  version: "2.2.0"
   license:
     name: MIT
     url: https://github.com/JonasBorgesLM/task-api/blob/main/LICENSE
@@ -25,24 +43,242 @@ servers:
       project README.
 
 tags:
+  - name: Auth
+    description: Registration, login/logout, and the current user
   - name: Tasks
-    description: Task lifecycle management (create, read, update, complete, delete)
+    description: Task lifecycle management (create, read, update, status transitions, delete) — every operation is scoped to the authenticated caller's own tasks
   - name: Health
     description: Liveness and readiness checks, for process supervisors and load balancers
+  - name: Observability
+    description: Runtime statistics for operators — authenticated, unlike the health checks
+
+security:
+  - bearerAuth: []
 
 paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: Create a user account
+      security: []
+      description: >
+        Creates a new user account. Does not log the caller in — call
+        POST /auth/login afterwards to obtain a session token.
+      requestBody:
+        required: true
+        description: >
+          Request bodies larger than 1 MiB are rejected, surfacing as the
+          same 400 "invalid request body" response as malformed JSON —
+          the same cap the task endpoints apply.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              email: alice@example.com
+              password: correct horse battery staple
+      responses:
+        '201':
+          description: Account created.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              example:
+                id: 9f8e7d6c-5b4a-3210-9876-543210fedcba
+                email: alice@example.com
+                created_at: "2026-08-08T12:00:00Z"
+                updated_at: "2026-08-08T12:00:00Z"
+        '400':
+          description: >
+            Malformed JSON body; an empty/malformed `email` (must contain
+            "@", at most 320 characters); or a `password` shorter than 8
+            or longer than 72 characters (bcrypt's own input limit).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "invalid input: password must be at least 8 characters"
+        '409':
+          description: A user with this email is already registered.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: email already registered
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Log in and obtain a session token
+      security: []
+      description: >
+        Verifies email/password and issues a new bearer session token,
+        valid for AUTH_SESSION_TTL (default 24h). The raw token is
+        returned exactly once, in this response — it cannot be recovered
+        later; only its hash is stored server-side. Send it back as
+        `Authorization: Bearer <token>` on every subsequent request to a
+        protected endpoint.
+      requestBody:
+        required: true
+        description: >
+          Request bodies larger than 1 MiB are rejected, surfacing as the
+          same 400 "invalid request body" response as malformed JSON.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: alice@example.com
+              password: correct horse battery staple
+      responses:
+        '200':
+          description: Authenticated successfully.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+              example:
+                token: 0094162c1a4c9c2e5aa5897e55ea477e6dd089a60e2d060303c82ff1fe82e6d
+                expires_at: "2026-08-09T12:00:00Z"
+                user:
+                  id: 9f8e7d6c-5b4a-3210-9876-543210fedcba
+                  email: alice@example.com
+                  created_at: "2026-08-08T12:00:00Z"
+                  updated_at: "2026-08-08T12:00:00Z"
+        '400':
+          description: Malformed JSON body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: invalid request body
+        '401':
+          description: >
+            Unknown email or wrong password — deliberately the same
+            response either way, so a caller can never distinguish "no
+            such account" from "wrong password" and enumerate registered
+            emails.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: invalid email or password
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Invalidate the current session token
+      description: >
+        Deletes the session backing the bearer token used for this
+        request.
+
+        Repeating it with the *same* token returns 401, not 204: the
+        endpoint requires authentication, and the first call already
+        destroyed the session that authenticates it. The idempotency here
+        is server-side — deleting an already-absent session is not treated
+        as an error internally — but it is not observable through this
+        endpoint, because a request carrying an unknown or expired token
+        is rejected before it reaches the handler. Clients should treat
+        both 204 and 401 as "the session is gone", which is the outcome
+        logout is asking for either way.
+      responses:
+        '204':
+          description: Logged out. No response body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      operationId: getMe
+      summary: Get the authenticated user
+      responses:
+        '200':
+          description: The user identified by the bearer token used for this request.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >
+            The token authenticated successfully but its owning user no
+            longer exists. Only reachable if the account was removed out
+            of band (direct SQL, `cmd/seed -reset`) between the session
+            lookup and this read — this API exposes no endpoint that
+            deletes a user, and deleting one normally cascades its
+            sessions away, which would produce a 401 instead.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: user not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /tasks:
     post:
       tags: [Tasks]
       operationId: createTask
       summary: Create a task
       description: >
-        Creates a new task with status `pending`. `id`, `status`,
-        `created_at` and `updated_at` are always assigned by the server;
-        if the client includes any of these fields in the request body,
-        or any other field not part of CreateTaskRequest, they are
-        silently ignored — the API never returns a 400 for unknown
-        fields.
+        Creates a new task owned by the authenticated caller, with status
+        `pending`. `id`, `status`, `created_at` and `updated_at` are
+        always assigned by the server; if the client includes any of
+        these fields in the request body, or any other field not part of
+        CreateTaskRequest, they are silently ignored — the API never
+        returns a 400 for unknown fields.
       requestBody:
         required: true
         description: >
@@ -58,8 +294,9 @@ paths:
                 value:
                   title: Buy groceries
                   description: Milk, eggs, bread
+                  priority: high
               titleOnly:
-                summary: Description omitted (optional)
+                summary: Description and priority omitted (both optional)
                 value:
                   title: Buy groceries
       responses:
@@ -77,13 +314,15 @@ paths:
                 title: Buy groceries
                 description: Milk, eggs, bread
                 status: pending
+                priority: high
                 created_at: "2026-08-08T12:00:00Z"
                 updated_at: "2026-08-08T12:00:00Z"
         '400':
           description: >
             Malformed JSON body; a missing, empty, or whitespace-only
-            `title`; or a `title`/`description` longer than 200/2000
-            characters (after trimming).
+            `title`; a `title`/`description` longer than 200/2000
+            characters (after trimming); or a `priority` that isn't one
+            of `low`/`medium`/`high`.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -100,6 +339,8 @@ paths:
                   summary: Empty or whitespace-only title
                   value:
                     error: "invalid input: title must not be empty"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '409':
           description: >
             A task with the server-generated id already exists.
@@ -120,25 +361,33 @@ paths:
                 error: task already exists
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
     get:
       tags: [Tasks]
       operationId: listTasks
-      summary: List tasks
+      summary: List the authenticated caller's tasks
       description: >
-        Returns stored tasks ordered by `created_at` ascending (oldest
-        first; ties broken by `id`) — the Repository guarantees this
-        ordering and applies `limit`/`offset` itself (pushed into the SQL
-        query for the PostgreSQL-backed store), rather than the Service
-        fetching everything and paginating in memory. `limit` and `offset`
-        are optional; omitting both returns every task. Returns an empty
-        JSON array, never `null`, when no tasks exist or when `offset` is
-        past the end of the list.
+        Returns the authenticated caller's own tasks — never another
+        user's — ordered by `created_at` ascending (oldest first; ties
+        broken by `id`). The Repository guarantees this ordering and
+        applies the ownership filter and `limit`/`offset` itself (pushed
+        into the SQL query for the PostgreSQL-backed store: `WHERE
+        user_id = … ORDER BY … LIMIT … OFFSET …`), rather than the
+        Service fetching everything and filtering/paginating in memory.
+        `limit` and `offset` are optional; omitting both returns every
+        task the caller owns. Returns an empty JSON array, never `null`,
+        when the caller has no tasks or when `offset` is past the end of
+        the list.
       parameters:
         - name: limit
           in: query
           required: false
-          description: Maximum number of tasks to return.
+          description: >
+            Maximum number of tasks to return. Sending the parameter with
+            an empty value (`?limit=`) is treated as omitting it, not as
+            an error.
           schema:
             type: integer
             minimum: 0
@@ -146,7 +395,10 @@ paths:
         - name: offset
           in: query
           required: false
-          description: Number of tasks to skip before collecting `limit` results.
+          description: >
+            Number of tasks to skip before collecting `limit` results.
+            Sending the parameter with an empty value (`?offset=`) is
+            treated as omitting it, not as an error.
           schema:
             type: integer
             minimum: 0
@@ -154,8 +406,8 @@ paths:
       responses:
         '200':
           description: >
-            Success. The array is empty (`[]`) if no tasks exist, or if
-            `offset` is past the end of the list.
+            Success. The array is empty (`[]`) if the caller has no
+            tasks, or if `offset` is past the end of the list.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -173,6 +425,7 @@ paths:
                       title: Buy groceries
                       description: Milk, eggs, bread
                       status: pending
+                      priority: high
                       created_at: "2026-08-08T12:00:00Z"
                       updated_at: "2026-08-08T12:00:00Z"
                 empty:
@@ -189,14 +442,18 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: "invalid input: limit must be a non-negative integer"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /tasks/{id}:
     get:
       tags: [Tasks]
       operationId: getTask
-      summary: Get a task by id
+      summary: Get one of the authenticated caller's tasks by id
       parameters:
         - $ref: '#/components/parameters/TaskID'
       responses:
@@ -214,24 +471,32 @@ paths:
                 title: Buy groceries
                 description: Milk, eggs, bread
                 status: pending
+                priority: high
                 created_at: "2026-08-08T12:00:00Z"
                 updated_at: "2026-08-08T12:00:00Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
     put:
       tags: [Tasks]
       operationId: updateTask
-      summary: Update a task's title and description
+      summary: Update a task's title, description and/or priority
       description: >
-        Replaces `title` and `description`. `id`, `status` and
-        `created_at` are never modified by this endpoint — to change
-        `status`, use `PATCH /tasks/{id}/done`. As with creation, any
-        field in the body other than `title`/`description` (e.g. a
-        client-supplied `status` or `id`) is silently ignored.
-        `updated_at` is always refreshed to the current time.
+        Replaces `title` and `description`, and — if `priority` is
+        present and non-empty — `priority` too; an omitted or empty
+        `priority` leaves it unchanged. `id`, `status` and `created_at`
+        are never modified by this endpoint — to change `status`, use
+        PATCH /tasks/{id}/status (or PATCH /tasks/{id}/done). As with
+        creation, any field in the body other than
+        `title`/`description`/`priority` (e.g. a client-supplied `status`
+        or `id`) is silently ignored. `updated_at` is always refreshed to
+        the current time.
       parameters:
         - $ref: '#/components/parameters/TaskID'
       requestBody:
@@ -261,13 +526,15 @@ paths:
                 title: Buy groceries and cook dinner
                 description: Don't forget olive oil
                 status: pending
+                priority: high
                 created_at: "2026-08-08T12:00:00Z"
                 updated_at: "2026-08-08T12:05:00Z"
         '400':
           description: >
             Malformed JSON body; a missing, empty, or whitespace-only
-            `title`; or a `title`/`description` longer than 200/2000
-            characters (after trimming).
+            `title`; a `title`/`description` longer than 200/2000
+            characters (after trimming); or a non-empty `priority` that
+            isn't one of `low`/`medium`/`high`.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -284,6 +551,8 @@ paths:
                   summary: Empty or whitespace-only title
                   value:
                     error: "invalid input: title must not be empty"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -302,6 +571,8 @@ paths:
                 error: task was modified concurrently, please retry
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
     delete:
       tags: [Tasks]
@@ -316,10 +587,98 @@ paths:
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /tasks/{id}/status:
+    patch:
+      tags: [Tasks]
+      operationId: transitionTaskStatus
+      summary: Move a task to a different status
+      description: >
+        Moves the task to `status`, if that's a legal transition from its
+        current status — see the Status schema's transition table.
+        Requesting the task's *current* status again always succeeds as a
+        no-op (200, `updated_at` unchanged, nothing written) — the same
+        idempotency PATCH /tasks/{id}/done has always provided for an
+        already-`done` task, generalized to every status.
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransitionStatusRequest'
+            example:
+              status: in_progress
+      responses:
+        '200':
+          description: Task moved to the new status (or already was — same response shape either way).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: f47ac10b-58cc-4372-a567-0e02b2c3d479
+                title: Buy groceries
+                description: Milk, eggs, bread
+                status: in_progress
+                priority: high
+                created_at: "2026-08-08T12:00:00Z"
+                updated_at: "2026-08-08T12:05:00Z"
+        '400':
+          description: Malformed JSON body, or `status` is not one of the four known values.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: 'invalid input: unknown status "archived"'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >
+            Either an optimistic concurrency conflict (see PUT
+            /tasks/{id}'s 409), or the requested transition is not legal
+            from the task's current status (e.g. `cancelled` →
+            `done`) — distinguishable by the error message, both map to
+            409 since both mean "this request conflicts with the
+            resource's current state."
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalidTransition:
+                  summary: Illegal transition
+                  value:
+                    error: 'invalid status transition: cannot move from "cancelled" to "done"'
+                concurrencyConflict:
+                  summary: Optimistic concurrency conflict
+                  value:
+                    error: task was modified concurrently, please retry
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /tasks/{id}/done:
     patch:
@@ -328,14 +687,22 @@ paths:
       summary: Mark a task as done
       description: >
         Marks the task `done`. No request body is read by this endpoint —
-        any body sent is ignored.
+        any body sent is ignored. A thin, backward-compatible convenience
+        wrapper around PATCH /tasks/{id}/status with `{"status":"done"}`
+        — kept as its own endpoint because it predates the general one and
+        its wire contract must not change.
 
 
         This operation is **idempotent**: calling it on a task that is
         already `done` returns 200 with the task unchanged, and does
-        *not* refresh `updated_at` or write to the repository. Calling it
-        on a `pending` task sets `status` to `done` and refreshes
-        `updated_at`.
+        *not* refresh `updated_at` or write to the repository.
+
+        It is *not* a universal shortcut: it applies the same transition
+        rules as PATCH /tasks/{id}/status, so it only succeeds from a
+        status that can legally reach `done` — `pending` and
+        `in_progress`. A `cancelled` task cannot be completed in one hop
+        (see the Status schema's transition table) and returns 409; move
+        it back to `pending` first.
       parameters:
         - $ref: '#/components/parameters/TaskID'
       responses:
@@ -355,17 +722,24 @@ paths:
                 title: Buy groceries
                 description: Milk, eggs, bread
                 status: done
+                priority: high
                 created_at: "2026-08-08T12:00:00Z"
                 updated_at: "2026-08-08T12:05:00Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
           description: >
-            Optimistic concurrency conflict: another request updated this
+            Either the task's current status cannot legally reach `done`
+            in one hop — only `cancelled` can't (see the Status schema's
+            transition table); move it back to `pending` first — or an
+            optimistic concurrency conflict: another request updated this
             task between when this request's caller last read it and this
-            write. Never returned when the task was already `done` — that
-            path is idempotent and never writes. The caller should
-            re-fetch the task and retry.
+            write, in which case the caller should re-fetch and retry.
+
+            Neither is ever returned when the task is already `done`:
+            that path is idempotent and never writes.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -373,16 +747,71 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-              example:
-                error: task was modified concurrently, please retry
+              examples:
+                invalidTransition:
+                  summary: Task is cancelled, which cannot reach done directly
+                  value:
+                    error: 'complete task: invalid status transition: cannot move from "cancelled" to "done"'
+                concurrencyConflict:
+                  summary: Optimistic concurrency conflict
+                  value:
+                    error: task was modified concurrently, please retry
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /debug/vars:
+    get:
+      tags: [Observability]
+      operationId: getDebugVars
+      summary: Runtime statistics (expvar)
+      description: >
+        The Go standard library's `expvar` handler: the process command
+        line and full runtime/GC statistics (`memstats`, allocation
+        counters, and any other published variables) as JSON. Baseline
+        operational visibility with no external metrics dependency.
+
+        Unlike GET /health and GET /health/ready, this endpoint
+        **requires authentication** — it exposes internal runtime detail
+        and fingerprints the deployment, and unlike an orchestrator's
+        probe (which has no credentials to present), whoever reads these
+        numbers can carry a token.
+
+        The response shape is defined by `expvar`, not by this API: it is
+        an open-ended JSON object whose keys depend on what the runtime
+        and the process publish, so it is intentionally not modelled as a
+        fixed schema here.
+      responses:
+        '200':
+          description: Current runtime statistics.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                description: Open-ended expvar payload; keys are runtime-defined.
+              example:
+                cmdline: ["/task-api"]
+                memstats:
+                  Alloc: 1452712
+                  TotalAlloc: 1452712
+                  Sys: 12802312
+                  HeapObjects: 6415
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /health:
     get:
       tags: [Health]
       operationId: getHealth
       summary: Liveness check
+      security: []
       description: >
         Always responds 200 while the process is running. Does not check
         PostgreSQL or any other dependency — use GET /health/ready for
@@ -391,6 +820,9 @@ paths:
       responses:
         '200':
           description: The process is alive.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
           content:
             application/json:
               schema:
@@ -403,17 +835,22 @@ paths:
       tags: [Health]
       operationId: getReadiness
       summary: Readiness check
+      security: []
       description: >
-        Reports whether the backing store is actually reachable, not just
+        Reports whether the database is actually reachable, not just
         whether the process is alive. For the in-memory store (no
         DATABASE_URL configured) this always reports ready, since there is
-        nothing external to check. For PostgreSQL, it pings the
-        connection pool with a 5s timeout. Intended for a load balancer /
-        Kubernetes readiness probe, so traffic stops routing to a replica
-        whose database connection is broken.
+        nothing external to check. For PostgreSQL, it pings the shared
+        connection pool (used by both the task and user repositories)
+        with a 5s timeout. Intended for a load balancer / Kubernetes
+        readiness probe, so traffic stops routing to a replica whose
+        database connection is broken.
       responses:
         '200':
           description: The backing store is reachable.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
           content:
             application/json:
               schema:
@@ -421,7 +858,13 @@ paths:
               example:
                 status: ok
         '503':
-          description: The backing store is not reachable.
+          description: >
+            The backing store is not reachable. Distinct from the 503 an
+            authenticated endpoint returns: this one is the readiness
+            verdict itself, not a failed session lookup.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
           content:
             application/json:
               schema:
@@ -430,6 +873,16 @@ paths:
                 status: unavailable
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Opaque session token returned by POST /auth/login (not a JWT — it
+        has no independently verifiable structure; the server looks it up
+        by its hash on every request). Send as `Authorization: Bearer
+        <token>`.
+
   parameters:
     TaskID:
       name: id
@@ -437,10 +890,25 @@ components:
       required: true
       description: >
         Server-generated task identifier (a UUIDv4 as produced by
-        CreateTask). The API does not validate that `id` is a
-        well-formed UUID — any string is accepted and looked up as-is;
-        both a syntactically invalid id and a well-formed but unknown id
-        result in 404, identically.
+        CreateTask), scoped to the authenticated caller.
+
+        A well-formed but unknown id and a well-formed id belonging to a
+        *different* user both result in 404, identically — the API never
+        reveals whether a task ID exists if the caller doesn't own it.
+
+        A **malformed** id (not a syntactically valid UUID) is a separate
+        case and currently yields **500**, not 404: the API performs no
+        UUID validation of its own, so the value reaches PostgreSQL, whose
+        `::uuid` cast rejects it as a query error rather than as "no rows"
+        (`internal/task/postgres_repository.go`;
+        `TestPostgres_FindByID_MalformedID` pins this behavior down). Note
+        this is backend-dependent — the in-memory store, used when
+        DATABASE_URL is unset, returns 404 for the same input. This is a
+        known rough edge rather than an intended contract: malformed
+        client input should be a 4xx, and the two backends should agree.
+        It is documented here because this document describes what the
+        implementation does, not what it ought to do; see the project
+        README/ARCHITECTURE for the tracked follow-up.
       schema:
         type: string
       example: f47ac10b-58cc-4372-a567-0e02b2c3d479
@@ -469,10 +937,133 @@ components:
       required:
         - status
 
+    User:
+      type: object
+      description: >
+        The persisted representation of a user account. Never includes a
+        password or password hash — user.User.PasswordHash is
+        `json:"-"` and is never serialized to any response.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          example: 9f8e7d6c-5b4a-3210-9876-543210fedcba
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+          example: "2026-08-08T12:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+          example: "2026-08-08T12:00:00Z"
+      required:
+        - id
+        - email
+        - created_at
+        - updated_at
+
+    RegisterRequest:
+      type: object
+      description: Accepted body for POST /auth/register.
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          description: Required. Must contain "@". Trimmed of leading/trailing whitespace.
+          example: alice@example.com
+        password:
+          type: string
+          minLength: 8
+          maxLength: 72
+          description: >
+            Required, 8–72 characters. The 72-character ceiling is
+            bcrypt's own input limit (golang.org/x/crypto/bcrypt rejects
+            longer input outright), not an arbitrary policy choice.
+          example: correct horse battery staple
+      required:
+        - email
+        - password
+
+    LoginRequest:
+      type: object
+      description: Accepted body for POST /auth/login.
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          example: correct horse battery staple
+      required:
+        - email
+        - password
+
+    LoginResponse:
+      type: object
+      description: Body returned by a successful POST /auth/login.
+      properties:
+        token:
+          type: string
+          description: >
+            Bearer session token. Returned exactly once — only its hash
+            is stored server-side, so it cannot be retrieved again after
+            this response.
+          example: 0094162c1a4c9c2e5aa5897e55ea477e6dd089a60e2d060303c82ff1fe82e6d
+        expires_at:
+          type: string
+          format: date-time
+          description: When `token` stops being valid (see AUTH_SESSION_TTL).
+          example: "2026-08-09T12:00:00Z"
+        user:
+          $ref: '#/components/schemas/User'
+      required:
+        - token
+        - expires_at
+        - user
+
     Status:
       type: string
-      description: Task lifecycle state. There is no state other than these two.
-      enum: [pending, done]
+      description: >
+        Task lifecycle state. Legal transitions (enforced by Service, not
+        just this enum — a database CHECK constraint only fences the
+        value set):
+
+
+        ```
+
+        from \ to     pending  in_progress  done  cancelled
+
+        pending          -          Y        Y        Y
+
+        in_progress      Y          -        Y        Y
+
+        done             Y          Y        -        N
+
+        cancelled        Y          N        N        -
+
+        ```
+
+
+        Requesting the task's current status again always succeeds as a
+        no-op, independent of this table. `done` and `cancelled` are both
+        reopenable back to `pending` (and `done` can resume directly to
+        `in_progress`), but a `cancelled` task must pass back through
+        `pending` before becoming active again.
+      enum: [pending, in_progress, done, cancelled]
+
+    Priority:
+      type: string
+      description: How urgently a task should be worked on. No transition rules — settable to any value at any time.
+      enum: [low, medium, high]
 
     Task:
       type: object
@@ -480,6 +1071,8 @@ components:
         The persisted representation of a task, as returned by every
         endpoint that returns a task body. Field order and JSON keys
         match the `json` struct tags on task.Task exactly (snake_case).
+        The owning user's id is deliberately not included — every task a
+        client can ever retrieve already belongs to it.
       properties:
         id:
           type: string
@@ -495,6 +1088,8 @@ components:
           example: Milk, eggs, bread
         status:
           $ref: '#/components/schemas/Status'
+        priority:
+          $ref: '#/components/schemas/Priority'
         created_at:
           type: string
           format: date-time
@@ -506,15 +1101,17 @@ components:
           format: date-time
           readOnly: true
           description: >
-            Refreshed on every mutation (PUT, and PATCH .../done when it
-            actually changes the status). Left unchanged by an
-            already-done PATCH .../done call.
+            Refreshed on every mutation that actually changes something
+            (PUT, and every status transition that isn't a same-status
+            no-op). Left unchanged by an idempotent PATCH .../done or
+            PATCH .../status call.
           example: "2026-08-08T12:00:00Z"
       required:
         - id
         - title
         - description
         - status
+        - priority
         - created_at
         - updated_at
 
@@ -522,10 +1119,10 @@ components:
       type: object
       description: >
         Accepted body for POST /tasks. Any additional field beyond
-        `title`/`description` is silently ignored by the server rather
-        than rejected. Both fields are trimmed of leading/trailing
-        whitespace before being stored (length limits below are checked
-        after trimming).
+        `title`/`description`/`priority` is silently ignored by the
+        server rather than rejected. `title`/`description` are trimmed of
+        leading/trailing whitespace before being stored (length limits
+        below are checked after trimming).
       properties:
         title:
           type: string
@@ -541,15 +1138,24 @@ components:
             Optional. Defaults to an empty string if omitted. Rejected
             with 400 if longer than 2000 characters.
           example: Milk, eggs, bread
+        priority:
+          type: string
+          enum: [low, medium, high, ""]
+          description: >
+            Optional. Defaults to `medium` when omitted **or** sent as an
+            empty string — the server treats "" as "not provided" rather
+            than rejecting it, which is why "" appears in this enum even
+            though it is not a valid stored Priority value.
+          example: high
       required:
         - title
 
     UpdateTaskRequest:
       type: object
       description: >
-        Accepted body for PUT /tasks/{id}. Same validation as
-        CreateTaskRequest; any additional field (including `status` or
-        `id`) is silently ignored.
+        Accepted body for PUT /tasks/{id}. Same title/description
+        validation as CreateTaskRequest; any additional field (including
+        `status` or `id`) is silently ignored.
       properties:
         title:
           type: string
@@ -565,8 +1171,26 @@ components:
             Optional. Defaults to an empty string if omitted. Rejected
             with 400 if longer than 2000 characters.
           example: Don't forget olive oil
+        priority:
+          type: string
+          enum: [low, medium, high, ""]
+          description: >
+            Optional. Omitted **or** sent as an empty string leaves the
+            task's current priority unchanged — "" is the server's
+            "not provided" sentinel, which is why it appears in this enum
+            even though it is not a valid stored Priority value.
+          example: high
       required:
         - title
+
+    TransitionStatusRequest:
+      type: object
+      description: Accepted body for PATCH /tasks/{id}/status.
+      properties:
+        status:
+          $ref: '#/components/schemas/Status'
+      required:
+        - status
 
     ErrorResponse:
       type: object
@@ -582,8 +1206,42 @@ components:
         - error
 
   responses:
+    Unauthorized:
+      description: >
+        Missing, malformed, or invalid/expired `Authorization: Bearer`
+        header.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: invalid or expired session token
+
+    TooManyRequests:
+      description: >
+        The client's IP has made too many requests to /auth/register or
+        /auth/login (combined — they share one rate-limit budget) within
+        the current window (see cmd/api/main.go's
+        authRateLimitRequests/authRateLimitWindow). Not returned by any
+        other endpoint. Wait and retry.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: too many requests, please try again later
+
     NotFound:
-      description: No task exists with the given id.
+      description: >
+        No task exists with the given id, or it belongs to a different
+        user (see the `id` path parameter's description — both cases are
+        indistinguishable on purpose).
       headers:
         X-Request-Id:
           $ref: '#/components/headers/XRequestID'
@@ -609,3 +1267,27 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             error: internal server error
+
+    ServiceUnavailable:
+      description: >
+        The session lookup that authenticates this request could not be
+        performed — the database is unreachable, timed out, or the request
+        was canceled. **This says nothing about the caller's token:** a
+        perfectly valid, unexpired token gets this response too, so the
+        client must NOT discard its credentials and re-authenticate. Retry
+        the same request with the same token once the service recovers
+        (GET /health/ready reports when that is).
+
+        Returned only by endpoints that require authentication, since it
+        originates in the session lookup itself. POST /auth/register and
+        POST /auth/login perform no such lookup, so the same underlying
+        database failure surfaces there as a 500 instead.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: service temporarily unavailable, please retry
