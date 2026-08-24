@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -417,5 +418,79 @@ func TestPruneExpiredSessions_RepositoryError(t *testing.T) {
 	err := svc.PruneExpiredSessions(context.Background())
 	if !errors.Is(err, repoErr) {
 		t.Errorf("PruneExpiredSessions() repository error = %v, want %v", err, repoErr)
+	}
+}
+
+// TestRegister_RejectsAddressesTheOldCheckAccepted covers the gap left by
+// the previous validation, which asked only whether the string contained
+// an "@". Each of these passed that check and cannot receive mail.
+func TestRegister_RejectsAddressesTheOldCheckAccepted(t *testing.T) {
+	for _, email := range []string{"@", "a@", "@b", "@example.com", "user@", "user@@example.com"} {
+		t.Run(email, func(t *testing.T) {
+			svc := NewService(&fakeRepository{}, testSessionTTL)
+
+			_, err := svc.Register(context.Background(), email, "password12345")
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Errorf("Register(%q) error = %v, want ErrInvalidInput", email, err)
+			}
+		})
+	}
+}
+
+// TestRegister_AcceptsOrdinaryAddresses is the other side of the same
+// change: tightening validation is only correct if it still admits the
+// addresses people actually have.
+func TestRegister_AcceptsOrdinaryAddresses(t *testing.T) {
+	for _, email := range []string{
+		"user@example.com",
+		"first.last@example.co.uk",
+		"user+tag@example.com",
+		"user_name@sub.example.org",
+	} {
+		t.Run(email, func(t *testing.T) {
+			svc := NewService(&fakeRepository{}, testSessionTTL)
+
+			if _, err := svc.Register(context.Background(), email, "password12345"); err != nil {
+				t.Errorf("Register(%q) unexpected error: %v", email, err)
+			}
+		})
+	}
+}
+
+// TestRegister_EmailErrorDoesNotEchoTheInput guards a property the
+// validation library and this package agree on: an error that reflects
+// attacker-controlled input back is a reflection primitive once it lands
+// in a log or a response body.
+func TestRegister_EmailErrorDoesNotEchoTheInput(t *testing.T) {
+	svc := NewService(&fakeRepository{}, testSessionTTL)
+
+	const hostile = "<script>alert(1)</script>"
+
+	_, err := svc.Register(context.Background(), hostile, "password12345")
+	if err == nil {
+		t.Fatal("Register() error = nil, want ErrInvalidInput")
+	}
+	if strings.Contains(err.Error(), hostile) {
+		t.Errorf("error message echoes the submitted value: %q", err.Error())
+	}
+}
+
+// TestValidatePassword_MeasuresBytesNotRunes pins the one length check in
+// this codebase that is deliberately byte-based. bcrypt rejects input
+// over 72 *bytes*, so a rune-based limit (validate.MaxLen, used for
+// email) would accept a password that hashing then refuses.
+func TestValidatePassword_MeasuresBytesNotRunes(t *testing.T) {
+	// 25 three-byte runes: 25 characters, 75 bytes.
+	password := strings.Repeat("日", 25)
+
+	if utf8.RuneCountInString(password) > maxPasswordLen {
+		t.Fatalf("test premise broken: %d runes is already over the %d limit", utf8.RuneCountInString(password), maxPasswordLen)
+	}
+	if len(password) <= maxPasswordLen {
+		t.Fatalf("test premise broken: %d bytes is not over the %d limit", len(password), maxPasswordLen)
+	}
+
+	if err := validatePassword(password); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("validatePassword() error = %v, want ErrInvalidInput — the limit must be counted in bytes", err)
 	}
 }

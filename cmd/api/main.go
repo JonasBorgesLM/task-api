@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/JonasBorgesLM/moat/ratelimit"
+	"github.com/JonasBorgesLM/moat/realip"
 	"github.com/JonasBorgesLM/moat/secureheaders"
 
 	"github.com/JonasBorgesLM/task-api/internal/config"
@@ -195,8 +196,16 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	// many hosts. It necessarily runs *after* RequireAuth — the user ID
 	// it keys on does not exist before then — which is precisely why
 	// globalLimiter has to exist in front rather than be replaced by it.
-	globalLimiter := ratelimit.New(cfg.RateLimitBurst, cfg.RateLimitPerSec)
-	authLimiter := ratelimit.New(cfg.AuthRateLimitBurst, cfg.AuthRateLimitPerSec)
+	// Both address-keyed tiers share one key function, so that trusting a
+	// proxy for one and not the other is not even expressible.
+	addressKey, err := addressKeyFunc(cfg)
+	if err != nil {
+		closeDB()
+		return nil, nil, err
+	}
+
+	globalLimiter := ratelimit.New(cfg.RateLimitBurst, cfg.RateLimitPerSec, ratelimit.WithKeyFunc(addressKey))
+	authLimiter := ratelimit.New(cfg.AuthRateLimitBurst, cfg.AuthRateLimitPerSec, ratelimit.WithKeyFunc(addressKey))
 	userLimiter := ratelimit.New(
 		cfg.UserRateLimitBurst,
 		cfg.UserRateLimitPerSec,
@@ -385,6 +394,38 @@ const (
 	// reclaim sessions nobody ever comes back to touch again.
 	sessionCleanupInterval = 1 * time.Hour
 )
+
+// addressKeyFunc returns the key function the two address-keyed rate
+// limit tiers use.
+//
+// With no trusted proxies configured it is ratelimit.RemoteAddrKey: the
+// peer of the TCP connection, which is the only client identity the
+// server actually knows. Forwarding headers are ignored, because the
+// client writes them — a limiter keyed on an unverified X-Forwarded-For
+// is not a limiter, since every request can claim a fresh identity.
+//
+// That default is safe but blunt behind a reverse proxy, where the peer
+// is always the proxy and every client therefore shares one bucket.
+// Naming the proxies in TRUSTED_PROXIES switches to realip, which reads
+// the forwarding header only after confirming the peer is one of them,
+// and walks it from the right — the end your own infrastructure appended
+// — rather than the left, which is the part a client controls.
+//
+// A malformed or dangerous list fails startup rather than falling back to
+// the default: silently degrading to per-proxy buckets would look like
+// working configuration while enforcing something entirely different from
+// what the operator asked for.
+func addressKeyFunc(cfg config.Config) (ratelimit.KeyFunc, error) {
+	if len(cfg.TrustedProxies) == 0 {
+		return ratelimit.RemoteAddrKey, nil
+	}
+
+	extractor, err := realip.New(cfg.TrustedProxies)
+	if err != nil {
+		return nil, fmt.Errorf("configure trusted proxies: %w", err)
+	}
+	return extractor.KeyFunc(), nil
+}
 
 // userIDKey keys the per-user rate limiter by the authenticated user's
 // ID, which user.RequireAuth places in the request context.
