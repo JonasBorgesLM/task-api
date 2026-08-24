@@ -21,11 +21,16 @@ import (
 	"github.com/JonasBorgesLM/task-api/internal/user"
 
 	// Registers the "pgx" driver with database/sql under the name used by
-	// sql.Open below. This is the only file in the module that imports a
-	// PostgreSQL package directly — task.Repository, user.Repository and
-	// every Service/Handler know nothing about PostgreSQL or database/sql;
-	// they depend only on their own package's Repository interface (see
-	// openDatabase and newServer).
+	// sql.Open below. cmd/migrate and cmd/seed carry the same blank import
+	// for the *sql.DB each of them opens, and the two postgresRepository
+	// implementations import pgx/v5/pgconn to inspect SQLSTATE codes — a
+	// PostgreSQL import is expected in all of those places.
+	//
+	// What stays confined is the *decision*: openDatabase and newServer
+	// below are the only place that picks which Repository implementation
+	// backs the process. Every Service and Handler — task's and user's
+	// alike — knows nothing about PostgreSQL or database/sql, and depends
+	// solely on its own package's Repository interface.
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
