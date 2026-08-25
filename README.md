@@ -91,7 +91,7 @@ make build && ./bin/task-api         # build a standalone binary
 
 ## Running with Docker
 
-`Dockerfile` is a two-stage build: `golang:1.26.5-alpine` compiles a static (`CGO_ENABLED=0`) binary, copied into an empty `scratch` image — no shell, no libc, just the binary and a nonroot user.
+`Dockerfile` is a two-stage build: `golang:1.26.6-alpine` compiles a static (`CGO_ENABLED=0`) binary, copied into an empty `scratch` image — no shell, no libc, just the binary and a nonroot user.
 
 ```bash
 make docker-build   # build the image
