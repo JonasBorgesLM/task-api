@@ -66,6 +66,13 @@ task-api/
 │       ├── main.go                   # Standalone CLI: populates demo users + tasks via the real Services
 │       └── data.go                   # Word lists + randomTask()/randomStatus()/randomPriority() generators
 ├── internal/
+│   ├── attachment/
+│   │   ├── attachment.go             # Domain model: Attachment (metadata only — the bytes live outside the database)
+│   │   ├── errors.go                 # Domain error sentinels
+│   │   ├── repository.go             # Repository interface + TaskOwnershipFunc — ownership reached through the task
+│   │   ├── memory_repository.go      # In-memory implementation (ownership via the injected TaskOwnershipFunc)
+│   │   ├── postgres_repository.go    # PostgreSQL implementation (ownership as a JOIN through tasks)
+│   │   └── postgres_repository_test.go   # Integration tests — build-tagged `integration`
 │   ├── config/                # Environment variable loading and validation (the only package that reads os.Getenv)
 │   ├── middleware/             # RequestID, Logging, Recovery, CORS, generic context helpers — no domain knowledge
 │   ├── platform/
@@ -118,6 +125,21 @@ task-api/
 ### Ownership model: strict per-user, no roles
 
 Every task carries a `UserID`. Every `Repository` method that touches an existing task takes (or, for `Update`, checks against) the owning user, and filters at the query level — not "fetch then check in Go." A task that exists but belongs to someone else is reported identically to a task that doesn't exist at all: `ErrNotFound` → `404`. This is deliberate, not an oversight — returning a distinct "forbidden" response would let a caller learn that a given task ID exists even without access to it. There is no admin role or shared-access path; if that's ever needed, it's a new, explicit capability, not a relaxation of this rule (see [Future Improvements](#future-improvements)).
+
+### Attachments: ownership is a chain, not a copy
+
+An attachment belongs to a task, and that task belongs to a user. `attachments` therefore carries **no `user_id` of its own** — duplicating the owner would create a second copy of a fact that can then disagree with the first, and the disagreement would be an authorization bug rather than a stale display.
+
+Every `attachment.Repository` method takes the acting `userID` and reaches the owner through that chain. The two implementations express the same rule differently, and that asymmetry is deliberate:
+
+- `postgresRepository` makes it a `JOIN tasks`, so the ownership rule and the lookup are one operation. `Create` is an `INSERT ... SELECT` whose `SELECT` produces a row only when the task exists *and* belongs to the caller, so hanging an attachment off somebody else's task inserts nothing — rather than being caught by a separate check that a later edit could reorder or skip.
+- `memoryRepository` cannot join against a table it does not have, so it takes a `TaskOwnershipFunc` at construction. The consumer supplies the check, which is what keeps `internal/attachment` from importing `internal/task` and violating the one-way dependency rule.
+
+What must **not** differ is the answer: an attachment on somebody else's task is `ErrNotFound`, and a `Create` against somebody else's task is `ErrTaskNotFound` — never a distinct "forbidden", for the same reason tasks work that way. `NewMemoryRepository(nil)` panics rather than defaulting to "allow", so an ownership check cannot go missing quietly and leave the unit suite passing.
+
+**A storage key is not a capability.** The download route addresses files by `storage_key`, and that key is on the wire. Possessing one grants nothing on its own: the lookup resolves the key to its row and still re-checks that the caller owns the task behind it. `storage_key` is a UUID rather than free text specifically so the type itself rejects anything that could be a path — no separator, dot segment, or traversal sequence survives a UUID parse — and `original_filename` is retained as metadata that is never used to build one.
+
+**Known gap: blobs are not cascaded.** `ON DELETE CASCADE` removes attachment *rows* when their task is deleted. Nothing in that path reaches the filesystem, so the stored bytes are orphaned. The schema has no way to reach them and neither does `Repository`; reclaiming that space is an operational task today.
 
 ### Authentication: opaque bearer session tokens, not JWT
 
