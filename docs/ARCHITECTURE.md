@@ -155,7 +155,11 @@ What must **not** differ is the answer: an attachment on somebody else's task is
 
 **A storage key is not a capability.** The download route addresses files by `storage_key`, and that key is on the wire. Possessing one grants nothing on its own: the lookup resolves the key to its row and still re-checks that the caller owns the task behind it. `storage_key` is a UUID rather than free text specifically so the type itself rejects anything that could be a path — no separator, dot segment, or traversal sequence survives a UUID parse — and `original_filename` is retained as metadata that is never used to build one.
 
-**Known gap: blobs are not cascaded.** `ON DELETE CASCADE` removes attachment *rows* when their task is deleted. Nothing in that path reaches the filesystem, so the stored bytes are orphaned. The schema has no way to reach them and neither does `Repository`; reclaiming that space is an operational task today.
+**Blobs are reclaimed by a collector, not by the delete.** `ON DELETE CASCADE` removes attachment *rows* when their task is deleted, and nothing in that path reaches the filesystem. Rather than coupling the success of deleting a task to the success of deleting a file, a periodic sweep (`Service.CollectOrphans`, run from `cmd/api`'s `runPeriodicCleanup`) removes blobs that no row references. That is the same cost reasoning as writing bytes before metadata: an orphaned blob costs disk and nothing else, so prefer the failure mode that leaves garbage over the one that blocks an operation.
+
+**The grace period is what makes that safe.** `ATTACHMENT_ORPHAN_MIN_AGE` (1h by default) is not a tuning knob. Upload writes the bytes before the metadata row, so in the window between those two steps a healthy upload is byte-for-byte indistinguishable from an orphan. A collector without a grace period would race every upload in flight and delete some of them — intermittently, under load, which is the worst way to find out. `CollectOrphans` rejects a non-positive age outright rather than letting a caller opt out of the margin, and `TestCollectOrphans_SparesBlobsInsideTheGracePeriod` pins it.
+
+The sweep also refuses to delete anything it cannot positively identify as its own: `Repository.UnreferencedKeys` filters candidates to well-formed storage keys, so a stray file in the storage directory survives. Every ambiguity in code that deletes things resolves toward keeping them.
 
 ### Attachment storage: two boundaries, and the order between them
 

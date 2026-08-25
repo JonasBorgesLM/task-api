@@ -296,3 +296,100 @@ func TestPostgres_Schema_RejectsNegativeSize(t *testing.T) {
 		t.Error("INSERT with a negative size_bytes succeeded, want the CHECK constraint to reject it")
 	}
 }
+
+// TestPostgres_UnreferencedKeys covers the query the orphan collector
+// depends on, including the two ways it must answer "no" — a key that a
+// row references, and a name that could not be a storage key at all.
+func TestPostgres_UnreferencedKeys(t *testing.T) {
+	repo, _, owner, _, taskID := newPostgresTestRepo(t)
+
+	referenced := newPostgresAttachment(t, taskID)
+	if err := repo.Create(context.Background(), referenced, owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	orphan := newUUID(t)
+
+	got, err := repo.UnreferencedKeys(context.Background(), []string{
+		referenced.StorageKey, // has a row
+		orphan,                // does not
+		"README",              // not a storage key at all
+		"../../etc/passwd",    // nor this
+	})
+	if err != nil {
+		t.Fatalf("UnreferencedKeys() unexpected error: %v", err)
+	}
+
+	if len(got) != 1 || got[0] != orphan {
+		t.Errorf("UnreferencedKeys() = %v, want exactly [%s]", got, orphan)
+	}
+}
+
+// TestPostgres_UnreferencedKeys_AfterTaskDeleteCascade is the scenario
+// the collector was written for, end to end at the storage layer:
+// deleting a task cascades the attachment row away, and the storage key
+// it pointed at becomes collectable.
+func TestPostgres_UnreferencedKeys_AfterTaskDeleteCascade(t *testing.T) {
+	repo, db, owner, _, taskID := newPostgresTestRepo(t)
+
+	att := newPostgresAttachment(t, taskID)
+	if err := repo.Create(context.Background(), att, owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	// Before the delete it is referenced and must not be collectable.
+	before, err := repo.UnreferencedKeys(context.Background(), []string{att.StorageKey})
+	if err != nil {
+		t.Fatalf("UnreferencedKeys() unexpected error: %v", err)
+	}
+	if len(before) != 0 {
+		t.Fatalf("UnreferencedKeys() = %v before the task was deleted, want empty", before)
+	}
+
+	if _, err := db.ExecContext(context.Background(), `DELETE FROM tasks WHERE id = $1::uuid`, taskID); err != nil {
+		t.Fatalf("delete task: %v", err)
+	}
+
+	after, err := repo.UnreferencedKeys(context.Background(), []string{att.StorageKey})
+	if err != nil {
+		t.Fatalf("UnreferencedKeys() unexpected error: %v", err)
+	}
+	if len(after) != 1 || after[0] != att.StorageKey {
+		t.Errorf("UnreferencedKeys() = %v after the cascade, want [%s]", after, att.StorageKey)
+	}
+}
+
+// TestPostgres_UnreferencedKeys_ScopelessByDesign pins the one place
+// this package deliberately ignores ownership. Scoping the query to a
+// user would report another user's live attachment as unreferenced, and
+// the collector would then delete it.
+func TestPostgres_UnreferencedKeys_ScopelessByDesign(t *testing.T) {
+	repo, db, owner, stranger, taskID := newPostgresTestRepo(t)
+
+	// An attachment on a second task, owned by the other user.
+	strangerTask := newUUID(t)
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO tasks (id, user_id, title, description, status, priority, created_at, updated_at, version)
+		VALUES ($1::uuid, $2::uuid, 'theirs', '', 'pending', 'medium', now(), now(), 1)
+	`, strangerTask, stranger); err != nil {
+		t.Fatalf("insert stranger task: %v", err)
+	}
+
+	theirs := newPostgresAttachment(t, strangerTask)
+	if err := repo.Create(context.Background(), theirs, stranger); err != nil {
+		t.Fatalf("Create() for the stranger unexpected error: %v", err)
+	}
+
+	mine := newPostgresAttachment(t, taskID)
+	if err := repo.Create(context.Background(), mine, owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	got, err := repo.UnreferencedKeys(context.Background(), []string{mine.StorageKey, theirs.StorageKey})
+	if err != nil {
+		t.Fatalf("UnreferencedKeys() unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("UnreferencedKeys() = %v, want empty — both keys are referenced, and whose task they hang off is irrelevant here", got)
+	}
+}

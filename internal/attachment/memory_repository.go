@@ -135,3 +135,25 @@ func (r *memoryRepository) FindByTask(ctx context.Context, taskID, userID string
 
 	return attachments, nil
 }
+
+func (r *memoryRepository) UnreferencedKeys(ctx context.Context, keys []string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	r.mu.RLock()
+	referenced := make(map[string]struct{}, len(r.store))
+	for _, existing := range r.store {
+		referenced[existing.StorageKey] = struct{}{}
+	}
+	r.mu.RUnlock()
+
+	unreferenced := make([]string, 0)
+	for _, key := range keys {
+		if _, ok := referenced[key]; !ok {
+			unreferenced = append(unreferenced, key)
+		}
+	}
+
+	return unreferenced, nil
+}

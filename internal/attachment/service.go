@@ -209,6 +209,84 @@ func (s *Service) ListByTask(ctx context.Context, userID, taskID string) ([]Atta
 	return attachments, nil
 }
 
+// CollectOrphans deletes blobs that no attachment row references and
+// that have been sitting untouched for at least minAge. It returns how
+// many it removed.
+//
+// # Why a collector rather than deleting on the spot
+//
+// Deleting a task cascades its attachment rows away in the database, and
+// nothing in that path can reach the filesystem. The alternative — having
+// Service delete the blobs as part of the task delete — would couple the
+// success of deleting a task to the success of deleting a file, for a
+// resource whose loss costs disk space and nothing else. That is the same
+// cost reasoning behind writing bytes before metadata in Upload: prefer
+// the failure mode that leaves garbage over the one that leaves a broken
+// reference or a blocked operation.
+//
+// # Why minAge is not optional
+//
+// Upload writes the blob before the metadata row. In the window between
+// those two steps a perfectly healthy upload looks exactly like an
+// orphan: bytes on disk that no row references. A collector without a
+// grace period would race every upload in flight and delete some of them
+// — turning a maintenance job into data loss, intermittently and under
+// load, which is the worst way to find out.
+//
+// minAge must therefore exceed the longest plausible gap between those
+// two steps: the time to stream a large upload to disk plus the time to
+// insert a row. A caller passing zero gets an error rather than a fast
+// collector.
+//
+// # What it will not delete
+//
+// Only names the store reports that the Repository confirms are
+// unreferenced. A name that could not have been written by this
+// application — anything that is not a storage key — is not reported as
+// unreferenced by Repository.UnreferencedKeys, so a stray file in the
+// storage directory is left alone. This function deletes things; every
+// ambiguity resolves toward keeping them.
+func (s *Service) CollectOrphans(ctx context.Context, minAge time.Duration) (int, error) {
+	if minAge <= 0 {
+		return 0, fmt.Errorf("%w: orphan collection requires a positive minimum age", ErrInvalidInput)
+	}
+
+	refs, err := s.blobs.List(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("collect orphans: %w", err)
+	}
+
+	cutoff := s.nowFunc().Add(-minAge)
+	candidates := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref.ModTime.Before(cutoff) {
+			candidates = append(candidates, ref.Key)
+		}
+	}
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+
+	orphans, err := s.repo.UnreferencedKeys(ctx, candidates)
+	if err != nil {
+		return 0, fmt.Errorf("collect orphans: %w", err)
+	}
+
+	deleted := 0
+	for _, key := range orphans {
+		if err := s.blobs.Delete(ctx, key); err != nil {
+			// Report what was achieved along with the failure. A pass
+			// that removed some files and then hit an I/O error has
+			// still done that work, and the caller logging "0 removed"
+			// would be wrong about it.
+			return deleted, fmt.Errorf("collect orphans: %w", err)
+		}
+		deleted++
+	}
+
+	return deleted, nil
+}
+
 // detectContentType identifies the bytes and strips any parameters from
 // the result, so that "text/plain; charset=utf-8" is matched against the
 // allow-list as "text/plain" — the parameter describes the encoding, not

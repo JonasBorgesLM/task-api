@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -194,4 +195,79 @@ func isUniqueViolation(err error) bool {
 func isForeignKeyViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == postgreSQLForeignKeyViolation
+}
+
+func (r *postgresRepository) UnreferencedKeys(ctx context.Context, keys []string) ([]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	// One statement rather than a query per key: the collector runs over
+	// everything in the store, and a round trip each would make the pass
+	// cost scale with the number of files rather than with the number of
+	// orphans.
+	//
+	// The candidate keys arrive as an array and the join finds which of
+	// them have no row. They are cast to uuid because storage_key is a
+	// uuid column — and that cast is also a filter: a name in the store
+	// that is not a UUID cannot be a storage key this application wrote,
+	// so it must not be reported as an unreferenced one for deletion.
+	// Hence the WHERE on the input side, before the cast.
+	const query = `
+		SELECT k
+		FROM unnest($1::text[]) AS k
+		WHERE k ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM attachments a WHERE a.storage_key = k::uuid
+		  )
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, pqTextArray(keys))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: find unreferenced storage keys: %w", err)
+	}
+	defer rows.Close()
+
+	unreferenced := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("postgres: scan unreferenced key: %w", err)
+		}
+		unreferenced = append(unreferenced, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: find unreferenced storage keys: %w", err)
+	}
+
+	return unreferenced, nil
+}
+
+// pqTextArray renders keys as a PostgreSQL text[] literal.
+//
+// database/sql has no array type of its own, and pgx's stdlib driver
+// passes a []string through as an opaque value rather than as an array,
+// so the literal is built here. Each element is double-quoted with
+// backslashes and quotes escaped — the keys are server-generated UUIDs
+// and cannot contain either, but building the literal correctly is
+// cheaper than relying on that and re-auditing it if key generation ever
+// changes.
+func pqTextArray(keys []string) string {
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, key := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('"')
+		for _, r := range key {
+			if r == '"' || r == '\\' {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(r)
+		}
+		b.WriteByte('"')
+	}
+	b.WriteByte('}')
+	return b.String()
 }

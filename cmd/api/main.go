@@ -262,6 +262,10 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	// failing. See config.Config.AttachmentStorageDir for why there is
 	// no default — a `scratch` image has nowhere to write.
 	closeBlobs := func() error { return nil }
+	// nil when attachments are disabled: there is no store to sweep, and
+	// runPeriodicCleanup skips the pass rather than being handed a
+	// function that pretends to do nothing.
+	var collectOrphans func(context.Context) (int, error)
 	if cfg.AttachmentStorageDir != "" {
 		blobs, closeStore, err := attachment.NewFSBlobStore(cfg.AttachmentStorageDir)
 		if err != nil {
@@ -295,6 +299,9 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 
 		attachmentSvc := attachment.NewService(attachmentRepo, blobs, cfg.AttachmentMaxBytes)
 		attachment.NewHandler(attachmentSvc, logger, cfg.AttachmentMaxBytes).RegisterRoutes(v1, authenticated)
+		collectOrphans = func(ctx context.Context) (int, error) {
+			return attachmentSvc.CollectOrphans(ctx, cfg.AttachmentOrphanMinAge)
+		}
 	}
 
 	// Mount the versioned contract. StripPrefix is what lets the handlers
@@ -320,7 +327,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	registerReadinessRoute(root, db, logger)
 	root.Handle("/", globalLimiter.Middleware(mux))
 
-	go runPeriodicCleanup(ctx, userSvc, logger)
+	go runPeriodicCleanup(ctx, userSvc, collectOrphans, logger)
 
 	// Cross-cutting HTTP concerns, applied to every route. Order matters:
 	// RequestID must run first so Logging and Recovery can read the
@@ -515,11 +522,18 @@ func userIDKey(r *http.Request) (string, error) {
 	return id, nil
 }
 
-// runPeriodicCleanup periodically prunes expired sessions until ctx is
-// canceled. A failed pass is logged but never treated as fatal — session
-// expiry is enforced on the per-request path regardless (ValidateToken
-// rejects and deletes an expired session on next use), so a transient DB
-// hiccup here must not crash the server or block request handling.
+// runPeriodicCleanup periodically prunes expired sessions and sweeps
+// orphaned attachment blobs until ctx is canceled. collectOrphans is nil
+// when attachments are disabled, and that pass is then skipped.
+//
+// A failed pass is logged but never treated as fatal. Session expiry is
+// enforced on the per-request path regardless (ValidateToken rejects and
+// deletes an expired session on next use), and an orphaned blob costs
+// disk and nothing else — neither is worth crashing the server or
+// blocking request handling over a transient failure.
+//
+// The two passes are independent: a session prune that fails must not
+// skip the orphan sweep, so each is checked and logged on its own.
 //
 // The rate limiters used to be swept here too. They no longer need it:
 // each owns a bounded store that caps how many buckets it tracks and
@@ -527,7 +541,7 @@ func userIDKey(r *http.Request) (string, error) {
 // periodic sweep of an unbounded map — a sweep every hour still leaves
 // 59 minutes for a client cycling through an IPv6 /64 to grow that map
 // without limit.
-func runPeriodicCleanup(ctx context.Context, userSvc *user.Service, logger *slog.Logger) {
+func runPeriodicCleanup(ctx context.Context, userSvc *user.Service, collectOrphans func(context.Context) (int, error), logger *slog.Logger) {
 	ticker := time.NewTicker(sessionCleanupInterval)
 	defer ticker.Stop()
 
@@ -538,6 +552,18 @@ func runPeriodicCleanup(ctx context.Context, userSvc *user.Service, logger *slog
 		case <-ticker.C:
 			if err := userSvc.PruneExpiredSessions(ctx); err != nil {
 				logger.Error("session cleanup failed", "error", err)
+			}
+
+			if collectOrphans != nil {
+				switch deleted, err := collectOrphans(ctx); {
+				case err != nil:
+					logger.Error("orphan blob cleanup failed", "error", err, "deleted", deleted)
+				case deleted > 0:
+					// Only logged when it did something. A line per hour
+					// saying "removed 0" is noise that trains readers to
+					// skip the ones that matter.
+					logger.Info("orphan blobs removed", "count", deleted)
+				}
 			}
 		}
 	}

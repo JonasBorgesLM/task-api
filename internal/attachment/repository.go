@@ -68,4 +68,19 @@ type Repository interface {
 	// task is not the caller's, so "no attachments" and "not your task"
 	// stay distinguishable to the caller that is entitled to know.
 	FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error)
+
+	// UnreferencedKeys returns those of the given storage keys that no
+	// attachment row references.
+	//
+	// It is the one method here that takes no userID, and the exception
+	// is deliberate rather than an oversight: this answers a question
+	// about the store as a whole, for the orphan collector, and there is
+	// no acting user to scope it to. Scoping it would in fact make it
+	// wrong — a key belonging to another user's task is *referenced*,
+	// and reporting it as unreferenced would have the collector delete a
+	// live attachment.
+	//
+	// It is an operational method, not a request-path one. Nothing a
+	// client can reach should call it.
+	UnreferencedKeys(ctx context.Context, keys []string) ([]string, error)
 }

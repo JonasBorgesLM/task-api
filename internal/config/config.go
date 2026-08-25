@@ -106,6 +106,14 @@ const (
 	// single request cannot occupy a meaningful share of a modest disk.
 	// It bounds one attachment, not a user's total.
 	defaultAttachmentMaxBytes = 10 << 20
+
+	// defaultAttachmentOrphanMinAge is one hour: far longer than any
+	// upload this service accepts could take to land (10 MiB streamed to
+	// local disk, plus one INSERT), and short enough that space from a
+	// deleted task is reclaimed the same day. The margin is deliberately
+	// lopsided — the cost of being too generous is disk, the cost of
+	// being too tight is deleting an upload in flight.
+	defaultAttachmentOrphanMinAge = 1 * time.Hour
 )
 
 // Config holds all application configuration values. It is independent of
@@ -228,6 +236,20 @@ type Config struct {
 	// Content-Length, which the client writes and can understate.
 	AttachmentMaxBytes int64
 
+	// AttachmentOrphanMinAge is how long a blob must have sat
+	// unreferenced before the orphan collector will delete it (see
+	// attachment.Service.CollectOrphans). Ignored when attachments are
+	// disabled.
+	//
+	// This is a safety margin, not a tuning knob. Uploads write bytes
+	// before the metadata row, so during that window a healthy upload is
+	// indistinguishable from an orphan; the value has to exceed the
+	// longest plausible gap between those two steps — streaming a large
+	// upload to disk, plus the insert. Lowering it to reclaim space
+	// sooner trades against deleting uploads in flight, which is a
+	// far worse failure than a late reclaim.
+	AttachmentOrphanMinAge time.Duration
+
 	// Rate-limit tiers. Burst is the token bucket's depth, PerSec the
 	// rate it refills at; see the defaults above for what each tier is
 	// for and cmd/api/main.go's newServer for how they are composed.
@@ -335,6 +357,10 @@ func Load() (Config, error) {
 	cfg.AttachmentStorageDir = strings.TrimSpace(os.Getenv("ATTACHMENT_STORAGE_DIR"))
 
 	if cfg.AttachmentMaxBytes, err = parsePositiveInt64("ATTACHMENT_MAX_BYTES", defaultAttachmentMaxBytes); err != nil {
+		return Config{}, err
+	}
+
+	if cfg.AttachmentOrphanMinAge, err = parseDuration("ATTACHMENT_ORPHAN_MIN_AGE", defaultAttachmentOrphanMinAge); err != nil {
 		return Config{}, err
 	}
 

@@ -102,11 +102,28 @@ Deletar uma task remove os anexos por cascade no banco, mas os bytes
 correspondentes não são removidos automaticamente do `BlobStore` — as duas
 fronteiras (Repository/BlobStore) são independentes também na deleção.
 
-**Decisão pendente (issue própria em aberto):** delete síncrono do blob no
-`Service` vs. coletor de órfãos periódico. Recomendação registrada:
-coletor de órfãos, pelo mesmo raciocínio de custo da ordem bytes-primeiro
-— um blob órfão custa só disco, não vale acoplar o sucesso do delete da
-task ao sucesso do delete de arquivo.
+**Decisão tomada:** coletor de órfãos periódico, não delete síncrono —
+pelo mesmo raciocínio de custo da ordem bytes-primeiro. Um blob órfão
+custa só disco; não vale acoplar o sucesso do delete da task ao sucesso
+do delete de arquivo.
+
+Implementado em `Service.CollectOrphans`, rodado pelo
+`runPeriodicCleanup` do `cmd/api`.
+
+**O período de carência não é opcional, e é a parte que importa.** Como o
+upload grava os bytes antes da linha de metadado, existe uma janela em
+que um upload perfeitamente saudável é indistinguível de um órfão: um
+arquivo que nenhuma linha referencia. Um coletor sem carência correria
+contra todo upload em voo e apagaria alguns — de forma intermitente e sob
+carga, que é o pior jeito de descobrir. `ATTACHMENT_ORPHAN_MIN_AGE` (1h
+por padrão) tem que exceder o maior intervalo plausível entre os dois
+passos, e `CollectOrphans` recusa idade não positiva em vez de deixar
+alguém abrir mão da margem.
+
+O coletor também só apaga o que consegue identificar positivamente como
+seu: `UnreferencedKeys` filtra os candidatos a storage keys bem formadas,
+então um arquivo estranho no diretório sobrevive. Em código que apaga
+coisas, toda ambiguidade resolve para manter.
 
 ---
 

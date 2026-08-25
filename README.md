@@ -66,6 +66,7 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `TRUSTED_PROXIES` | Comma-separated CIDRs/addresses of reverse proxies you operate. Only then is `X-Forwarded-For` used to key the address-based limits — list your proxies, never your clients | *(unset)* |
 | `ATTACHMENT_STORAGE_DIR` | Directory file attachments are stored under. Unset disables attachments entirely (the routes 404). Must already exist — there is no default because the `scratch` image has nowhere to write | *(unset)* |
 | `ATTACHMENT_MAX_BYTES` | Largest single attachment accepted | `10485760` (10 MiB) |
+| `ATTACHMENT_ORPHAN_MIN_AGE` | How long a blob must sit unreferenced before the orphan collector removes it. A safety margin against deleting uploads in flight, not a tuning knob | `1h` |
 
 `config.Load()` returns an error (and the process refuses to start) if a timeout/TTL/max-age isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
