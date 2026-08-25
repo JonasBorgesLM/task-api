@@ -77,10 +77,22 @@ chama* `guard.Open` em vez de `os.Open` direto — um refactor que trocasse
 essa chamada deixaria o fuzz do moat verde e o nosso vermelho. Os dois
 testes são necessários; nenhum substitui o outro.
 
-**Estado atual (pendência):** hoje o CI só executa o fuzz autoral do
-task-api. O `FuzzResolve` do moat não roda neste pipeline — exigiria
-checkout do módulo e uma etapa própria. Ver issue de CI para fechar essa
-lacuna.
+**Onde cada um roda:** o fuzz autoral roda no CI do task-api
+(`Fuzz (path containment)`, 45s). O `FuzzResolve` roda no CI do **moat**
+(job `short fuzz run`, 30s), a cada mudança lá — que é quando o
+containment do `pathguard` pode de fato regredir.
+
+Isso não é lacuna, é a divisão correta. Uma PR do task-api não pode
+alterar o `pathguard`, então refuzzá-lo aqui rodaria contra uma tag cujo
+fuzz já passou, sem nunca poder falhar por algo nosso. Detalhe técnico
+que a investigação produziu e vale preservar: `go test -fuzz` só executa
+alvo do módulo **principal** do build, então rodar o `FuzzResolve` daqui
+exigiria checkout separado do moat — não basta a dependência estar no
+`go.sum`.
+
+O risco que sobra é subir o moat para uma versão cujo CI não passou. Se
+isso vier a preocupar, a resposta é uma verificação de versão barata, não
+um refuzz.
 
 ---
 
