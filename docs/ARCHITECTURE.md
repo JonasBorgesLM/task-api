@@ -72,7 +72,11 @@ task-api/
 │   │   ├── repository.go             # Repository interface + TaskOwnershipFunc — ownership reached through the task
 │   │   ├── memory_repository.go      # In-memory implementation (ownership via the injected TaskOwnershipFunc)
 │   │   ├── postgres_repository.go    # PostgreSQL implementation (ownership as a JOIN through tasks)
-│   │   └── postgres_repository_test.go   # Integration tests — build-tagged `integration`
+│   │   ├── postgres_repository_test.go   # Integration tests — build-tagged `integration`
+│   │   ├── storage.go                # BlobStore: the bytes, behind a pathguard.Guard
+│   │   ├── storage_test.go           # Traversal/symlink containment + FuzzFSBlobStore_OpenNeverEscapesRoot
+│   │   ├── service.go                # Upload/Download/ListByTask: allow-list, key generation, size limit
+│   │   └── handler.go                # POST/GET /tasks/{id}/attachments, GET /files/{key}
 │   ├── config/                # Environment variable loading and validation (the only package that reads os.Getenv)
 │   ├── middleware/             # RequestID, Logging, Recovery, CORS, generic context helpers — no domain knowledge
 │   ├── platform/
@@ -140,6 +144,20 @@ What must **not** differ is the answer: an attachment on somebody else's task is
 **A storage key is not a capability.** The download route addresses files by `storage_key`, and that key is on the wire. Possessing one grants nothing on its own: the lookup resolves the key to its row and still re-checks that the caller owns the task behind it. `storage_key` is a UUID rather than free text specifically so the type itself rejects anything that could be a path — no separator, dot segment, or traversal sequence survives a UUID parse — and `original_filename` is retained as metadata that is never used to build one.
 
 **Known gap: blobs are not cascaded.** `ON DELETE CASCADE` removes attachment *rows* when their task is deleted. Nothing in that path reaches the filesystem, so the stored bytes are orphaned. The schema has no way to reach them and neither does `Repository`; reclaiming that space is an operational task today.
+
+### Attachment storage: two boundaries, and the order between them
+
+Metadata and bytes are separate boundaries — `Repository` and `BlobStore` — because they fail independently and are backed by entirely different things. Losing a row and losing a file are different incidents with different recoveries.
+
+**Bytes are written first, metadata second**, and the order is a choice rather than an accident. The reverse would leave a row pointing at a file that does not exist: a download that 500s forever with nothing to indicate why. This order can leave an unreferenced blob instead, which costs disk and nothing else. `Service.Upload` deletes the blob when the metadata write fails, on a best-effort basis: if that cleanup also fails, the original error is what the caller sees, because losing it to report a cleanup problem would hide the actual cause.
+
+**The content type comes from the bytes.** `http.DetectContentType` decides, and the declared `Content-Type` is ignored for the allow-list — a client writes that header, so trusting it would make the allow-list decorative. The detected type is what is stored, so a download describes what it is actually serving. The list is short and every entry is a format a browser will not execute in this origin; `text/html` is excluded deliberately, because attacker-authored HTML served from this API's origin would run as same-origin script.
+
+**Downloads go out as `Content-Disposition: attachment`.** That, together with the `X-Content-Type-Options: nosniff` every response already carries, is what keeps user-supplied bytes from being rendered in this origin. The filename is encoded with `mime.FormatMediaType`, so a name containing a quote or a non-ASCII character cannot break out of the header value.
+
+**Containment is the store's property, not the key format's.** Keys are server-generated UUIDs, so none of them *can* contain a separator or a dot segment today. The `pathguard.Guard` is not there because the keys are untrusted — it is there so that the safety of this code does not depend on that remaining true, and a future change to key generation cannot quietly turn this into a traversal bug. `Guard.Open`/`Guard.Create` enforce containment at the syscall layer, which is stronger than validating a string and then calling `os.Open`: the latter re-resolves every component and reopens exactly the symlink race the package exists to close. `FuzzFSBlobStore_OpenNeverEscapesRoot` asserts the invariant directly and runs in CI.
+
+**The feature is opt-in** (`ATTACHMENT_STORAGE_DIR`), and with it unset the routes are not registered at all rather than existing and failing. There is no default path because the production image is a static binary on `scratch`, which has no writable filesystem — a default would produce a deployment that accepts uploads and then fails every one of them. The directory must already exist; the process does not create it, so a typo fails at startup instead of silently serving an empty tree.
 
 ### Authentication: opaque bearer session tokens, not JWT
 
