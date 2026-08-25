@@ -127,6 +127,54 @@ coisas, toda ambiguidade resolve para manter.
 
 ---
 
+## Cliente de object storage: minio-go, não aws-sdk-go-v2
+
+**Os motivos que se sustentam:**
+
+- **Um require direto**, não vários. O `minio-go` é um módulo só no
+  `go.mod`; o `aws-sdk-go-v2` exige ao menos `service/s3` e `config`.
+- **Agnóstico de provedor por construção.** O mesmo cliente fala com
+  MinIO em desenvolvimento e com S3 real em produção, sem código
+  condicional — nenhum dos dois ambientes exercita um caminho que o
+  outro nunca roda.
+- **Puro Go**, que é o que mantém o build estático em `scratch`.
+- **IAM não é requisito.** O SDK da AWS ganharia em roles via metadata /
+  IRSA em EKS. Autenticação por access key/secret basta aqui. **Se o
+  alvo virar EKS com IRSA, esta decisão merece revisita** — é o único
+  ponto em que o SDK da AWS é claramente superior.
+
+**Um motivo que NÃO se sustenta, registrado para ninguém repetir.** A
+formulação inicial citava o `minio-go` como mais enxuto. Medindo os
+módulos que de fato contribuem pacotes para o build (não o grafo inteiro
+do `go list -m all`): `minio-go` traz **19**, `aws-sdk-go-v2` (s3 +
+config) traz **18**. São equivalentes, e o `minio-go` é marginalmente
+maior. Tamanho de dependência não foi o critério.
+
+---
+
+## Dois backends de anexo, e por que ambos existem
+
+`ATTACHMENT_STORAGE_DIR` (filesystem) e `ATTACHMENT_S3_ENDPOINT` (object
+storage) são alternativas, não complementos — configurar os dois é
+recusado na subida.
+
+**Por quê ambos:** o filesystem não precisa de serviço nenhum, o que é o
+que torna desenvolvimento local e a suíte de testes baratos. Ele não pode
+respaldar um deploy que precisa sobreviver a rolling update: o disco
+local de um pod não é compartilhado com o pod que o substitui, e some se
+o pod for reagendado em outro nó.
+
+**Por que recusar os dois juntos em vez de escolher um:** o que perdesse
+guardaria arquivos que o processo em execução não enxerga, e isso
+apareceria como anexo sumido — não como erro de configuração.
+
+**O que garante que não divirjam:** `runBlobStoreContract` roda o mesmo
+conjunto de asserções contra as duas implementações. Uma asserção que só
+existisse para o filesystem seria uma que o S3 pode falhar em silêncio,
+em produção, onde ninguém está olhando.
+
+---
+
 ## Configuração de storage: obrigatória, sem default
 
 `ATTACHMENT_STORAGE_DIR` não tem valor padrão. Sem ela definida, as rotas

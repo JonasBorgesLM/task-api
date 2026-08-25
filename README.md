@@ -22,14 +22,14 @@ Every task belongs to exactly one user, authenticated with a bearer session toke
 - **Swappable persistence with zero business-logic coupling.** `Service` and `Handler` (in both the `task` and `user` domains) never import PostgreSQL — the in-memory store and the PostgreSQL store implement the exact same `Repository` interface, and swapping one for the other requires no change above the repository layer.
 - **Real production concerns, already handled.** Graceful shutdown, liveness/readiness checks, structured JSON logs correlated by request ID, panic recovery, optimistic concurrency control on every update, embedded schema migrations, and a seed tool for a non-trivial local dataset.
 - **A test suite you can actually trust.** Fakes instead of a mocking framework, real concurrent goroutines (run under `-race`) for every concurrency-sensitive path, and a hard build-tag boundary between tests that need PostgreSQL and tests that don't.
-- **A minimal, auditable dependency footprint.** Three runtime dependencies (`pgx` for PostgreSQL, `golang.org/x/crypto` for password hashing, [`moat`](https://github.com/JonasBorgesLM/moat) for rate limiting and response security headers), all pure Go and `moat` itself dependency-free — which is what lets the Docker image be a static binary on `scratch`: no shell, no libc, nothing to patch.
+- **A small, deliberate dependency footprint.** Four runtime dependencies (`pgx` for PostgreSQL, `golang.org/x/crypto` for password hashing, [`moat`](https://github.com/JonasBorgesLM/moat) for rate limiting and response security headers, [`minio-go`](https://github.com/minio/minio-go) for S3-compatible attachment storage), all pure Go — which is what lets the Docker image be a static binary on `scratch`: no shell, no libc, nothing to patch. Each one is there because something in the deployment story needs it, and `minio-go` was chosen over the AWS SDK for reasons recorded in [docs/DECISIONS.md](docs/DECISIONS.md) — notably that one client addresses MinIO in development and S3 in production, so neither environment runs a path the other never exercises.
 
 For AI agents (or new contributors) working in this codebase, see **[CLAUDE.md](CLAUDE.md)** — architecture rules, conventions, and things not to change casually. For the full project structure, the rationale behind each design decision, and the roadmap, see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**. For the decisions that are easy to reverse by accident — and why — see **[docs/DECISIONS.md](docs/DECISIONS.md)**. For the full API contract, see **[docs/openapi.yaml](docs/openapi.yaml)**.
 
 ## Requirements
 
 - **Go 1.26+**, matching `go.mod`.
-- **No external service needed for the core application or the in-memory store** — the entire unit test suite runs without one. Of the three runtime dependencies, [`pgx/v5`](https://github.com/jackc/pgx) matters only once `DATABASE_URL` is configured, [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) only when a password is hashed, and [`moat`](https://github.com/JonasBorgesLM/moat) is in the request path but talks to nothing outside the process.
+- **No external service needed for the core application or the in-memory store** — the entire unit test suite runs without one. Of the four runtime dependencies, [`pgx/v5`](https://github.com/jackc/pgx) matters only once `DATABASE_URL` is configured, [`minio-go`](https://github.com/minio/minio-go) only once `ATTACHMENT_S3_ENDPOINT` is, [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) only when a password is hashed, and [`moat`](https://github.com/JonasBorgesLM/moat) is in the request path but talks to nothing outside the process.
 - **[Docker](https://www.docker.com/) and Docker Compose** (optional) — to run PostgreSQL locally without installing it directly.
 - **[`staticcheck`](https://staticcheck.dev/)** and **[`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck)** (optional) — used by `make lint` and `make vulncheck`; both installed automatically on first use if missing.
 
@@ -67,6 +67,9 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `ATTACHMENT_STORAGE_DIR` | Directory file attachments are stored under. Unset disables attachments entirely (the routes 404). Must already exist — there is no default because the `scratch` image has nowhere to write | *(unset)* |
 | `ATTACHMENT_MAX_BYTES` | Largest single attachment accepted | `10485760` (10 MiB) |
 | `ATTACHMENT_ORPHAN_MIN_AGE` | How long a blob must sit unreferenced before the orphan collector removes it. A safety margin against deleting uploads in flight, not a tuning knob | `1h` |
+| `ATTACHMENT_S3_ENDPOINT` | Object-storage backend, as `host[:port]` without a scheme. The alternative to `ATTACHMENT_STORAGE_DIR` — setting both is rejected at startup. Required for any deployment where the process can move between machines | *(unset)* |
+| `ATTACHMENT_S3_BUCKET` / `..._ACCESS_KEY` / `..._SECRET_KEY` | Required when the endpoint is set. The bucket must already exist | *(unset)* |
+| `ATTACHMENT_S3_REGION` / `ATTACHMENT_S3_USE_SSL` | Optional; SSL defaults to on (turn it off for the local MinIO) | — / `true` |
 
 `config.Load()` returns an error (and the process refuses to start) if a timeout/TTL/max-age isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
@@ -124,7 +127,7 @@ docker run --rm -p 8080:8080 \
 | | Unit | Integration |
 |---|---|---|
 | Exercises | `Service`/`Handler` (fakes), `memoryRepository`, `config`, `middleware`, a full HTTP stack over the real in-memory repositories — for both `task` and `user` | `postgresRepository` (both domains) against **real PostgreSQL** |
-| External dependency | None | PostgreSQL (`TEST_DATABASE_URL`) |
+| External dependency | None | PostgreSQL (`TEST_DATABASE_URL`) and MinIO (`TEST_S3_ENDPOINT`) — each skipped independently if its variable is unset |
 | Isolated by | Default build | `//go:build integration` on every `*/postgres_repository_test.go` — not even compiled by a plain `go test ./...` |
 | Speed | Milliseconds | Needs a live database |
 
@@ -134,6 +137,7 @@ make test-race           # unit tests + race detector
 make coverage             # unit tests + per-function coverage report
 
 make db-up                # start PostgreSQL
+make storage-up           # start MinIO and create the bucket
 make test-integration     # integration tests
 make test-integration-race
 make coverage-full        # unit + integration, true cross-package coverage
