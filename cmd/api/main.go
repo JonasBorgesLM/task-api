@@ -18,6 +18,7 @@ import (
 	"github.com/JonasBorgesLM/moat/realip"
 	"github.com/JonasBorgesLM/moat/secureheaders"
 
+	"github.com/JonasBorgesLM/task-api/internal/attachment"
 	"github.com/JonasBorgesLM/task-api/internal/config"
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 	"github.com/JonasBorgesLM/task-api/internal/platform/migrate"
@@ -249,6 +250,46 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	// They are cheap, they expose nothing (see registerReadinessRoute),
 	// and their volume is set by the orchestrator rather than by a
 	// client, so there is nothing here for a limiter to protect.
+	// Attachments are opt-in: with ATTACHMENT_STORAGE_DIR unset the
+	// routes are never registered, so they 404 rather than existing and
+	// failing. See config.Config.AttachmentStorageDir for why there is
+	// no default — a `scratch` image has nowhere to write.
+	closeBlobs := func() error { return nil }
+	if cfg.AttachmentStorageDir != "" {
+		blobs, closeStore, err := attachment.NewFSBlobStore(cfg.AttachmentStorageDir)
+		if err != nil {
+			closeDB()
+			return nil, nil, fmt.Errorf("open attachment storage: %w", err)
+		}
+		closeBlobs = closeStore
+
+		var attachmentRepo attachment.Repository
+		if db == nil {
+			// The in-memory Repository cannot join against a tasks
+			// table it does not have, so it is handed the ownership
+			// check instead — satisfied here from the task Repository
+			// that was already built. This is the seam that keeps
+			// internal/attachment from importing internal/task.
+			attachmentRepo = attachment.NewMemoryRepository(
+				func(ctx context.Context, taskID, userID string) (bool, error) {
+					_, err := taskRepo.FindByID(ctx, taskID, userID)
+					if errors.Is(err, task.ErrNotFound) {
+						return false, nil
+					}
+					if err != nil {
+						return false, err
+					}
+					return true, nil
+				},
+			)
+		} else {
+			attachmentRepo = attachment.NewPostgresRepository(db)
+		}
+
+		attachmentSvc := attachment.NewService(attachmentRepo, blobs, cfg.AttachmentMaxBytes)
+		attachment.NewHandler(attachmentSvc, logger, cfg.AttachmentMaxBytes).RegisterRoutes(mux, authenticated)
+	}
+
 	root := http.NewServeMux()
 	registerHealthRoute(root, logger)
 	registerReadinessRoute(root, db, logger)
@@ -323,6 +364,9 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 		globalLimiter.Close()
 		authLimiter.Close()
 		userLimiter.Close()
+		if err := closeBlobs(); err != nil {
+			return err
+		}
 		return closeDB()
 	}
 

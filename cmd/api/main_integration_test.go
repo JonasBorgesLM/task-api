@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -866,5 +868,237 @@ func TestNewServer_RejectsDangerousTrustedProxies(t *testing.T) {
 		}
 		_ = srv
 		t.Fatal("newServer() error = nil, want a refusal to trust the default route")
+	}
+}
+
+// --- attachments ---
+
+// attachmentConfig returns a testConfig with attachments enabled against
+// a temporary storage root. The root is created here because
+// NewFSBlobStore deliberately refuses a missing one.
+func attachmentConfig(t *testing.T) config.Config {
+	t.Helper()
+
+	cfg := testConfig()
+	cfg.AttachmentStorageDir = t.TempDir()
+	cfg.AttachmentMaxBytes = 4096
+	return cfg
+}
+
+// uploadFile posts one file to a task through the real multipart path.
+func uploadFile(t *testing.T, srv *httptest.Server, token, taskID, filename string, content []byte) *http.Response {
+	t.Helper()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatalf("write form file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/tasks/"+taskID+"/attachments", &body)
+	if err != nil {
+		t.Fatalf("build upload request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	return resp
+}
+
+// createTask drives POST /tasks and returns the new task's ID.
+func createTask(t *testing.T, srv *httptest.Server, token string) string {
+	t.Helper()
+
+	resp, err := srv.Client().Do(authedRequest(t, token, http.MethodPost, srv.URL+"/tasks", `{"title":"with attachments"}`))
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST /tasks status = %d, body = %s", resp.StatusCode, respBody)
+	}
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created task: %v", err)
+	}
+	return created.ID
+}
+
+// TestIntegration_AttachmentLifecycle drives the whole feature through
+// the real wiring: upload, list, download.
+func TestIntegration_AttachmentLifecycle(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, attachmentConfig(t), discardLogger()).Handler)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv)
+	taskID := createTask(t, srv, token)
+
+	content := append([]byte("%PDF-1.7\n"), []byte("report body")...)
+
+	uploadResp := uploadFile(t, srv, token, taskID, "report.pdf", content)
+	defer uploadResp.Body.Close()
+	if uploadResp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(uploadResp.Body)
+		t.Fatalf("upload status = %d, body = %s", uploadResp.StatusCode, respBody)
+	}
+
+	var uploaded struct {
+		StorageKey       string `json:"storage_key"`
+		OriginalFilename string `json:"original_filename"`
+		ContentType      string `json:"content_type"`
+		SizeBytes        int64  `json:"size_bytes"`
+	}
+	if err := json.NewDecoder(uploadResp.Body).Decode(&uploaded); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if uploaded.ContentType != "application/pdf" {
+		t.Errorf("content_type = %q, want application/pdf", uploaded.ContentType)
+	}
+	if uploaded.SizeBytes != int64(len(content)) {
+		t.Errorf("size_bytes = %d, want %d", uploaded.SizeBytes, len(content))
+	}
+
+	// List.
+	listResp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+"/tasks/"+taskID+"/attachments", ""))
+	if err != nil {
+		t.Fatalf("list attachments: %v", err)
+	}
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, want 200", listResp.StatusCode)
+	}
+	var listed []struct {
+		StorageKey string `json:"storage_key"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(listed) != 1 || listed[0].StorageKey != uploaded.StorageKey {
+		t.Fatalf("list = %+v, want exactly the uploaded attachment", listed)
+	}
+
+	// Download.
+	dlResp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+"/files/"+uploaded.StorageKey, ""))
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	defer dlResp.Body.Close()
+	if dlResp.StatusCode != http.StatusOK {
+		t.Fatalf("download status = %d, want 200", dlResp.StatusCode)
+	}
+
+	got, _ := io.ReadAll(dlResp.Body)
+	if !bytes.Equal(got, content) {
+		t.Errorf("downloaded bytes = %q, want %q", got, content)
+	}
+
+	// Content-Disposition: attachment is what stops a browser rendering
+	// user-uploaded bytes in this API's own origin.
+	if got := dlResp.Header.Get("Content-Disposition"); !strings.HasPrefix(got, "attachment") {
+		t.Errorf("Content-Disposition = %q, want it to start with \"attachment\"", got)
+	}
+	if got := dlResp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff — a browser must not re-decide the type", got)
+	}
+}
+
+// TestIntegration_Attachment_CrossUserIsRefused is the ownership rule
+// end to end, on both routes that accept an identifier the other user
+// legitimately holds.
+func TestIntegration_Attachment_CrossUserIsRefused(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, attachmentConfig(t), discardLogger()).Handler)
+	defer srv.Close()
+
+	ownerToken := registerAndLoginAs(t, srv, "owner@example.com")
+	strangerToken := registerAndLoginAs(t, srv, "stranger@example.com")
+
+	taskID := createTask(t, srv, ownerToken)
+
+	uploadResp := uploadFile(t, srv, ownerToken, taskID, "report.pdf", []byte("%PDF-1.7\nbody"))
+	defer uploadResp.Body.Close()
+	if uploadResp.StatusCode != http.StatusCreated {
+		t.Fatalf("owner upload status = %d, want 201", uploadResp.StatusCode)
+	}
+	var uploaded struct {
+		StorageKey string `json:"storage_key"`
+	}
+	if err := json.NewDecoder(uploadResp.Body).Decode(&uploaded); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+
+	// The stranger holds a real, valid storage key and must still be
+	// refused — indistinguishably from a key that names nothing.
+	dlResp, err := srv.Client().Do(authedRequest(t, strangerToken, http.MethodGet, srv.URL+"/files/"+uploaded.StorageKey, ""))
+	if err != nil {
+		t.Fatalf("stranger download: %v", err)
+	}
+	defer dlResp.Body.Close()
+	if dlResp.StatusCode != http.StatusNotFound {
+		t.Errorf("stranger download status = %d, want 404", dlResp.StatusCode)
+	}
+
+	listResp, err := srv.Client().Do(authedRequest(t, strangerToken, http.MethodGet, srv.URL+"/tasks/"+taskID+"/attachments", ""))
+	if err != nil {
+		t.Fatalf("stranger list: %v", err)
+	}
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusNotFound {
+		t.Errorf("stranger list status = %d, want 404", listResp.StatusCode)
+	}
+
+	upResp := uploadFile(t, srv, strangerToken, taskID, "evil.pdf", []byte("%PDF-1.7\nx"))
+	defer upResp.Body.Close()
+	if upResp.StatusCode != http.StatusNotFound {
+		t.Errorf("stranger upload status = %d, want 404", upResp.StatusCode)
+	}
+}
+
+func TestIntegration_Attachment_RejectsDisallowedType(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, attachmentConfig(t), discardLogger()).Handler)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv)
+	taskID := createTask(t, srv, token)
+
+	// An ELF binary, labelled as a PNG. The label is a claim; the bytes
+	// are what the allow-list is applied to.
+	resp := uploadFile(t, srv, token, taskID, "innocent.png", []byte("\x7fELF\x02\x01\x01\x00binary"))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("upload of a mislabelled binary: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestIntegration_Attachment_DisabledByDefault pins the opt-in: with no
+// storage directory configured the routes do not exist at all, rather
+// than existing and failing on every request.
+func TestIntegration_Attachment_DisabledByDefault(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv)
+	taskID := createTask(t, srv, token)
+
+	resp := uploadFile(t, srv, token, taskID, "report.pdf", []byte("%PDF-1.7\n"))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("upload with attachments disabled: status = %d, want 404", resp.StatusCode)
 	}
 }

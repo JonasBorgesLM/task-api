@@ -47,6 +47,11 @@ tags:
     description: Registration, login/logout, and the current user
   - name: Tasks
     description: Task lifecycle management (create, read, update, status transitions, delete) — every operation is scoped to the authenticated caller's own tasks
+  - name: Attachments
+    description: >
+      File attachments on a task. Present only when
+      ATTACHMENT_STORAGE_DIR is configured; otherwise these routes
+      return 404.
   - name: Health
     description: Liveness and readiness checks, for process supervisors and load balancers
   - name: Observability
@@ -779,6 +784,199 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /tasks/{id}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/TaskID'
+    post:
+      tags: [Attachments]
+      operationId: uploadAttachment
+      summary: Upload a file attachment to a task
+      description: >
+        Accepts one file in a `multipart/form-data` body, under the part
+        name `file`. Any other part is ignored.
+
+
+        The content type is determined from the bytes themselves, not
+        from the part's declared `Content-Type`: a client writes that
+        header and can put anything in it, so trusting it would make the
+        allow-list decorative. The detected type is what is stored and
+        what a later download reports. Accepted types are `image/jpeg`,
+        `image/png`, `image/gif`, `image/webp`, `application/pdf` and
+        `text/plain`; anything else is rejected with 400, including HTML,
+        which is excluded deliberately.
+
+
+        The client's filename is kept as metadata only and is never used
+        to build a path — the file is stored under a server-generated
+        `storage_key`. The size limit (`ATTACHMENT_MAX_BYTES`, 10 MiB by
+        default) is enforced while streaming, not read from
+        `Content-Length`.
+
+
+        These routes exist only when `ATTACHMENT_STORAGE_DIR` is
+        configured; otherwise every one of them returns 404.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: The attachment was stored.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Attachment'
+        '400':
+          description: >
+            The body was not multipart, carried no `file` part, exceeded
+            the size limit, or held a content type outside the
+            allow-list.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: 'invalid input: content type "application/octet-stream" is not accepted'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >
+            No such task for this user — or attachments are disabled. As
+            everywhere else in this API, a task belonging to another user
+            is reported the same way a missing one is.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: task not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      tags: [Attachments]
+      operationId: listAttachments
+      summary: List a task's attachments
+      description: >
+        Ordered oldest first, ties broken by id. Returns `[]` for a task
+        of yours with no attachments, and 404 for a task that is not
+        yours — the two are distinguishable only to the owner.
+      responses:
+        '200':
+          description: The task's attachments.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Attachment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No such task for this user, or attachments are disabled.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: task not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /files/{key}:
+    get:
+      tags: [Attachments]
+      operationId: downloadAttachment
+      summary: Download an attachment's contents
+      description: >
+        Addressed by `storage_key`, which is not a capability: holding one
+        grants nothing on its own, because the key is resolved to its
+        attachment and the owning task's ownership is re-checked before
+        any bytes are served. A key belonging to another user is answered
+        exactly like a key that names nothing.
+
+
+        The response carries `Content-Disposition: attachment` so a
+        browser saves the file rather than rendering user-supplied bytes
+        in this API's origin, and `X-Content-Type-Options: nosniff` (set
+        on every response) so it does not re-decide the type for itself.
+        Range requests are supported.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: The attachment's `storage_key`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The file contents.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+            Content-Disposition:
+              description: Always `attachment`, with the original filename as a parameter.
+              schema:
+                type: string
+                example: attachment; filename="report.pdf"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >
+            No attachment with this key for this user — covering both a
+            key that names nothing and one belonging to somebody else —
+            or attachments are disabled.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: attachment not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /debug/vars:
     get:
       tags: [Observability]
@@ -1211,6 +1409,56 @@ components:
           $ref: '#/components/schemas/Status'
       required:
         - status
+
+    Attachment:
+      type: object
+      description: >
+        Metadata about one file stored against a task. The bytes
+        themselves live outside the database, addressed by `storage_key`.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The attachment's own identifier.
+        task_id:
+          type: string
+          format: uuid
+          description: >
+            The task this file hangs off. The attachment has no owner of
+            its own — ownership is reached through this task.
+        original_filename:
+          type: string
+          maxLength: 255
+          description: >
+            What the client called the file, normalized (control
+            characters stripped, whitespace collapsed, any directory part
+            removed). Metadata only: it is never used to build a path, and
+            the file on disk is named by `storage_key`.
+          example: report.pdf
+        storage_key:
+          type: string
+          format: uuid
+          description: >
+            The identifier `GET /files/{key}` addresses this file by.
+            Server-generated and never derived from client input, which is
+            what makes it unable to carry a traversal sequence. It is not
+            a capability: a download still re-checks that the caller owns
+            the task behind it.
+        content_type:
+          type: string
+          description: >
+            The type detected from the bytes, not the one the upload
+            declared.
+          example: application/pdf
+        size_bytes:
+          type: integer
+          format: int64
+          description: The stored size, as measured while writing.
+          example: 20841
+        created_at:
+          type: string
+          format: date-time
+      required: [id, task_id, original_filename, storage_key, content_type, size_bytes, created_at]
 
     ErrorResponse:
       type: object

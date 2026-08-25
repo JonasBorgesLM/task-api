@@ -1,5 +1,5 @@
 .PHONY: help run build tidy clean \
-        test test-race test-integration test-integration-race coverage coverage-full \
+        test test-race test-integration test-integration-race coverage coverage-full fuzz \
         fmt fmt-check vet lint check \
         docker-build docker-up docker-down db-up \
         migrate-up migrate-down seed seed-reset db-reset
@@ -17,6 +17,11 @@ DATABASE_URL       ?= $(TEST_DATABASE_URL)
 # Override on the command line, e.g. `make seed SEED_USERS=20 SEED_TASKS_PER_USER=50`.
 SEED_USERS ?= 5
 SEED_TASKS_PER_USER ?= 10
+
+# How long `make fuzz` runs for. CI uses its own budget (see
+# .github/workflows/ci.yml); a longer one here is what you want when
+# deliberately hunting rather than guarding against regression.
+FUZZTIME ?= 45s
 
 ##@ Help
 
@@ -68,6 +73,9 @@ test-integration: ## Run PostgreSQL integration tests (needs `make db-up` first)
 
 test-integration-race: ## Run PostgreSQL integration tests with the race detector (needs `make db-up` first)
 	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -p 1 -tags=integration -race ./...
+
+fuzz: ## Fuzz the attachment store's path containment (override: `make fuzz FUZZTIME=5m`)
+	go test ./internal/attachment/ -run FuzzFSBlobStore_OpenNeverEscapesRoot -fuzz FuzzFSBlobStore_OpenNeverEscapesRoot -fuzztime $(FUZZTIME)
 
 coverage: ## Run unit tests and print a per-function coverage report
 	go test -coverprofile=coverage.out ./...

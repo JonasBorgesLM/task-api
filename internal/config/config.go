@@ -100,6 +100,12 @@ const (
 	defaultAuthRateLimitPer   = 0.05
 	defaultUserRateLimitBurst = 120
 	defaultUserRateLimitPer   = 40.0
+
+	// defaultAttachmentMaxBytes is 10 MiB — generous for the screenshots
+	// and PDFs a task tracker actually collects, and small enough that a
+	// single request cannot occupy a meaningful share of a modest disk.
+	// It bounds one attachment, not a user's total.
+	defaultAttachmentMaxBytes = 10 << 20
 )
 
 // Config holds all application configuration values. It is independent of
@@ -202,6 +208,26 @@ type Config struct {
 	// rejected outright for that reason.
 	TrustedProxies []string
 
+	// AttachmentStorageDir is the directory file attachments are stored
+	// under. Empty — the zero value — disables attachments entirely: the
+	// routes are not registered and requests to them 404.
+	//
+	// Opt-in rather than defaulted because the feature needs something
+	// this binary does not otherwise have. The Dockerfile builds a
+	// static binary into `scratch`, which has no writable filesystem at
+	// all, so a default path would produce a deployment that accepts
+	// uploads and then fails on every one of them. Naming the directory
+	// is also how the operator says a volume is actually mounted there.
+	//
+	// The directory must already exist; the process does not create it.
+	// See attachment.NewFSBlobStore.
+	AttachmentStorageDir string
+
+	// AttachmentMaxBytes is the largest single attachment accepted, in
+	// bytes. Enforced while streaming to storage rather than from
+	// Content-Length, which the client writes and can understate.
+	AttachmentMaxBytes int64
+
 	// Rate-limit tiers. Burst is the token bucket's depth, PerSec the
 	// rate it refills at; see the defaults above for what each tier is
 	// for and cmd/api/main.go's newServer for how they are composed.
@@ -303,6 +329,12 @@ func Load() (Config, error) {
 	// deployment (see Config.HSTSMaxAge). parseDuration rejects zero, so
 	// this one variable gets its own parser.
 	if cfg.HSTSMaxAge, err = parseNonNegativeDuration("HSTS_MAX_AGE", defaultHSTSMaxAge); err != nil {
+		return Config{}, err
+	}
+
+	cfg.AttachmentStorageDir = strings.TrimSpace(os.Getenv("ATTACHMENT_STORAGE_DIR"))
+
+	if cfg.AttachmentMaxBytes, err = parsePositiveInt64("ATTACHMENT_MAX_BYTES", defaultAttachmentMaxBytes); err != nil {
 		return Config{}, err
 	}
 
@@ -450,6 +482,26 @@ func parsePositiveFloat(name string, def float64) (float64, error) {
 	}
 
 	return f, nil
+}
+
+// parsePositiveInt64 is parsePositiveInt for a value that is a size in
+// bytes rather than a count. Sizes outgrow int on a 32-bit build, where
+// int is 32 bits and a perfectly reasonable 3 GiB limit would not fit.
+func parsePositiveInt64(name string, def int64) (int64, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def, nil
+	}
+
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s %q is not a valid integer: %w", name, raw, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("config: %s must be positive, got %q", name, raw)
+	}
+
+	return n, nil
 }
 
 // parseNonNegativeDuration is parseDuration for the one variable where
