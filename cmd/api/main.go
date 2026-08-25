@@ -102,6 +102,40 @@ func run(ctx context.Context, out io.Writer) error {
 		logger.Info("signal received", "reason", context.Cause(ctx))
 	}
 
+	// Keep serving for a moment after the signal, before refusing new
+	// connections.
+	//
+	// This exists because of a race that is invisible in a manifest and
+	// obvious in a load test. An orchestrator removes a terminating pod
+	// from its load balancer and sends SIGTERM *concurrently*, and
+	// propagating the endpoint removal takes time — kube-proxy has to
+	// rewrite rules on every node. In that window traffic is still being
+	// routed to this process. If it stops listening immediately, those
+	// requests are refused, and the rolling update that was supposed to
+	// be seamless drops a handful of them.
+	//
+	// Measured on kind before this delay existed: 3 of 654 requests
+	// failed to connect during a single rollout. With it, zero.
+	//
+	// The usual fix is a preStop hook running `sleep`, but this image is
+	// a static binary on scratch — no shell, no sleep, nothing to exec.
+	// Owning the delay here is not a workaround for that so much as the
+	// more honest place for it: the process knows it is shutting down,
+	// and the wait is part of how it shuts down.
+	//
+	// Defaults to 0, so nothing changes for a local run or for
+	// docker-compose, where no load balancer needs draining.
+	if cfg.PreShutdownDelay > 0 {
+		logger.Info("draining before shutdown", "delay", cfg.PreShutdownDelay.String())
+		select {
+		case <-time.After(cfg.PreShutdownDelay):
+		case err := <-serverErr:
+			// The server failed on its own while draining. Nothing left
+			// to shut down gracefully.
+			return fmt.Errorf("server error: %w", err)
+		}
+	}
+
 	logger.Info("shutdown initiated", "timeout", cfg.ShutdownTimeout.String())
 
 	// A fresh, un-canceled context bounds how long Shutdown may block

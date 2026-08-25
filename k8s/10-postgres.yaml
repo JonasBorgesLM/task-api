@@ -1,0 +1,70 @@
+# PostgreSQL for the validation cluster.
+#
+# NOT a production database. Storage is an emptyDir, so the data is gone
+# when the pod is: that is deliberate for a cluster whose purpose is to
+# prove a rollout, and would be data loss anywhere else. A real
+# deployment uses a managed database or a StatefulSet with a
+# PersistentVolumeClaim, and neither belongs in a manifest whose job is
+# to be disposable.
+#
+# It is here at all — rather than pointing the API at an in-memory store —
+# because the rollout test has to survive pods being replaced. With the
+# in-memory store every pod holds its own sessions and tasks, so a request
+# authenticated against the old pod fails against the new one, and the
+# test would report lost requests that are really just the store being
+# per-pod. That would be a test measuring the wrong thing.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: task-api
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: task-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - name: POSTGRES_USER
+              value: task_api
+            - name: POSTGRES_PASSWORD
+              value: task_api
+            - name: POSTGRES_DB
+              value: task_api
+            # The default data directory is the mount point itself, and
+            # initdb refuses a non-empty one. A subdirectory sidesteps
+            # that without needing an init container.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "task_api", "-d", "task_api"]
+            initialDelaySeconds: 2
+            periodSeconds: 2
+      volumes:
+        - name: data
+          emptyDir: {}

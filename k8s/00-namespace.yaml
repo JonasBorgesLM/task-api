@@ -1,0 +1,7 @@
+# Everything lives in one namespace so the whole validation environment
+# can be removed with a single delete, and so a `kubectl apply -f k8s/`
+# against a cluster that has other things in it cannot collide with them.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: task-api
