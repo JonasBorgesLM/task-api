@@ -98,6 +98,19 @@ jobs:
       - name: Test (unit, coverage)
         run: go test -cover ./...
 
+      # Path containment is the one property in this repo where a
+      # regression is both silent and severe: a blob store that stopped
+      # routing keys through pathguard would still pass every
+      # example-based test, because those all use well-formed UUID keys
+      # that have nothing to escape with.
+      #
+      # 45s is a deliberate compromise — well past the seed corpus at the
+      # ~100k exec/s this target sustains, short enough not to dominate
+      # the job. Scoped to one target because `go test` refuses to fuzz
+      # more than one per invocation.
+      - name: Fuzz (path containment)
+        run: go test ./internal/attachment/ -run FuzzFSBlobStore_OpenNeverEscapesRoot -fuzz FuzzFSBlobStore_OpenNeverEscapesRoot -fuzztime 45s
+
       # Integration tests: every integration-tagged package against the
       # real postgres service container declared above. -p 1 forces
       # packages to run sequentially rather than go test's default of one
