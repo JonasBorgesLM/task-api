@@ -9,9 +9,6 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
 ## [1.0.0] — a definir na tag
 
 ### Adicionado
-- Todas as rotas passam a exigir o prefixo `/v1`. Rotas operacionais
-  (`/health`, `/health/ready`, `/debug/vars`) permanecem sem prefixo,
-  deliberadamente — ver `docs/DECISIONS.md`.
 - Anexos em tasks: upload, download, dois backends de storage
   intercambiáveis (filesystem local ou S3-compatível via `minio-go`),
   coletor de blobs órfãos.
@@ -30,6 +27,10 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   drain configurável via `HTTP_PRE_SHUTDOWN_DELAY`).
 
 ### Alterado
+- **BREAKING:** todas as rotas passam a exigir o prefixo `/v1`. Um
+  cliente chamando os caminhos antigos sem prefixo recebe `404`. Rotas
+  operacionais (`/health`, `/health/ready`, `/debug/vars`) permanecem
+  sem prefixo, deliberadamente — ver `docs/DECISIONS.md`.
 - Go atualizado para 1.26.6, fechando 4 vulnerabilidades da stdlib que o
   código alcançava.
 
