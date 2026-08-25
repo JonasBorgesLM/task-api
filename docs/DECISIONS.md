@@ -144,6 +144,29 @@ Isso significa:
 
 ---
 
+## Versionamento: `/v1` cobre o contrato, não a superfície operacional
+
+Toda rota que um cliente programa contra vive sob `/v1`. As health probes
+(`/health`, `/health/ready`) e o `/debug/vars` **não**.
+
+**Por quê:** uma probe de orquestrador não negocia versão de API — ela é
+configurada uma vez, num manifest, por quem opera o serviço e não por quem
+o consome. Este mesmo documento compromete o `readinessProbe` com
+`/health/ready`; versioná-lo obrigaria a reeditar os manifests a cada
+versão da API, sem benefício para ninguém. O mesmo vale para o
+`/debug/vars`: scraper de métricas é operação, não cliente.
+
+**Os caminhos sem prefixo não são servidos.** Não há mount duplo nem
+redirect. Um alias de compatibilidade tornaria o prefixo decorativo — os
+clientes continuariam contra os caminhos não versionados, e o primeiro v2
+de verdade quebraria exatamente quem o versionamento deveria proteger.
+
+**Os handlers não sabem do prefixo.** Eles registram `POST /tasks`, e o
+composition root monta o sub-mux com `http.StripPrefix`. Um v2 é um
+segundo mount, não uma edição em todo `RegisterRoutes` do código.
+
+---
+
 ## Princípio geral de validação
 
 Decisões e correções neste projeto são verificadas pela execução real, não

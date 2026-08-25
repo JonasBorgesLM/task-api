@@ -17,7 +17,7 @@ A small, production-shaped multi-user task manager, written in Go — a compact 
 
 ## Why this project
 
-Every task belongs to exactly one user, authenticated with a bearer session token (`POST /auth/login`); tasks move through four states (`pending` → `in_progress`/`done`/`cancelled`, with real transition rules — not just a status field) and carry a priority. The functional surface stays intentionally small. What's worth looking at is what's *underneath* it:
+Every task belongs to exactly one user, authenticated with a bearer session token (`POST /v1/auth/login`); tasks move through four states (`pending` → `in_progress`/`done`/`cancelled`, with real transition rules — not just a status field) and carry a priority. The functional surface stays intentionally small. What's worth looking at is what's *underneath* it:
 
 - **Swappable persistence with zero business-logic coupling.** `Service` and `Handler` (in both the `task` and `user` domains) never import PostgreSQL — the in-memory store and the PostgreSQL store implement the exact same `Repository` interface, and swapping one for the other requires no change above the repository layer.
 - **Real production concerns, already handled.** Graceful shutdown, liveness/readiness checks, structured JSON logs correlated by request ID, panic recovery, optimistic concurrency control on every update, embedded schema migrations, and a seed tool for a non-trivial local dataset.
@@ -57,11 +57,11 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `DB_MAX_IDLE_CONNS` | Max idle connections kept in the pool | `25` |
 | `DB_CONN_MAX_LIFETIME` | Max lifetime of a pooled connection | `5m` |
 | `DB_AUTO_MIGRATE` | Apply pending migrations automatically on startup | `true` |
-| `AUTH_SESSION_TTL` | How long a `POST /auth/login` token stays valid | `24h` |
+| `AUTH_SESSION_TTL` | How long a `POST /v1/auth/login` token stays valid | `24h` |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call this API. Unset ⇒ CORS disabled | *(unset)* |
 | `HSTS_MAX_AGE` | `Strict-Transport-Security` max-age, as a Go duration (e.g. `8760h`). `0` omits the header entirely, for a permanently-plaintext deployment. Never sent with `includeSubDomains` or `preload` | `8760h` (1 year) |
 | `RATE_LIMIT_BURST` / `RATE_LIMIT_PER_SEC` | Global token bucket, keyed by client address, in front of every route except the health probes | `60` / `20` |
-| `AUTH_RATE_LIMIT_BURST` / `AUTH_RATE_LIMIT_PER_SEC` | Tighter bucket for `POST /auth/register` and `POST /auth/login` together | `10` / `0.05` |
+| `AUTH_RATE_LIMIT_BURST` / `AUTH_RATE_LIMIT_PER_SEC` | Tighter bucket for `POST /v1/auth/register` and `POST /v1/auth/login` together | `10` / `0.05` |
 | `USER_RATE_LIMIT_BURST` / `USER_RATE_LIMIT_PER_SEC` | Bucket keyed by authenticated user ID, on every route requiring a token | `120` / `40` |
 | `TRUSTED_PROXIES` | Comma-separated CIDRs/addresses of reverse proxies you operate. Only then is `X-Forwarded-For` used to key the address-based limits — list your proxies, never your clients | *(unset)* |
 | `ATTACHMENT_STORAGE_DIR` | Directory file attachments are stored under. Unset disables attachments entirely (the routes 404). Must already exist — there is no default because the `scratch` image has nowhere to write | *(unset)* |
@@ -108,7 +108,7 @@ make db-up            # PostgreSQL only — pair with `make run` on the host for
 
 `docker-compose.yml` bundles [Swagger UI](https://github.com/swagger-api/swagger-ui) at **http://localhost:8082**, serving `docs/openapi.yaml` — mounted read-only, so editing the spec and reloading the page shows the change with no rebuild. "Try it out" works against the real `api` service with no extra setup: `CORS_ALLOWED_ORIGINS` defaults to `http://localhost:8082` specifically so the browser-based request Swagger UI's "Execute" button makes isn't blocked by CORS (see [Configuration](#configuration) and `docs/ARCHITECTURE.md`'s "Operational Behavior" section for why that's necessary — a browser enforces same-origin restrictions that a `curl` request from the same machine never hits).
 
-Register a user via `POST /auth/register`, log in via `POST /auth/login` to get a token, then click **Authorize** (top right) and paste it in as `Bearer <token>` to unlock every `/tasks/*` request.
+Register a user via `POST /v1/auth/register`, log in via `POST /v1/auth/login` to get a token, then click **Authorize** (top right) and paste it in as `Bearer <token>` to unlock every `/v1/tasks/*` request.
 
 Run the built image standalone against any PostgreSQL instance:
 
@@ -189,21 +189,26 @@ DATABASE_URL="postgres://task_api:task_api@localhost:5432/task_api?sslmode=disab
 
 ## API
 
-All endpoints accept/return `application/json`; every response carries an `X-Request-Id` header for log correlation. Every `/tasks/*` route requires `Authorization: Bearer <token>` (obtained from `POST /auth/login`) and is scoped to the authenticated caller's own tasks — a task ID that exists but belongs to someone else returns `404`, identically to one that doesn't exist at all. **Full request/response schemas, validation rules, and examples: [docs/openapi.yaml](docs/openapi.yaml).**
+The contract lives under **`/v1`**. The health probes and `/debug/vars` are deliberately unversioned — they are operational endpoints, not part of the contract a client codes against, and the readiness probe is named in deployment manifests that shouldn't need re-editing whenever the API version moves. The unprefixed contract paths are not served at all.
+
+All endpoints accept/return `application/json`; every response carries an `X-Request-Id` header for log correlation. Every `/v1/tasks/*` route requires `Authorization: Bearer <token>` (obtained from `POST /v1/auth/login`) and is scoped to the authenticated caller's own tasks — a task ID that exists but belongs to someone else returns `404`, identically to one that doesn't exist at all. **Full request/response schemas, validation rules, and examples: [docs/openapi.yaml](docs/openapi.yaml).**
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/auth/register` | — | Create a user account |
-| `POST` | `/auth/login` | — | Authenticate, receive a bearer session token |
-| `POST` | `/auth/logout` | required | Invalidate the current session token |
-| `GET` | `/auth/me` | required | Get the authenticated user |
-| `POST` | `/tasks` | required | Create a task |
-| `GET` | `/tasks` | required | List the caller's tasks, oldest first (`?limit=`, `?offset=`) |
-| `GET` | `/tasks/{id}` | required | Get a task by ID |
-| `PUT` | `/tasks/{id}` | required | Update title/description/priority |
-| `PATCH` | `/tasks/{id}/status` | required | Move a task to a new status (`pending`/`in_progress`/`done`/`cancelled`) |
-| `PATCH` | `/tasks/{id}/done` | required | Mark as done (idempotent shortcut for `.../status`) |
-| `DELETE` | `/tasks/{id}` | required | Delete a task |
+| `POST` | `/v1/auth/register` | — | Create a user account |
+| `POST` | `/v1/auth/login` | — | Authenticate, receive a bearer session token |
+| `POST` | `/v1/auth/logout` | required | Invalidate the current session token |
+| `GET` | `/v1/auth/me` | required | Get the authenticated user |
+| `POST` | `/v1/tasks` | required | Create a task |
+| `GET` | `/v1/tasks` | required | List the caller's tasks, oldest first (`?limit=`, `?offset=`) |
+| `GET` | `/v1/tasks/{id}` | required | Get a task by ID |
+| `PUT` | `/v1/tasks/{id}` | required | Update title/description/priority |
+| `PATCH` | `/v1/tasks/{id}/status` | required | Move a task to a new status (`pending`/`in_progress`/`done`/`cancelled`) |
+| `PATCH` | `/v1/tasks/{id}/done` | required | Mark as done (idempotent shortcut for `.../status`) |
+| `DELETE` | `/v1/tasks/{id}` | required | Delete a task |
+| `POST` | `/v1/tasks/{id}/attachments` | required | Upload a file attachment (multipart, part name `file`) |
+| `GET` | `/v1/tasks/{id}/attachments` | required | List a task's attachments |
+| `GET` | `/v1/files/{key}` | required | Download an attachment by its `storage_key` |
 | `GET` | `/health` | — | Liveness — always `200` while the process runs |
 | `GET` | `/health/ready` | — | Readiness — `200` if the database is reachable, `503` if not |
 | `GET` | `/debug/vars` | required | Runtime stats (`expvar`) — authenticated, unlike the health routes |
@@ -213,20 +218,20 @@ Errors always use the same envelope, `{"error": "description of the problem"}`. 
 **Quick walkthrough:**
 
 ```bash
-curl -s -X POST localhost:8080/auth/register -H 'Content-Type: application/json' \
+curl -s -X POST localhost:8080/v1/auth/register -H 'Content-Type: application/json' \
   -d '{"email":"alice@example.com","password":"correct horse battery staple"}'
 
-TOKEN=$(curl -s -X POST localhost:8080/auth/login -H 'Content-Type: application/json' \
+TOKEN=$(curl -s -X POST localhost:8080/v1/auth/login -H 'Content-Type: application/json' \
   -d '{"email":"alice@example.com","password":"correct horse battery staple"}' | jq -r .token)
 
-ID=$(curl -s -X POST localhost:8080/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+ID=$(curl -s -X POST localhost:8080/v1/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"title":"Buy groceries","description":"Milk, eggs, bread","priority":"high"}' | jq -r .id)
 
-curl -s localhost:8080/tasks/$ID -H "Authorization: Bearer $TOKEN"                              # → 200, the task
-curl -s -X PATCH localhost:8080/tasks/$ID/status -H "Authorization: Bearer $TOKEN" \
+curl -s localhost:8080/v1/tasks/$ID -H "Authorization: Bearer $TOKEN"                              # → 200, the task
+curl -s -X PATCH localhost:8080/v1/tasks/$ID/status -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"status":"in_progress"}'                              # → 200, status: in_progress
 curl -s -o /dev/null -w '%{http_code}\n' \
-  -X DELETE localhost:8080/tasks/$ID -H "Authorization: Bearer $TOKEN"                           # → 204
+  -X DELETE localhost:8080/v1/tasks/$ID -H "Authorization: Bearer $TOKEN"                           # → 204
 ```
 
 ## Learn more

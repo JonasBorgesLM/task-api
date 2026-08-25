@@ -130,6 +130,18 @@ task-api/
 
 Every task carries a `UserID`. Every `Repository` method that touches an existing task takes (or, for `Update`, checks against) the owning user, and filters at the query level — not "fetch then check in Go." A task that exists but belongs to someone else is reported identically to a task that doesn't exist at all: `ErrNotFound` → `404`. This is deliberate, not an oversight — returning a distinct "forbidden" response would let a caller learn that a given task ID exists even without access to it. There is no admin role or shared-access path; if that's ever needed, it's a new, explicit capability, not a relaxation of this rule (see [Future Improvements](#future-improvements)).
 
+### API versioning: the contract is versioned, the operational surface is not
+
+Every route a client codes against lives under `/v1`. The health probes (`/health`, `/health/ready`) and `/debug/vars` do not, and that split is the decision rather than an oversight.
+
+An orchestrator probe does not negotiate an API version — it is configured once, in a deployment manifest, by whoever runs the service rather than by whoever consumes it. `docs/DECISIONS.md` already commits the readiness probe to `/health/ready`; putting it behind the version prefix would mean re-editing those manifests every time the API version moves, for no benefit to anyone. The same argument covers `/debug/vars`: a metrics scraper is operations, not a client.
+
+**The unprefixed paths are not served at all.** There is no dual mount and no redirect. A compatibility alias would make the prefix decorative — clients would keep working against the unversioned paths, and the first genuine v2 would break exactly the callers the versioning was supposed to protect. `TestIntegration_Versioning_ContractIsUnderV1` asserts both halves: the `/v1` path answers, and the bare path 404s.
+
+**Handlers do not know about the prefix.** `newServer` builds a sub-mux, registers the domain handlers on it with their unprefixed patterns (`POST /tasks`, not `POST /v1/tasks`), and mounts it with `http.StripPrefix("/v1", …)`. A v2 is therefore a second sub-mux and a second mount, not an edit to every `RegisterRoutes` in the codebase. `StripPrefix` is what keeps `r.PathValue` working: the sub-mux still matches `/tasks/{id}` and populates the path values as it would unmounted.
+
+The mount pattern is `"/v1/"` with the trailing slash — a subtree pattern, so an unknown path beneath it 404s from inside the versioned mux instead of falling through.
+
 ### Attachments: ownership is a chain, not a copy
 
 An attachment belongs to a task, and that task belongs to a user. `attachments` therefore carries **no `user_id` of its own** — duplicating the owner would create a second copy of a fact that can then disagree with the first, and the disagreement would be an authorization bug rather than a stale display.

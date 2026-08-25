@@ -365,7 +365,7 @@ func TestSecurityHeaders_OnEveryResponseThroughTheChain(t *testing.T) {
 		wantStatus int
 	}{
 		{"public route", http.MethodGet, "/health", http.StatusOK},
-		{"unauthenticated protected route", http.MethodGet, "/tasks", http.StatusUnauthorized},
+		{"unauthenticated protected route", http.MethodGet, apiPrefix + "/tasks", http.StatusUnauthorized},
 		{"unrouted path", http.MethodGet, "/no-such-route", http.StatusNotFound},
 	}
 
