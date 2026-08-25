@@ -77,6 +77,11 @@ chama* `guard.Open` em vez de `os.Open` direto — um refactor que trocasse
 essa chamada deixaria o fuzz do moat verde e o nosso vermelho. Os dois
 testes são necessários; nenhum substitui o outro.
 
+**Estado atual (pendência):** hoje o CI só executa o fuzz autoral do
+task-api. O `FuzzResolve` do moat não roda neste pipeline — exigiria
+checkout do módulo e uma etapa própria. Ver issue de CI para fechar essa
+lacuna.
+
 ---
 
 ## Blobs órfãos após delete de task
@@ -95,9 +100,10 @@ task ao sucesso do delete de arquivo.
 
 ## Configuração de storage: obrigatória, sem default
 
-`ATTACHMENT_STORAGE_DIR` não tem valor padrão — sem ela definida, as rotas
-de anexo não são registradas (falha visível na subida, não na primeira
-escrita).
+`ATTACHMENT_STORAGE_DIR` não tem valor padrão. Sem ela definida, as rotas
+de anexo simplesmente não são registradas — o processo sobe normalmente e
+essas rotas respondem 404. Se a variável estiver definida mas apontar para
+um diretório inexistente, aí sim a subida falha.
 
 **Por quê:** a imagem de produção é um binário estático rodando em
 `scratch`, sem filesystem gravável por padrão. Um caminho default
