@@ -273,6 +273,38 @@ concreto na mão do que construir o mecanismo antes de existir o problema.
 
 ---
 
+## Drain antes do shutdown: o processo espera, não o orquestrador
+
+O processo continua servindo por `HTTP_PRE_SHUTDOWN_DELAY` depois do
+SIGTERM, antes de recusar conexões novas. Padrão 0 — irrelevante para
+execução local ou docker-compose; 5s nos manifests de Kubernetes.
+
+**Por quê:** o Kubernetes remove o pod terminando dos endpoints do
+Service e manda SIGTERM **ao mesmo tempo**, e propagar essa remoção leva
+tempo (o kube-proxy reescreve regras em cada nó). Nessa janela o tráfego
+ainda chega aqui. Um processo que para de escutar no instante do sinal
+recusa essas requisições — e o rolling update configurado para zero
+downtime derruba um punhado assim mesmo.
+
+**Isto não é teórico, e é o exemplo do princípio abaixo.** Com
+`maxUnavailable: 0`, readiness em `/health/ready` e 30s de grace period,
+o manifest parecia correto. O `k8s/rollout-test.sh` mediu **3 de 654
+requisições perdidas**. Com o drain: **0 de 732**. Nenhuma leitura do
+YAML teria mostrado isso.
+
+**Por que no processo e não num preStop hook.** O remédio usual é um
+`preStop` rodando `sleep`, e a imagem é um binário estático em `scratch`
+— sem shell, sem `sleep`, nada para exec. Mas o lugar também é mais
+honesto: o processo sabe que está desligando, e a espera é parte de como
+ele desliga.
+
+**Restrição a manter:** o `terminationGracePeriodSeconds` do orquestrador
+precisa cobrir este atraso **mais** o `HTTP_SHUTDOWN_TIMEOUT`. Hoje
+5 + 10 < 30. Aumentar qualquer um dos dois sem aumentar o grace period é
+como isso volta a quebrar, em silêncio.
+
+---
+
 ## Princípio geral de validação
 
 Decisões e correções neste projeto são verificadas pela execução real, não

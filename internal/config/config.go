@@ -137,6 +137,22 @@ type Config struct {
 	// to complete when the server receives a shutdown signal.
 	ShutdownTimeout time.Duration
 
+	// PreShutdownDelay is how long to keep serving after a termination
+	// signal, before refusing new connections. Zero — the default —
+	// starts shutting down immediately.
+	//
+	// It exists for orchestrated deployments. Kubernetes removes a
+	// terminating pod from its Service and sends SIGTERM concurrently,
+	// and propagating that removal takes time; during the gap, traffic
+	// is still routed here. A process that stops listening the instant
+	// it is signalled refuses those requests, which is how a rolling
+	// update configured for zero downtime still drops a handful.
+	//
+	// It must be shorter than the orchestrator's own grace period, which
+	// also has to cover ShutdownTimeout on top of this — see
+	// k8s/40-api.yaml's terminationGracePeriodSeconds.
+	PreShutdownDelay time.Duration
+
 	// LogLevel is the minimum slog.Level the application logs at.
 	LogLevel slog.Level
 
@@ -342,6 +358,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.ShutdownTimeout, err = parseDuration("HTTP_SHUTDOWN_TIMEOUT", defaultShutdownTimeout); err != nil {
+		return Config{}, err
+	}
+
+	// Zero is meaningful here — "do not wait" — so this uses the
+	// non-negative parser rather than parseDuration, which rejects it.
+	if cfg.PreShutdownDelay, err = parseNonNegativeDuration("HTTP_PRE_SHUTDOWN_DELAY", 0); err != nil {
 		return Config{}, err
 	}
 	if cfg.LogLevel, err = parseLogLevel("LOG_LEVEL", defaultLogLevel); err != nil {

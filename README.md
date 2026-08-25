@@ -10,6 +10,7 @@ A small, production-shaped multi-user task manager, written in Go — a compact 
 4. [Running Locally](#running-locally)
 5. [Running with Docker](#running-with-docker)
 6. [Testing](#testing)
+7. [Kubernetes](#kubernetes)
 7. [Migrations](#migrations)
 8. [Seeding](#seeding)
 9. [API](#api)
@@ -50,6 +51,7 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `HTTP_WRITE_TIMEOUT` | `http.Server.WriteTimeout` | `10s` |
 | `HTTP_IDLE_TIMEOUT` | `http.Server.IdleTimeout` | `60s` |
 | `HTTP_SHUTDOWN_TIMEOUT` | Max time to wait for in-flight requests during shutdown | `10s` |
+| `HTTP_PRE_SHUTDOWN_DELAY` | How long to keep serving after `SIGTERM` before refusing new connections. Needed under Kubernetes, where a pod is removed from the Service and signalled concurrently — without it a zero-downtime rollout still drops requests | `0` |
 | `LOG_LEVEL` | `debug`, `info`, `warn`, or `error` | `info` |
 | `DOTENV_PATH` | Path to the `.env` file loaded before the OS environment | `.env` |
 | `DATABASE_URL` | PostgreSQL connection string. Unset ⇒ in-memory store | *(unset)* |
@@ -157,6 +159,19 @@ Concurrency-sensitive paths (optimistic-concurrency conflicts) are exercised wit
 `make check` is the full local gate — `gofmt`, `go vet`, `staticcheck`, `govulncheck` and the race-tested unit suite — and mirrors what CI runs, minus the PostgreSQL integration tests and the fuzz run.
 
 **`govulncheck` fails the build on a vulnerability the code can actually reach.** That is its own default rather than a setting here: an advisory against something present in the dependency graph but never called exits `0`, and only a reachable one exits non-zero. The trade accepted with that choice is that an advisory against the standard library can block merges until a Go release fixes it — see `docs/DECISIONS.md`. It is worth what it costs: the four standard-library advisories this project carried before Go 1.26.6 were found by running the tool by hand, because nothing in the pipeline was looking.
+
+## Kubernetes
+
+`k8s/` holds manifests for a **disposable validation cluster** — PostgreSQL and MinIO run in-cluster on `emptyDir`, which is data loss anywhere that matters. A real deployment points `DATABASE_URL` and `ATTACHMENT_S3_ENDPOINT` at managed services and deletes those two files.
+
+```bash
+./k8s/rollout-test.sh          # create a kind cluster, deploy, prove the rollout, tear down
+./k8s/rollout-test.sh --keep   # leave the cluster up afterwards
+```
+
+The script is the interesting part. It runs authenticated load **from inside the cluster** against the Service — `kubectl port-forward` attaches to one specific pod, so it would die exactly when that pod is replaced, and the resulting errors would be the tunnel's rather than the API's — triggers `kubectl rollout restart` mid-flight, and counts what came back. The load includes an attachment download, so a passing run also demonstrates that a session issued by the old pod still works against the new one, and that a file uploaded through one pod is readable through another.
+
+**It found a real bug the manifests looked fine about.** With `maxUnavailable: 0`, readiness on `/health/ready` and a 30s grace period, the first run still lost 3 of 654 requests. Kubernetes removes a terminating pod from the Service and sends `SIGTERM` concurrently, and propagating that removal takes time — during the gap, traffic is still routed to a process that has already stopped listening. `HTTP_PRE_SHUTDOWN_DELAY` closes it: 0 of 732 on the next run. The usual remedy is a `preStop` hook running `sleep`, which this image cannot do — it is a static binary on `scratch`, with no shell to exec.
 
 ## Migrations
 

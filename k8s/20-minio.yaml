@@ -1,0 +1,112 @@
+# MinIO for the validation cluster, standing in for S3.
+#
+# Same caveat as PostgreSQL: emptyDir storage, disposable by design. A
+# real deployment points ATTACHMENT_S3_ENDPOINT at managed object storage
+# and deletes this file.
+#
+# Object storage is what makes attachments survive a rolling update at
+# all — a pod's local disk is not shared with the pod replacing it, and is
+# gone if the pod moves node. Running it here is what lets the rollout
+# test prove that, instead of asserting it from a design document.
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: task-api
+spec:
+  selector:
+    app: minio
+  ports:
+    - port: 9000
+      targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: task-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+          args: ["server", "/data"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: task-api-secrets
+                  key: ATTACHMENT_S3_ACCESS_KEY
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: task-api-secrets
+                  key: ATTACHMENT_S3_SECRET_KEY
+          ports:
+            - containerPort: 9000
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 2
+            periodSeconds: 2
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+# Creates the bucket once, then exits.
+#
+# The application does not create its own bucket (see
+# attachment.NewS3BlobStore): silently creating one turns a typo into an
+# empty bucket nobody notices. So something has to, and a Job is the
+# honest place — it either succeeds or shows up as a failed Job, rather
+# than being a side effect of the first request.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-bucket
+  namespace: task-api
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              until mc alias set local http://minio:9000 "$ACCESS_KEY" "$SECRET_KEY"; do
+                echo "waiting for minio..."; sleep 2
+              done
+              mc mb --ignore-existing "local/$BUCKET"
+              echo "bucket ready"
+          env:
+            - name: BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: task-api-config
+                  key: ATTACHMENT_S3_BUCKET
+            - name: ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: task-api-secrets
+                  key: ATTACHMENT_S3_ACCESS_KEY
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: task-api-secrets
+                  key: ATTACHMENT_S3_SECRET_KEY

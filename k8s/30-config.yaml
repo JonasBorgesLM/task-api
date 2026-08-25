@@ -1,0 +1,79 @@
+# Non-secret configuration. Everything here is safe to read.
+#
+# Values map one-to-one onto the environment variables config.Load reads
+# — see .env.example for what each one means. Only the ones that differ
+# from their defaults, or that have no default, are set: a ConfigMap that
+# restates every default is one that silently goes stale when a default
+# changes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: task-api-config
+  namespace: task-api
+data:
+  HTTP_ADDR: ":8080"
+  LOG_LEVEL: "info"
+
+  # Keep serving for 5s after SIGTERM, before refusing new connections.
+  #
+  # Kubernetes removes a terminating pod from the Service's endpoints and
+  # sends SIGTERM concurrently, and propagating that removal takes time —
+  # kube-proxy rewrites rules on every node. Without this delay, traffic
+  # still being routed here during that gap is refused, and the rolling
+  # update drops requests despite maxUnavailable: 0.
+  #
+  # This is not theoretical: k8s/rollout-test.sh measured 3 of 654
+  # requests failing to connect during a rollout before it existed.
+  #
+  # The usual answer is a preStop hook running `sleep`, which this image
+  # cannot do — it is a static binary on scratch, with no shell to exec.
+  #
+  # terminationGracePeriodSeconds must cover this *plus*
+  # HTTP_SHUTDOWN_TIMEOUT. 5 + 10 < 30. See k8s/40-api.yaml.
+  HTTP_PRE_SHUTDOWN_DELAY: "5s"
+
+  # In-cluster DNS: the Services in 10-postgres.yaml and 20-minio.yaml.
+  DATABASE_URL: "postgres://task_api:task_api@postgres:5432/task_api?sslmode=disable"
+
+  # Safe here specifically because replicas is 1 and maxSurge is 1, so at
+  # most one pod is ever *starting* — and a starting pod is the only one
+  # that migrates. Raise replicas and this must become false, with
+  # migrations run as their own deploy step (cmd/migrate) instead.
+  DB_AUTO_MIGRATE: "true"
+
+  ATTACHMENT_S3_ENDPOINT: "minio:9000"
+  ATTACHMENT_S3_BUCKET: "task-api-attachments"
+  # Plain HTTP inside the cluster, to a Service that terminates nothing.
+  # Managed object storage over the public internet must set this true.
+  ATTACHMENT_S3_USE_SSL: "false"
+
+  # Sent unconditionally, and inert over the plaintext this process
+  # serves — see docs/DECISIONS.md. Set to 0 to omit it entirely.
+  HSTS_MAX_AGE: "8760h"
+---
+# ⚠️  A Kubernetes Secret is base64, NOT encryption.
+#
+# Anyone with read access to this namespace — or to etcd — reads these
+# values in the clear. `kubectl get secret task-api-secrets -o yaml |
+# base64 -d` is the whole attack.
+#
+# That is acceptable *here* and nowhere else: this file exists to stand
+# up a disposable kind cluster and prove a rolling update. The credentials
+# below are the same throwaway ones docker-compose.yml uses, and they
+# guard a MinIO that lives and dies with the cluster.
+#
+# Before this shape is used against anything real, it needs actual secret
+# management — sealed-secrets, external-secrets against the provider's
+# secret manager, or Vault. That decision is tracked as its own issue,
+# because it depends on which cluster this ends up running on. Do not
+# delete this comment by copying the file into a production repository;
+# that is exactly the path it exists to interrupt.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: task-api-secrets
+  namespace: task-api
+type: Opaque
+stringData:
+  ATTACHMENT_S3_ACCESS_KEY: "task_api"
+  ATTACHMENT_S3_SECRET_KEY: "task_api_secret"

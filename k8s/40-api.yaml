@@ -1,0 +1,128 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api
+  namespace: task-api
+spec:
+  selector:
+    app: task-api
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  namespace: task-api
+spec:
+  replicas: 1
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 is the setting that makes this a zero-downtime
+      # rollout rather than a fast one. It forbids Kubernetes from taking
+      # the old pod out of service before a new one is Ready, so there is
+      # never a moment with no pod serving.
+      #
+      # maxSurge: 1 is what makes that possible with replicas: 1 — one
+      # extra pod may exist during the swap. The two settings are a pair:
+      # maxUnavailable: 0 with maxSurge: 0 would deadlock, because
+      # nothing could ever start and nothing could ever stop.
+      maxUnavailable: 0
+      maxSurge: 1
+
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:
+        app: task-api
+    spec:
+      # Must cover the whole termination sequence: the drain delay the
+      # process waits before it stops accepting connections
+      # (HTTP_PRE_SHUTDOWN_DELAY, 5s) *plus* the graceful shutdown budget
+      # that follows it (HTTP_SHUTDOWN_TIMEOUT, 10s), plus room for the
+      # request in flight that is using it. 5 + 10 < 30.
+      #
+      # If this were shorter, Kubernetes would SIGKILL the process while
+      # it was still draining, and the requests it was mid-way through
+      # answering would be dropped — the exact failure a graceful
+      # shutdown exists to prevent, reintroduced by a number in a YAML
+      # file. 30s leaves 3x the budget.
+      #
+      # Raising HTTP_SHUTDOWN_TIMEOUT without raising this is the way
+      # this silently breaks.
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: api
+          image: task-api:dev
+          # Never for a real registry; correct for kind, where the image
+          # is side-loaded with `kind load docker-image` and there is no
+          # registry to pull from. A production manifest pins a digest
+          # and lets the default pull policy apply.
+          imagePullPolicy: Never
+
+          ports:
+            - containerPort: 8080
+
+          envFrom:
+            - configMapRef:
+                name: task-api-config
+            - secretRef:
+                name: task-api-secrets
+
+          # Readiness gates traffic. maxUnavailable: 0 is enforced
+          # against *this* — Kubernetes waits for the new pod to pass it
+          # before removing the old one, so a probe that lies about being
+          # ready turns a zero-downtime rollout into a broken one.
+          #
+          # /health/ready checks the database is reachable, which is
+          # exactly the dependency a freshly started pod might not have
+          # yet.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 3
+
+          # Liveness restarts a wedged process, and must NOT check
+          # dependencies: /health is deliberately the liveness route and
+          # answers 200 while the process runs. Pointing this at
+          # /health/ready would mean a database blip restarts every pod —
+          # turning a recoverable outage into a crash loop that removes
+          # the API too.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # Neither probe is rate limited: the health routes sit outside
+          # the global limiter on purpose (see cmd/api's newServer), so a
+          # burst of client traffic cannot be read here as an unhealthy
+          # pod and get it killed.
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+
+          securityContext:
+            # The image is a static binary on scratch with a nonroot
+            # user; these make the sandbox explicit rather than implied
+            # by how the image happens to be built.
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
