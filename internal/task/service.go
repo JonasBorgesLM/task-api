@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/JonasBorgesLM/moat/sanitize"
 )
 
 // Maximum accepted lengths for user-supplied text fields. These bound
@@ -247,11 +249,49 @@ func (s *Service) CompleteTask(ctx context.Context, userID, id string) (Task, er
 	return task, nil
 }
 
-// validateTitleAndDescription trims title and description and validates
-// their length: title must be non-empty (after trimming) and at most
-// maxTitleLen characters; description must be at most maxDescriptionLen
-// characters. It returns the trimmed values, or ErrInvalidInput describing
-// which constraint failed.
+// validateTitleAndDescription normalizes title and description and
+// validates their length: title must be non-empty (after normalizing) and
+// at most maxTitleLen characters; description must be at most
+// maxDescriptionLen characters. It returns the normalized values, or
+// ErrInvalidInput describing which constraint failed.
+//
+// # Normalization
+//
+// The two fields are normalized differently on purpose. A title is one
+// line of display text, so sanitize.PlainText applies: it strips Unicode
+// control characters and collapses every run of whitespace to a single
+// space. A description is free-form prose where line breaks are content,
+// so it only gets sanitize.StripControlChars — running PlainText over it
+// would silently flatten a multi-paragraph description into one line,
+// destroying data the user deliberately entered.
+//
+// Control characters are stripped rather than rejected because they are
+// almost never typed on purpose: they arrive from a paste, a copied
+// terminal buffer, or a client that failed to strip them. What they cost
+// once stored is real — a NUL truncates the value for anything that later
+// treats it as a C string, and a raw escape sequence can rewrite a
+// terminal that prints a log line containing it. Tab, newline and
+// carriage return are preserved, which is what makes a description's
+// formatting survive.
+//
+// What this does *not* cover, so that nobody reads more into it than is
+// there: only Unicode category Cc (the C0/C1 controls) is stripped.
+// Format characters in category Cf survive, and that includes the
+// bidirectional overrides (U+202A–U+202E) and isolates (U+2066–U+2069)
+// behind Trojan Source-style spoofing, where a stored title renders in a
+// different order than it reads in the source. Handling those is not a
+// matter of extending the strip set: the isolates are the correct way to
+// embed Hebrew or Arabic in surrounding Latin text, so removing them
+// would corrupt legitimate input from exactly the users who need them.
+// It needs its own rule about which of those characters are acceptable
+// where, which this project has not made yet.
+//
+// This is also deliberately not an HTML defense. Nothing here strips
+// tags, and output encoding at the point of rendering remains the only
+// real answer to injection; a title of "Ben <the> Third" is stored
+// exactly as typed.
+//
+// # Length
 //
 // Length is measured in Unicode characters (utf8.RuneCountInString), not
 // bytes: len() on a Go string counts bytes, which for any non-ASCII text
@@ -260,9 +300,14 @@ func (s *Service) CompleteTask(ctx context.Context, userID, id string) (Task, er
 // PostgreSQL VARCHAR(200)/VARCHAR(2000) columns (which count characters,
 // not bytes) actually enforce. Measuring bytes here would reject valid
 // input well under the intended limit.
+//
+// Length is checked *after* normalization, so the limit applies to what
+// is actually stored. Checking first would reject input that fits once
+// its stripped characters are gone.
 func validateTitleAndDescription(title, description string) (string, string, error) {
-	title = strings.TrimSpace(title)
-	description = strings.TrimSpace(description)
+	// PlainText already trims, so TrimSpace would be redundant on title.
+	title = sanitize.PlainText(title)
+	description = strings.TrimSpace(sanitize.StripControlChars(description))
 
 	if title == "" {
 		return "", "", fmt.Errorf("%w: title must not be empty", ErrInvalidInput)

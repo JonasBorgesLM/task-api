@@ -269,7 +269,10 @@ func TestRegisterRoutes_PublicAndProtectedRoutes(t *testing.T) {
 	// A generous limit here: this test exercises route wiring, not
 	// RateLimiter itself (see internal/middleware/rate_limit_test.go for
 	// that).
-	noopRateLimit := middleware.NewRateLimiter(1000, time.Minute).Middleware()
+	// A pass-through: these tests cover routing and auth, not rate
+	// limiting, and the limiter that guards these routes in production is
+	// composed in cmd/api (see newServer) rather than here.
+	noopRateLimit := func(next http.Handler) http.Handler { return next }
 	h.RegisterRoutes(mux, RequireAuth(svc, slog.New(slog.NewTextHandler(io.Discard, nil))), noopRateLimit)
 
 	cases := []struct {

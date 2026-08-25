@@ -8,7 +8,7 @@
 ## toolchain, module cache, or source tree — is present in the final
 ## image; only the compiled binary is copied out of it below.
 ## ---------------------------------------------------------------------
-FROM golang:1.26.5-alpine AS builder
+FROM golang:1.26.6-alpine AS builder
 
 WORKDIR /src
 

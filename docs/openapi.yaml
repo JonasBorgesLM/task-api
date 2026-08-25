@@ -4,13 +4,25 @@ info:
   title: Task API
   description: >
     A small, multi-user HTTP REST API for task management, built with Go
-    using only the standard library plus pgx (PostgreSQL) and
-    golang.org/x/crypto (bcrypt). Every task belongs to exactly one user
-    and is only ever visible to that user. Each task has a title, an
+    using only the standard library plus pgx (PostgreSQL),
+    golang.org/x/crypto (bcrypt) and moat (rate limiting, response
+    security headers, path containment). Every task belongs to exactly one
+    user and is only ever visible to that user. Each task has a title, an
     optional description, a status (`pending`, `in_progress`, `done`, or
     `cancelled`, following the transition rules below), and a priority
-    (`low`, `medium`, or `high`). Authentication is opaque bearer session
-    tokens, issued by POST /auth/login.
+    (`low`, `medium`, or `high`), and may carry file attachments.
+    Authentication is opaque bearer session tokens, issued by
+    POST /v1/auth/login.
+
+
+    **Versioning.** The contract lives under `/v1`. The health probes
+    (`/health`, `/health/ready`) and `/debug/vars` are deliberately *not*
+    versioned: they are operational endpoints rather than part of the
+    contract a client codes against — an orchestrator probe does not
+    negotiate an API version, and the readiness probe is named in
+    deployment manifests that should not need re-editing every time the
+    API version moves. The unprefixed contract paths are not served at
+    all; there is no dual mount.
 
 
     This document describes exactly the behavior implemented in
@@ -21,15 +33,22 @@ info:
 
     Every response from every endpoint — including error responses and
     responses produced before routing, such as a `404` for an unknown path
-    — additionally carries a fixed set of security headers
-    (`middleware.SecurityHeaders`): `Content-Security-Policy: default-src
-    'none'; frame-ancestors 'none'`, `X-Frame-Options: DENY`, and
-    `X-Content-Type-Options: nosniff`. They are constant, identical
-    everywhere, and are not part of the API contract a client programs
-    against, so they are documented here once rather than repeated on each
-    response. `Strict-Transport-Security` joins them only when the
-    deployment sets `HSTS_MAX_AGE` — see docs/ARCHITECTURE.md's
-    "Operational Behavior" for why that one is opt-in.
+    or a `429` from the rate limiter — additionally carries a fixed set of
+    security headers, set by moat's `secureheaders`:
+    `Content-Security-Policy: default-src 'none'; base-uri 'none';
+    form-action 'none'; frame-ancestors 'none'`, `X-Frame-Options: DENY`,
+    `X-Content-Type-Options: nosniff`, `Referrer-Policy`,
+    `Permissions-Policy`, the three Cross-Origin-*-Policy headers, and
+    `Strict-Transport-Security`. They are constant, identical everywhere,
+    and are not part of the API contract a client programs against, so
+    they are documented here once rather than repeated on each response.
+
+
+    HSTS is sent unconditionally — a browser is required to ignore it over
+    plain HTTP, and deciding per request from the connection's TLS state
+    would disable it behind the TLS-terminating proxy it exists for.
+    `HSTS_MAX_AGE=0` is the opt-out. See docs/ARCHITECTURE.md's
+    "Operational Behavior".
   version: "2.2.0"
   license:
     name: MIT
@@ -47,6 +66,11 @@ tags:
     description: Registration, login/logout, and the current user
   - name: Tasks
     description: Task lifecycle management (create, read, update, status transitions, delete) — every operation is scoped to the authenticated caller's own tasks
+  - name: Attachments
+    description: >
+      File attachments on a task. Present only when
+      ATTACHMENT_STORAGE_DIR is configured; otherwise these routes
+      return 404.
   - name: Health
     description: Liveness and readiness checks, for process supervisors and load balancers
   - name: Observability
@@ -56,7 +80,7 @@ security:
   - bearerAuth: []
 
 paths:
-  /auth/register:
+  /v1/auth/register:
     post:
       tags: [Auth]
       operationId: register
@@ -123,7 +147,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
-  /auth/login:
+  /v1/auth/login:
     post:
       tags: [Auth]
       operationId: login
@@ -197,7 +221,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
-  /auth/logout:
+  /v1/auth/logout:
     post:
       tags: [Auth]
       operationId: logout
@@ -223,12 +247,14 @@ paths:
               $ref: '#/components/headers/XRequestID'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /auth/me:
+  /v1/auth/me:
     get:
       tags: [Auth]
       operationId: getMe
@@ -262,12 +288,14 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: user not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /tasks:
+  /v1/tasks:
     post:
       tags: [Tasks]
       operationId: createTask
@@ -359,6 +387,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: task already exists
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -444,12 +474,14 @@ paths:
                 error: "invalid input: limit must be a non-negative integer"
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /tasks/{id}:
+  /v1/tasks/{id}:
     get:
       tags: [Tasks]
       operationId: getTask
@@ -478,6 +510,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -569,6 +603,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: task was modified concurrently, please retry
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -591,12 +627,14 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /tasks/{id}/status:
+  /v1/tasks/{id}/status:
     patch:
       tags: [Tasks]
       operationId: transitionTaskStatus
@@ -675,12 +713,14 @@ paths:
                   summary: Optimistic concurrency conflict
                   value:
                     error: task was modified concurrently, please retry
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /tasks/{id}/done:
+  /v1/tasks/{id}/done:
     patch:
       tags: [Tasks]
       operationId: completeTask
@@ -756,6 +796,201 @@ paths:
                   summary: Optimistic concurrency conflict
                   value:
                     error: task was modified concurrently, please retry
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/tasks/{id}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/TaskID'
+    post:
+      tags: [Attachments]
+      operationId: uploadAttachment
+      summary: Upload a file attachment to a task
+      description: >
+        Accepts one file in a `multipart/form-data` body, under the part
+        name `file`. Any other part is ignored.
+
+
+        The content type is determined from the bytes themselves, not
+        from the part's declared `Content-Type`: a client writes that
+        header and can put anything in it, so trusting it would make the
+        allow-list decorative. The detected type is what is stored and
+        what a later download reports. Accepted types are `image/jpeg`,
+        `image/png`, `image/gif`, `image/webp`, `application/pdf` and
+        `text/plain`; anything else is rejected with 400, including HTML,
+        which is excluded deliberately.
+
+
+        The client's filename is kept as metadata only and is never used
+        to build a path — the file is stored under a server-generated
+        `storage_key`. The size limit (`ATTACHMENT_MAX_BYTES`, 10 MiB by
+        default) is enforced while streaming, not read from
+        `Content-Length`.
+
+
+        These routes exist only when `ATTACHMENT_STORAGE_DIR` is
+        configured; otherwise every one of them returns 404.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: The attachment was stored.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Attachment'
+        '400':
+          description: >
+            The body was not multipart, carried no `file` part, exceeded
+            the size limit, or held a content type outside the
+            allow-list.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: 'invalid input: content type "application/octet-stream" is not accepted'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >
+            No such task for this user — or attachments are disabled. As
+            everywhere else in this API, a task belonging to another user
+            is reported the same way a missing one is.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: task not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      tags: [Attachments]
+      operationId: listAttachments
+      summary: List a task's attachments
+      description: >
+        Ordered oldest first, ties broken by id. Returns `[]` for a task
+        of yours with no attachments, and 404 for a task that is not
+        yours — the two are distinguishable only to the owner.
+      responses:
+        '200':
+          description: The task's attachments.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Attachment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No such task for this user, or attachments are disabled.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: task not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/files/{key}:
+    get:
+      tags: [Attachments]
+      operationId: downloadAttachment
+      summary: Download an attachment's contents
+      description: >
+        Addressed by `storage_key`, which is not a capability: holding one
+        grants nothing on its own, because the key is resolved to its
+        attachment and the owning task's ownership is re-checked before
+        any bytes are served. A key belonging to another user is answered
+        exactly like a key that names nothing.
+
+
+        The response carries `Content-Disposition: attachment` so a
+        browser saves the file rather than rendering user-supplied bytes
+        in this API's origin, and `X-Content-Type-Options: nosniff` (set
+        on every response) so it does not re-decide the type for itself.
+        Range requests are supported.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: The attachment's `storage_key`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The file contents.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+            Content-Disposition:
+              description: Always `attachment`, with the original filename as a parameter.
+              schema:
+                type: string
+                example: attachment; filename="report.pdf"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >
+            No attachment with this key for this user — covering both a
+            key that names nothing and one belonging to somebody else —
+            or attachments are disabled.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: attachment not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -806,6 +1041,8 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
   /health:
     get:
       tags: [Health]
@@ -1192,6 +1429,56 @@ components:
       required:
         - status
 
+    Attachment:
+      type: object
+      description: >
+        Metadata about one file stored against a task. The bytes
+        themselves live outside the database, addressed by `storage_key`.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The attachment's own identifier.
+        task_id:
+          type: string
+          format: uuid
+          description: >
+            The task this file hangs off. The attachment has no owner of
+            its own — ownership is reached through this task.
+        original_filename:
+          type: string
+          maxLength: 255
+          description: >
+            What the client called the file, normalized (control
+            characters stripped, whitespace collapsed, any directory part
+            removed). Metadata only: it is never used to build a path, and
+            the file on disk is named by `storage_key`.
+          example: report.pdf
+        storage_key:
+          type: string
+          format: uuid
+          description: >
+            The identifier `GET /files/{key}` addresses this file by.
+            Server-generated and never derived from client input, which is
+            what makes it unable to carry a traversal sequence. It is not
+            a capability: a download still re-checks that the caller owns
+            the task behind it.
+        content_type:
+          type: string
+          description: >
+            The type detected from the bytes, not the one the upload
+            declared.
+          example: application/pdf
+        size_bytes:
+          type: integer
+          format: int64
+          description: The stored size, as measured while writing.
+          example: 20841
+        created_at:
+          type: string
+          format: date-time
+      required: [id, task_id, original_filename, storage_key, content_type, size_bytes, created_at]
+
     ErrorResponse:
       type: object
       description: >
@@ -1222,11 +1509,23 @@ components:
 
     TooManyRequests:
       description: >
-        The client's IP has made too many requests to /auth/register or
-        /auth/login (combined — they share one rate-limit budget) within
-        the current window (see cmd/api/main.go's
-        authRateLimitRequests/authRateLimitWindow). Not returned by any
-        other endpoint. Wait and retry.
+        A rate limit was exceeded. Three token-bucket tiers can produce
+        this, and a client cannot tell them apart from the response alone:
+        a global one keyed by client address in front of every route; a
+        tighter one covering /auth/register and /auth/login together
+        (where each attempt costs a password hash comparison); and one
+        keyed by authenticated user on every route requiring a token, so
+        an account cannot multiply its allowance across hosts. All are
+        configurable — see RATE_LIMIT_*, AUTH_RATE_LIMIT_* and
+        USER_RATE_LIMIT_* in .env.example.
+
+        The only endpoints that never return this are GET /health and GET
+        /health/ready, which bypass rate limiting so that a burst of
+        client traffic cannot be read by an orchestrator as an unhealthy
+        replica.
+
+        Wait and retry; the response carries the standard rate-limit
+        headers describing when.
       headers:
         X-Request-Id:
           $ref: '#/components/headers/XRequestID'

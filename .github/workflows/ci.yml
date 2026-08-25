@@ -36,6 +36,11 @@ jobs:
           --health-retries 10
 
     env:
+      # MinIO is started by a step rather than declared under services:
+      # — see "Start MinIO" below for why it cannot be one.
+      TEST_S3_ENDPOINT: localhost:9000
+      TEST_S3_ACCESS_KEY: task_api
+      TEST_S3_SECRET_KEY: task_api_secret
       TEST_DATABASE_URL: postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable
 
     steps:
@@ -50,6 +55,36 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      # Backs internal/attachment's S3 integration tests — the same
+      # assertions the filesystem store runs, against a real
+      # S3-compatible server. Without it those tests skip, which would
+      # leave the S3 backend exercised by nobody until production.
+      #
+      # A step rather than a `services:` entry, and not by preference: a
+      # service container cannot be given a command, and the minio image
+      # needs `server /data` — without it the container prints its usage
+      # and exits. Bitnami's auto-starting image would fit the services
+      # block, but pinning to the upstream one is worth an explicit step.
+      #
+      # The wait loop is here for the same reason: `services:` would have
+      # gated on a healthcheck, and a step has to do that itself. It
+      # polls the endpoint MinIO itself considers "live" rather than
+      # sleeping a fixed amount, so a slow runner waits longer instead of
+      # producing a flake.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio             -p 9000:9000             -e MINIO_ROOT_USER=task_api             -e MINIO_ROOT_PASSWORD=task_api_secret             minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:9000/minio/health/live >/dev/null; then
+              echo "MinIO ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "MinIO did not become ready in 60s"
+          docker logs minio
+          exit 1
 
       - name: Download and verify dependencies
         run: |
@@ -85,6 +120,35 @@ jobs:
           staticcheck ./...
           staticcheck -tags=integration ./...
 
+      # Known vulnerabilities in what we ship. This sits with the other
+      # static gates rather than with the tests because it is the same
+      # kind of check: a tool answering a question about the code, with
+      # no service to stand up and nothing to flake.
+      #
+      # Fail-closed on an *actionable* finding is the decision recorded in
+      # the issue that added this step, and it is govulncheck's own
+      # default rather than something configured here: the command exits
+      # non-zero only for a vulnerability the code can actually reach.
+      # Something present in the dependency graph but never called exits
+      # 0 — verified against the golang.org/x/crypto/openpgp advisory this
+      # repo currently carries, which is unreachable (we use bcrypt) and
+      # has no fix, being unmaintained by design.
+      #
+      # The consequence accepted with that decision: an advisory against
+      # the standard library can block merges until a Go release fixes
+      # it. That is the trade for not letting a reachable vulnerability
+      # into main unnoticed.
+      #
+      # Run once, with default build tags — unlike vet and staticcheck
+      # above, which run twice. The second run there exists because the
+      # integration-tagged files are not otherwise compiled; here it
+      # would only surface vulnerabilities reachable from test helpers,
+      # which are not part of what gets deployed.
+      - name: Vulnerabilities (govulncheck)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
       # Unit tests: memoryRepository, Service, Handler, config, middleware,
       # server lifecycle — everything that needs no external service.
       # postgresRepository's tests are excluded entirely (the "integration"
@@ -97,6 +161,19 @@ jobs:
 
       - name: Test (unit, coverage)
         run: go test -cover ./...
+
+      # Path containment is the one property in this repo where a
+      # regression is both silent and severe: a blob store that stopped
+      # routing keys through pathguard would still pass every
+      # example-based test, because those all use well-formed UUID keys
+      # that have nothing to escape with.
+      #
+      # 45s is a deliberate compromise — well past the seed corpus at the
+      # ~100k exec/s this target sustains, short enough not to dominate
+      # the job. Scoped to one target because `go test` refuses to fuzz
+      # more than one per invocation.
+      - name: Fuzz (path containment)
+        run: go test ./internal/attachment/ -run FuzzFSBlobStore_OpenNeverEscapesRoot -fuzz FuzzFSBlobStore_OpenNeverEscapesRoot -fuzztime 45s
 
       # Integration tests: every integration-tagged package against the
       # real postgres service container declared above. -p 1 forces

@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
+	"github.com/JonasBorgesLM/moat/validate"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -258,14 +258,31 @@ func normalizeEmail(email string) string {
 func validateEmail(email string) (string, error) {
 	email = normalizeEmail(email)
 
-	if email == "" {
-		return "", fmt.Errorf("%w: email must not be empty", ErrInvalidInput)
-	}
-	if !strings.Contains(email, "@") {
-		return "", fmt.Errorf("%w: email must be a valid email address", ErrInvalidInput)
-	}
-	if utf8.RuneCountInString(email) > maxEmailLen {
-		return "", fmt.Errorf("%w: email must be at most %d characters", ErrInvalidInput, maxEmailLen)
+	// The rules run against the normalized value, so the address that is
+	// validated is the one that will be stored and later looked up.
+	//
+	// This replaced a hand-rolled `strings.Contains(email, "@")`, which
+	// accepted "@", "a@" and "@b" — enough to register an account whose
+	// address can never receive anything.
+	//
+	// Required() is named explicitly rather than relied upon: validate's
+	// rules do not skip empty values, so Email() would reject "" on its
+	// own, but stating the constraint keeps the error message accurate
+	// about which one failed.
+	//
+	// MaxLen counts runes, which is what maxEmailLen and the VARCHAR
+	// column both mean. validatePassword deliberately does *not* use it —
+	// see that function.
+	if err := validate.Validate("email", email,
+		validate.Required(),
+		validate.Email(),
+		validate.MaxLen(maxEmailLen),
+	); err != nil {
+		// validate's messages describe the constraint and never echo the
+		// offending value back — the same rule the rest of this package
+		// follows, since an error that reflects attacker-controlled input
+		// ends up in logs and response bodies.
+		return "", fmt.Errorf("%w: %s", ErrInvalidInput, err)
 	}
 
 	return email, nil

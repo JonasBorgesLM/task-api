@@ -1,0 +1,343 @@
+package attachment
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"fmt"
+	"io"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/JonasBorgesLM/moat/sanitize"
+)
+
+// maxOriginalFilenameLen bounds the metadata copy of what the client
+// called the file. 255 is the limit essentially every filesystem imposes
+// on a single name component, so a longer value could not have been a
+// real filename on the uploader's machine either. It matches the VARCHAR
+// on the column.
+const maxOriginalFilenameLen = 255
+
+// sniffLen is how many leading bytes http.DetectContentType examines. It
+// reads at most this many and ignores the rest, so buffering more would
+// change nothing.
+const sniffLen = 512
+
+// allowedContentTypes is the allow-list, keyed by the type detected from
+// the bytes themselves.
+//
+// It is an allow-list rather than a deny-list because the failure modes
+// are not symmetric: a type missing from an allow-list is an upload
+// someone has to ask for, while a type missing from a deny-list is an
+// upload nobody reviewed. The set is deliberately small — this is a task
+// tracker, and every entry is a format a browser will not execute in our
+// origin.
+//
+// text/html is the notable omission, and it is omitted on purpose:
+// serving attacker-authored HTML from this API's origin would let it run
+// as same-origin script, which is the whole reason downloads also go out
+// as Content-Disposition: attachment with nosniff.
+var allowedContentTypes = map[string]struct{}{
+	"image/jpeg":      {},
+	"image/png":       {},
+	"image/gif":       {},
+	"image/webp":      {},
+	"application/pdf": {},
+	"text/plain":      {},
+}
+
+// Service holds the business logic for attachments: what may be uploaded,
+// under what name it is stored, and how the two halves — metadata and
+// bytes — are kept consistent with each other.
+type Service struct {
+	repo      Repository
+	blobs     BlobStore
+	maxBytes  int64
+	allowed   map[string]struct{}
+	nowFunc   func() time.Time
+	newIDFunc func() (string, error)
+}
+
+// NewService returns a Service writing metadata through repo and bytes
+// through blobs, rejecting any upload over maxBytes.
+func NewService(repo Repository, blobs BlobStore, maxBytes int64) *Service {
+	return &Service{
+		repo:      repo,
+		blobs:     blobs,
+		maxBytes:  maxBytes,
+		allowed:   allowedContentTypes,
+		nowFunc:   time.Now,
+		newIDFunc: newID,
+	}
+}
+
+// newID generates a random UUID v4, the same way internal/task and
+// internal/user do. Duplicated rather than shared because a three-line
+// helper is a poorer reason to create a coupling between domain packages
+// than it looks.
+func newID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("failed to generate id: %w", err)
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]), nil
+}
+
+// Upload stores r as a new attachment on taskID, which must belong to
+// userID.
+//
+// declaredFilename is what the client called the file. It is normalized
+// and kept as metadata only — never as a path.
+//
+// The content type is determined from the bytes, not from what the
+// request declared: a client writes that header and can put anything in
+// it, so trusting it would make the allow-list decorative. The detected
+// type is what gets stored, so a later download describes the bytes it is
+// actually serving.
+func (s *Service) Upload(ctx context.Context, userID, taskID, declaredFilename string, r io.Reader) (Attachment, error) {
+	filename, err := normalizeFilename(declaredFilename)
+	if err != nil {
+		return Attachment{}, err
+	}
+
+	// Buffer just enough to identify the content, then hand the reader
+	// back its own prefix. Sniffing needs the head of the stream and the
+	// store needs all of it, and this is what lets both have it without
+	// holding the whole upload in memory.
+	head := make([]byte, sniffLen)
+	n, err := io.ReadFull(r, head)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return Attachment{}, fmt.Errorf("upload attachment: read: %w", err)
+	}
+	head = head[:n]
+
+	contentType := detectContentType(head)
+	if _, ok := s.allowed[contentType]; !ok {
+		// The message names the detected type rather than the declared
+		// one, because otherwise a client that mislabels a file gets an
+		// error quoting its own incorrect label back and no way to see
+		// what the server actually made of the bytes.
+		return Attachment{}, fmt.Errorf("%w: content type %q is not accepted", ErrInvalidInput, contentType)
+	}
+
+	id, err := s.newIDFunc()
+	if err != nil {
+		return Attachment{}, fmt.Errorf("upload attachment: %w", err)
+	}
+	// The storage key is generated here and never derived from anything
+	// the client sent. That is what makes the name on disk unable to
+	// carry a traversal sequence, and it is also why a repeated upload of
+	// the same file cannot overwrite the earlier one.
+	storageKey, err := s.newIDFunc()
+	if err != nil {
+		return Attachment{}, fmt.Errorf("upload attachment: %w", err)
+	}
+
+	// Bytes first, metadata second. The reverse order would leave a row
+	// pointing at a file that does not exist if the write failed — a
+	// download that 500s forever, with nothing to indicate why. This
+	// order can leave an unreferenced blob instead, which costs disk and
+	// nothing else, and is cleaned up below on the path we can see.
+	size, err := s.blobs.Put(ctx, storageKey, io.MultiReader(bytes.NewReader(head), r), s.maxBytes)
+	if err != nil {
+		if err == ErrTooLarge {
+			return Attachment{}, fmt.Errorf("%w: attachment must be at most %d bytes", ErrInvalidInput, s.maxBytes)
+		}
+		return Attachment{}, fmt.Errorf("upload attachment: %w", err)
+	}
+
+	att := Attachment{
+		ID:               id,
+		TaskID:           taskID,
+		OriginalFilename: filename,
+		StorageKey:       storageKey,
+		ContentType:      contentType,
+		SizeBytes:        size,
+		CreatedAt:        s.nowFunc(),
+	}
+
+	if err := s.repo.Create(ctx, att, userID); err != nil {
+		// Best effort: if this fails too, the blob is orphaned. That is
+		// the failure this ordering deliberately trades for, and the
+		// original error is what the caller needs to see — losing it to
+		// report a cleanup problem would hide the actual cause.
+		_ = s.blobs.Delete(ctx, storageKey)
+		return Attachment{}, fmt.Errorf("upload attachment: %w", err)
+	}
+
+	return att, nil
+}
+
+// Download resolves storageKey to its metadata and opens the bytes behind
+// it. The caller closes the returned reader.
+//
+// Resolving the key is not authorization: the lookup is scoped to userID,
+// so a key that leads to somebody else's task is reported as if it led
+// nowhere. See Repository's doc comment.
+func (s *Service) Download(ctx context.Context, userID, storageKey string) (Attachment, io.ReadSeekCloser, error) {
+	att, err := s.repo.FindByStorageKey(ctx, storageKey, userID)
+	if err != nil {
+		return Attachment{}, nil, fmt.Errorf("download attachment: %w", err)
+	}
+
+	blob, err := s.blobs.Open(ctx, att.StorageKey)
+	if err != nil {
+		// A row whose blob is missing is a real inconsistency, not a
+		// caller error — but there is nothing to serve either way, and
+		// telling the caller apart from "no such attachment" would only
+		// expose an internal fault.
+		return Attachment{}, nil, fmt.Errorf("download attachment: %w", err)
+	}
+
+	return att, blob, nil
+}
+
+// ListByTask returns every attachment on taskID, which must belong to
+// userID.
+func (s *Service) ListByTask(ctx context.Context, userID, taskID string) ([]Attachment, error) {
+	attachments, err := s.repo.FindByTask(ctx, taskID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list attachments: %w", err)
+	}
+	return attachments, nil
+}
+
+// CollectOrphans deletes blobs that no attachment row references and
+// that have been sitting untouched for at least minAge. It returns how
+// many it removed.
+//
+// # Why a collector rather than deleting on the spot
+//
+// Deleting a task cascades its attachment rows away in the database, and
+// nothing in that path can reach the filesystem. The alternative — having
+// Service delete the blobs as part of the task delete — would couple the
+// success of deleting a task to the success of deleting a file, for a
+// resource whose loss costs disk space and nothing else. That is the same
+// cost reasoning behind writing bytes before metadata in Upload: prefer
+// the failure mode that leaves garbage over the one that leaves a broken
+// reference or a blocked operation.
+//
+// # Why minAge is not optional
+//
+// Upload writes the blob before the metadata row. In the window between
+// those two steps a perfectly healthy upload looks exactly like an
+// orphan: bytes on disk that no row references. A collector without a
+// grace period would race every upload in flight and delete some of them
+// — turning a maintenance job into data loss, intermittently and under
+// load, which is the worst way to find out.
+//
+// minAge must therefore exceed the longest plausible gap between those
+// two steps: the time to stream a large upload to disk plus the time to
+// insert a row. A caller passing zero gets an error rather than a fast
+// collector.
+//
+// # What it will not delete
+//
+// Only names the store reports that the Repository confirms are
+// unreferenced. A name that could not have been written by this
+// application — anything that is not a storage key — is not reported as
+// unreferenced by Repository.UnreferencedKeys, so a stray file in the
+// storage directory is left alone. This function deletes things; every
+// ambiguity resolves toward keeping them.
+func (s *Service) CollectOrphans(ctx context.Context, minAge time.Duration) (int, error) {
+	if minAge <= 0 {
+		return 0, fmt.Errorf("%w: orphan collection requires a positive minimum age", ErrInvalidInput)
+	}
+
+	refs, err := s.blobs.List(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("collect orphans: %w", err)
+	}
+
+	cutoff := s.nowFunc().Add(-minAge)
+	candidates := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref.ModTime.Before(cutoff) {
+			candidates = append(candidates, ref.Key)
+		}
+	}
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+
+	orphans, err := s.repo.UnreferencedKeys(ctx, candidates)
+	if err != nil {
+		return 0, fmt.Errorf("collect orphans: %w", err)
+	}
+
+	deleted := 0
+	for _, key := range orphans {
+		if err := s.blobs.Delete(ctx, key); err != nil {
+			// Report what was achieved along with the failure. A pass
+			// that removed some files and then hit an I/O error has
+			// still done that work, and the caller logging "0 removed"
+			// would be wrong about it.
+			return deleted, fmt.Errorf("collect orphans: %w", err)
+		}
+		deleted++
+	}
+
+	return deleted, nil
+}
+
+// detectContentType identifies the bytes and strips any parameters from
+// the result, so that "text/plain; charset=utf-8" is matched against the
+// allow-list as "text/plain" — the parameter describes the encoding, not
+// the format being allowed.
+func detectContentType(head []byte) string {
+	full := http.DetectContentType(head)
+	if i := strings.IndexByte(full, ';'); i >= 0 {
+		full = full[:i]
+	}
+	return strings.TrimSpace(strings.ToLower(full))
+}
+
+// normalizeFilename reduces a client-supplied filename to the metadata
+// this package keeps.
+//
+// It takes only the last path component, because clients do send full
+// paths — some browsers historically sent "C:\Users\me\report.pdf" — and
+// keeping the directory part would store something that reads like a
+// location. That is a display concern rather than a safety one: this
+// value never reaches the filesystem, and safety comes from the storage
+// key being server-generated. Stripping it anyway means the value is not
+// *mistakable* for a path by whatever handles it next.
+//
+// PlainText strips control characters and collapses whitespace, for the
+// same reasons task titles get it: a filename is one line of display
+// text, and a name carrying a NUL or an escape sequence damages whatever
+// later prints it.
+func normalizeFilename(name string) (string, error) {
+	// Both separators, regardless of this platform: the value came from
+	// the client's machine, not from ours, so which one it uses is not
+	// ours to assume.
+	name = name[strings.LastIndexAny(name, `/\`)+1:]
+	name = sanitize.PlainText(filepath.Base(name))
+
+	// filepath.Base turns an empty or all-separator input into "." or
+	// "/", and ".." survives it unchanged — none of the three is a
+	// filename anyone typed.
+	//
+	// Rejecting the dot segments is not a traversal defense: this value
+	// never reaches the filesystem, and the name on disk is the
+	// server-generated storage key. It is here because the value *is*
+	// echoed back in Content-Disposition, and a download offering to
+	// save a file as ".." is a nonsense the client should not have to
+	// handle.
+	switch name {
+	case "", ".", "..", string(filepath.Separator):
+		return "", fmt.Errorf("%w: filename must not be empty", ErrInvalidInput)
+	}
+	if utf8.RuneCountInString(name) > maxOriginalFilenameLen {
+		return "", fmt.Errorf("%w: filename must be at most %d characters", ErrInvalidInput, maxOriginalFilenameLen)
+	}
+
+	return name, nil
+}

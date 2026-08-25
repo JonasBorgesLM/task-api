@@ -1,7 +1,7 @@
 .PHONY: help run build tidy clean \
-        test test-race test-integration test-integration-race coverage coverage-full \
-        fmt fmt-check vet lint check \
-        docker-build docker-up docker-down db-up \
+        test test-race test-integration test-integration-race coverage coverage-full fuzz \
+        fmt fmt-check vet lint vulncheck check \
+        docker-build docker-up docker-down db-up storage-up \
         migrate-up migrate-down seed seed-reset db-reset
 
 .DEFAULT_GOAL := help
@@ -17,6 +17,18 @@ DATABASE_URL       ?= $(TEST_DATABASE_URL)
 # Override on the command line, e.g. `make seed SEED_USERS=20 SEED_TASKS_PER_USER=50`.
 SEED_USERS ?= 5
 SEED_TASKS_PER_USER ?= 10
+
+# How long `make fuzz` runs for. CI uses its own budget (see
+# .github/workflows/ci.yml); a longer one here is what you want when
+# deliberately hunting rather than guarding against regression.
+FUZZTIME ?= 45s
+
+# MinIO started by `make storage-up` / `make docker-up` (see
+# docker-compose.yml), used by internal/attachment's S3 integration
+# tests. Unset TEST_S3_ENDPOINT to skip them rather than fail.
+TEST_S3_ENDPOINT   ?= localhost:9000
+TEST_S3_ACCESS_KEY ?= task_api
+TEST_S3_SECRET_KEY ?= task_api_secret
 
 ##@ Help
 
@@ -63,11 +75,22 @@ test-race: ## Run unit tests with the race detector enabled
 # skipped — passing CI without ever executing. Unit tests in the same
 # packages run too, which costs a few seconds and removes a way to be
 # wrong.
-test-integration: ## Run PostgreSQL integration tests (needs `make db-up` first)
-	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -p 1 -tags=integration ./... -v
+test-integration: ## Run integration tests — PostgreSQL + MinIO (needs `make db-up storage-up` first)
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" \
+	TEST_S3_ENDPOINT="$(TEST_S3_ENDPOINT)" \
+	TEST_S3_ACCESS_KEY="$(TEST_S3_ACCESS_KEY)" \
+	TEST_S3_SECRET_KEY="$(TEST_S3_SECRET_KEY)" \
+	go test -p 1 -tags=integration ./... -v
 
-test-integration-race: ## Run PostgreSQL integration tests with the race detector (needs `make db-up` first)
-	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -p 1 -tags=integration -race ./...
+test-integration-race: ## Run integration tests with the race detector (needs `make db-up storage-up` first)
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" \
+	TEST_S3_ENDPOINT="$(TEST_S3_ENDPOINT)" \
+	TEST_S3_ACCESS_KEY="$(TEST_S3_ACCESS_KEY)" \
+	TEST_S3_SECRET_KEY="$(TEST_S3_SECRET_KEY)" \
+	go test -p 1 -tags=integration -race ./...
+
+fuzz: ## Fuzz the attachment store's path containment (override: `make fuzz FUZZTIME=5m`)
+	go test ./internal/attachment/ -run FuzzFSBlobStore_OpenNeverEscapesRoot -fuzz FuzzFSBlobStore_OpenNeverEscapesRoot -fuzztime $(FUZZTIME)
 
 coverage: ## Run unit tests and print a per-function coverage report
 	go test -coverprofile=coverage.out ./...
@@ -106,7 +129,11 @@ lint: ## Run staticcheck (installs it into $GOBIN if not already present)
 	staticcheck ./...
 	staticcheck -tags=integration ./...
 
-check: fmt-check vet lint test-race ## Run everything the CI quality gate runs (no PostgreSQL required)
+vulncheck: ## Run govulncheck (installs it into $GOBIN if not already present)
+	@command -v govulncheck >/dev/null 2>&1 || go install golang.org/x/vuln/cmd/govulncheck@latest
+	govulncheck ./...
+
+check: fmt-check vet lint vulncheck test-race ## Run everything the CI quality gate runs (no PostgreSQL required)
 
 ##@ Docker
 
@@ -118,6 +145,9 @@ docker-up: ## Start the full stack (API + PostgreSQL + Swagger UI at :8082) via 
 
 docker-down: ## Stop and remove every container docker compose started (data volume is kept)
 	docker compose down
+
+storage-up: ## Start only MinIO (+ create the bucket) — for `make test-integration`
+	docker compose up -d minio minio-bucket
 
 db-up: ## Start only PostgreSQL — for `make run` on the host, or `make test-integration`/`migrate-*`
 	docker compose up -d postgres
