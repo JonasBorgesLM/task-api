@@ -179,6 +179,35 @@ segundo mount, não uma edição em todo `RegisterRoutes` do código.
 
 ---
 
+## govulncheck no CI: fail-closed no alcançável
+
+A etapa de `govulncheck` falha o build quando encontra vulnerabilidade que o
+código **de fato alcança**. Presença no grafo de dependências, sem chamada,
+não bloqueia.
+
+**Por quê:** é o comportamento padrão da ferramenta, e é o único que
+distingue risco de ruído. Medido neste repositório: com apenas o achado de
+`golang.org/x/crypto/openpgp` (não importamos `openpgp`, usamos `bcrypt`, e
+o pacote não tem correção por ser não mantido por design), o comando sai
+com **exit code 0**. Com as quatro vulnerabilidades da stdlib que existiam
+antes do Go 1.26.6, saía com **exit code 3**. Os dois lados foram
+verificados por execução, não por leitura da documentação.
+
+**Trade-off aceito:** um advisory contra a biblioteca padrão pode travar
+merges até existir release do Go que o corrija — parte do ritmo de merge
+passa a depender do calendário do Go, não só do trabalho do time. Aceito em
+troca de não deixar vulnerabilidade alcançável entrar em `main` em
+silêncio. As quatro que o projeto carregou até o Go 1.26.6 foram
+encontradas rodando a ferramenta à mão, porque nada no pipeline procurava.
+
+**Sem allowlist, e isso é deliberado.** O `govulncheck` não tem mecanismo
+nativo de supressão. Se um dia aparecer achado alcançável sem correção
+upstream, a saída não será uma flag: será decidir entre esperar o upstream,
+trocar a dependência, ou filtrar a saída JSON. Melhor decidir com o caso
+concreto na mão do que construir o mecanismo antes de existir o problema.
+
+---
+
 ## Princípio geral de validação
 
 Decisões e correções neste projeto são verificadas pela execução real, não
