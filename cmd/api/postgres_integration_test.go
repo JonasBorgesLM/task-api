@@ -111,7 +111,7 @@ func TestPostgres_ServerLifecycle(t *testing.T) {
 
 	token := registerAndLogin(t, ts)
 
-	createResp, err := client.Do(authedRequest(t, token, http.MethodPost, ts.URL+"/tasks",
+	createResp, err := client.Do(authedRequest(t, token, http.MethodPost, ts.URL+apiPrefix+"/tasks",
 		`{"title":"Postgres-backed task","description":"created against real PostgreSQL"}`))
 	if err != nil {
 		t.Fatalf("POST /tasks: %v", err)
@@ -130,7 +130,7 @@ func TestPostgres_ServerLifecycle(t *testing.T) {
 		t.Fatal("POST /tasks: created task has empty ID")
 	}
 
-	getResp, err := client.Do(authedRequest(t, token, http.MethodGet, ts.URL+"/tasks/"+created.ID, ""))
+	getResp, err := client.Do(authedRequest(t, token, http.MethodGet, ts.URL+apiPrefix+"/tasks/"+created.ID, ""))
 	if err != nil {
 		t.Fatalf("GET /tasks/{id}: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestPostgres_ServerLifecycle(t *testing.T) {
 		t.Fatalf("GET /tasks/{id} status = %d, want %d", getResp.StatusCode, http.StatusOK)
 	}
 
-	deleteResp, err := client.Do(authedRequest(t, token, http.MethodDelete, ts.URL+"/tasks/"+created.ID, ""))
+	deleteResp, err := client.Do(authedRequest(t, token, http.MethodDelete, ts.URL+apiPrefix+"/tasks/"+created.ID, ""))
 	if err != nil {
 		t.Fatalf("DELETE /tasks/{id}: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestPostgres_ServerLifecycle(t *testing.T) {
 
 	// Persistence: a fresh, separate GET against the real database must
 	// now report it gone.
-	goneResp, err := client.Do(authedRequest(t, token, http.MethodGet, ts.URL+"/tasks/"+created.ID, ""))
+	goneResp, err := client.Do(authedRequest(t, token, http.MethodGet, ts.URL+apiPrefix+"/tasks/"+created.ID, ""))
 	if err != nil {
 		t.Fatalf("GET /tasks/{id} after delete: %v", err)
 	}

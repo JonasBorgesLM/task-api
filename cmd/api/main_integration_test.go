@@ -18,6 +18,13 @@ import (
 	"github.com/JonasBorgesLM/task-api/internal/task"
 )
 
+// apiPrefix is where the versioned contract is mounted. The health
+// probes and /debug/vars are deliberately *not* under it — they are
+// operational endpoints rather than part of the contract a client codes
+// against — so tests hitting those keep using bare paths, and that
+// asymmetry is the point rather than an oversight.
+const apiPrefix = "/v1"
+
 // testConfig returns the config.Config every test in this file builds a
 // server from: no DatabaseURL (so it always resolves to the in-memory
 // Repositorys), but a real AuthSessionTTL — unlike every other field, a
@@ -95,7 +102,7 @@ func registerAndLoginAs(t *testing.T, srv *httptest.Server, email string) string
 
 	body := `{"email":"` + email + `","password":"password12345"}`
 
-	regResp, err := srv.Client().Post(srv.URL+"/auth/register", "application/json", strings.NewReader(body))
+	regResp, err := srv.Client().Post(srv.URL+apiPrefix+"/auth/register", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /auth/register: %v", err)
 	}
@@ -105,7 +112,7 @@ func registerAndLoginAs(t *testing.T, srv *httptest.Server, email string) string
 		t.Fatalf("POST /auth/register status = %d, body = %s", regResp.StatusCode, respBody)
 	}
 
-	loginResp, err := srv.Client().Post(srv.URL+"/auth/login", "application/json", strings.NewReader(body))
+	loginResp, err := srv.Client().Post(srv.URL+apiPrefix+"/auth/login", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /auth/login: %v", err)
 	}
@@ -157,7 +164,7 @@ func TestIntegration_TaskLifecycle(t *testing.T) {
 	token := registerAndLogin(t, srv)
 
 	// --- Create ---
-	createResp, err := client.Do(authedRequest(t, token, http.MethodPost, srv.URL+"/tasks",
+	createResp, err := client.Do(authedRequest(t, token, http.MethodPost, srv.URL+apiPrefix+"/tasks",
 		`{"title":"Integration task","description":"created via real stack"}`))
 	if err != nil {
 		t.Fatalf("POST /tasks: %v", err)
@@ -180,7 +187,7 @@ func TestIntegration_TaskLifecycle(t *testing.T) {
 	}
 
 	// --- Read ---
-	getResp, err := client.Do(authedRequest(t, token, http.MethodGet, srv.URL+"/tasks/"+created.ID, ""))
+	getResp, err := client.Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/tasks/"+created.ID, ""))
 	if err != nil {
 		t.Fatalf("GET /tasks/{id}: %v", err)
 	}
@@ -191,7 +198,7 @@ func TestIntegration_TaskLifecycle(t *testing.T) {
 	}
 
 	// --- List ---
-	listResp, err := client.Do(authedRequest(t, token, http.MethodGet, srv.URL+"/tasks", ""))
+	listResp, err := client.Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/tasks", ""))
 	if err != nil {
 		t.Fatalf("GET /tasks: %v", err)
 	}
@@ -206,7 +213,7 @@ func TestIntegration_TaskLifecycle(t *testing.T) {
 	}
 
 	// --- Update ---
-	updateResp, err := client.Do(authedRequest(t, token, http.MethodPut, srv.URL+"/tasks/"+created.ID,
+	updateResp, err := client.Do(authedRequest(t, token, http.MethodPut, srv.URL+apiPrefix+"/tasks/"+created.ID,
 		`{"title":"Updated integration task","description":"updated via real stack"}`))
 	if err != nil {
 		t.Fatalf("PUT /tasks/{id}: %v", err)
@@ -226,7 +233,7 @@ func TestIntegration_TaskLifecycle(t *testing.T) {
 	}
 
 	// --- Complete ---
-	completeResp, err := client.Do(authedRequest(t, token, http.MethodPatch, srv.URL+"/tasks/"+created.ID+"/done", ""))
+	completeResp, err := client.Do(authedRequest(t, token, http.MethodPatch, srv.URL+apiPrefix+"/tasks/"+created.ID+"/done", ""))
 	if err != nil {
 		t.Fatalf("PATCH /tasks/{id}/done: %v", err)
 	}
@@ -245,7 +252,7 @@ func TestIntegration_TaskLifecycle(t *testing.T) {
 	}
 
 	// --- Delete ---
-	deleteResp, err := client.Do(authedRequest(t, token, http.MethodDelete, srv.URL+"/tasks/"+created.ID, ""))
+	deleteResp, err := client.Do(authedRequest(t, token, http.MethodDelete, srv.URL+apiPrefix+"/tasks/"+created.ID, ""))
 	if err != nil {
 		t.Fatalf("DELETE /tasks/{id}: %v", err)
 	}
@@ -256,7 +263,7 @@ func TestIntegration_TaskLifecycle(t *testing.T) {
 	}
 
 	// --- Verify gone ---
-	goneResp, err := client.Do(authedRequest(t, token, http.MethodGet, srv.URL+"/tasks/"+created.ID, ""))
+	goneResp, err := client.Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/tasks/"+created.ID, ""))
 	if err != nil {
 		t.Fatalf("GET /tasks/{id} after delete: %v", err)
 	}
@@ -275,7 +282,7 @@ func TestIntegration_CreateTask_RequiresAuth(t *testing.T) {
 	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
 	defer srv.Close()
 
-	resp, err := srv.Client().Post(srv.URL+"/tasks", "application/json", strings.NewReader(`{"title":"T"}`))
+	resp, err := srv.Client().Post(srv.URL+apiPrefix+"/tasks", "application/json", strings.NewReader(`{"title":"T"}`))
 	if err != nil {
 		t.Fatalf("POST /tasks: %v", err)
 	}
@@ -294,7 +301,7 @@ func TestIntegration_CreateTask_EmptyTitle_Returns400(t *testing.T) {
 	defer srv.Close()
 	token := registerAndLogin(t, srv)
 
-	resp, err := srv.Client().Do(authedRequest(t, token, http.MethodPost, srv.URL+"/tasks", `{"title":""}`))
+	resp, err := srv.Client().Do(authedRequest(t, token, http.MethodPost, srv.URL+apiPrefix+"/tasks", `{"title":""}`))
 	if err != nil {
 		t.Fatalf("POST /tasks: %v", err)
 	}
@@ -487,7 +494,7 @@ func TestIntegration_CORS_Enabled_PreflightForRegisteredRoute(t *testing.T) {
 	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
 	defer srv.Close()
 
-	req, err := http.NewRequest(http.MethodOptions, srv.URL+"/tasks", nil)
+	req, err := http.NewRequest(http.MethodOptions, srv.URL+apiPrefix+"/tasks", nil)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -526,7 +533,7 @@ func TestIntegration_CORS_Enabled_DisallowedOrigin_PreflightStill404s(t *testing
 	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
 	defer srv.Close()
 
-	req, err := http.NewRequest(http.MethodOptions, srv.URL+"/tasks", nil)
+	req, err := http.NewRequest(http.MethodOptions, srv.URL+apiPrefix+"/tasks", nil)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -585,7 +592,7 @@ func TestIntegration_RateLimit_ProtectsTaskRoutes(t *testing.T) {
 
 	var statuses []int
 	for range 3 {
-		resp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+"/tasks", ""))
+		resp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/tasks", ""))
 		if err != nil {
 			t.Fatalf("GET /tasks: %v", err)
 		}
@@ -614,7 +621,7 @@ func TestIntegration_RateLimit_PerUserBucketsAreIndependent(t *testing.T) {
 
 	// Drain user A's bucket: one allowed, one rejected.
 	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
-		resp, err := srv.Client().Do(authedRequest(t, tokenA, http.MethodGet, srv.URL+"/tasks", ""))
+		resp, err := srv.Client().Do(authedRequest(t, tokenA, http.MethodGet, srv.URL+apiPrefix+"/tasks", ""))
 		if err != nil {
 			t.Fatalf("user A GET /tasks #%d: %v", i+1, err)
 		}
@@ -625,7 +632,7 @@ func TestIntegration_RateLimit_PerUserBucketsAreIndependent(t *testing.T) {
 	}
 
 	// User B is untouched by user A having exhausted theirs.
-	resp, err := srv.Client().Do(authedRequest(t, tokenB, http.MethodGet, srv.URL+"/tasks", ""))
+	resp, err := srv.Client().Do(authedRequest(t, tokenB, http.MethodGet, srv.URL+apiPrefix+"/tasks", ""))
 	if err != nil {
 		t.Fatalf("user B GET /tasks: %v", err)
 	}
@@ -645,7 +652,7 @@ func TestIntegration_RateLimit_GlobalAppliesBeforeAuthentication(t *testing.T) {
 	srv := httptest.NewServer(newTestServer(t, rateLimitedConfig("global", 1), discardLogger()).Handler)
 	defer srv.Close()
 
-	first, err := srv.Client().Get(srv.URL + "/tasks")
+	first, err := srv.Client().Get(srv.URL + apiPrefix + "/tasks")
 	if err != nil {
 		t.Fatalf("first GET /tasks: %v", err)
 	}
@@ -654,7 +661,7 @@ func TestIntegration_RateLimit_GlobalAppliesBeforeAuthentication(t *testing.T) {
 		t.Fatalf("first GET /tasks = %d, want 401 (within burst, so auth decides)", first.StatusCode)
 	}
 
-	second, err := srv.Client().Get(srv.URL + "/tasks")
+	second, err := srv.Client().Get(srv.URL + apiPrefix + "/tasks")
 	if err != nil {
 		t.Fatalf("second GET /tasks: %v", err)
 	}
@@ -673,7 +680,7 @@ func TestIntegration_RateLimit_AuthRoutesHaveTheirOwnTier(t *testing.T) {
 
 	const body = `{"email":"nobody@example.com","password":"wrong-password-here"}`
 
-	first, err := srv.Client().Post(srv.URL+"/auth/login", "application/json", strings.NewReader(body))
+	first, err := srv.Client().Post(srv.URL+apiPrefix+"/auth/login", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("first POST /auth/login: %v", err)
 	}
@@ -682,7 +689,7 @@ func TestIntegration_RateLimit_AuthRoutesHaveTheirOwnTier(t *testing.T) {
 		t.Fatalf("first POST /auth/login = %d, want 401", first.StatusCode)
 	}
 
-	second, err := srv.Client().Post(srv.URL+"/auth/login", "application/json", strings.NewReader(body))
+	second, err := srv.Client().Post(srv.URL+apiPrefix+"/auth/login", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("second POST /auth/login: %v", err)
 	}
@@ -703,7 +710,7 @@ func TestIntegration_RateLimit_RejectionCarriesSecurityHeaders(t *testing.T) {
 	// Not /health: that route deliberately bypasses the global limiter
 	// (see newServer), so it can never produce the 429 this test needs.
 	for range 2 {
-		resp, err := srv.Client().Get(srv.URL + "/tasks")
+		resp, err := srv.Client().Get(srv.URL + apiPrefix + "/tasks")
 		if err != nil {
 			t.Fatalf("GET /tasks: %v", err)
 		}
@@ -731,7 +738,7 @@ func TestIntegration_RateLimit_HealthProbesAreExempt(t *testing.T) {
 
 	// Drain the global bucket on a route that is subject to it.
 	for range 2 {
-		resp, err := srv.Client().Get(srv.URL + "/tasks")
+		resp, err := srv.Client().Get(srv.URL + apiPrefix + "/tasks")
 		if err != nil {
 			t.Fatalf("GET /tasks: %v", err)
 		}
@@ -740,7 +747,7 @@ func TestIntegration_RateLimit_HealthProbesAreExempt(t *testing.T) {
 
 	// Confirm the bucket really is empty, so a 200 below means the
 	// exemption rather than a limiter that never engaged.
-	drained, err := srv.Client().Get(srv.URL + "/tasks")
+	drained, err := srv.Client().Get(srv.URL + apiPrefix + "/tasks")
 	if err != nil {
 		t.Fatalf("GET /tasks: %v", err)
 	}
@@ -792,7 +799,7 @@ func TestIntegration_TrustedProxies_ForgedHeaderIgnoredWhenPeerIsNotTrusted(t *t
 	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
 	defer srv.Close()
 
-	first, err := srv.Client().Do(forgedRequest(t, srv.URL+"/tasks", "203.0.113.1"))
+	first, err := srv.Client().Do(forgedRequest(t, srv.URL+apiPrefix+"/tasks", "203.0.113.1"))
 	if err != nil {
 		t.Fatalf("first request: %v", err)
 	}
@@ -803,7 +810,7 @@ func TestIntegration_TrustedProxies_ForgedHeaderIgnoredWhenPeerIsNotTrusted(t *t
 
 	// A different forged address. The peer is unchanged, so the bucket
 	// must be too.
-	second, err := srv.Client().Do(forgedRequest(t, srv.URL+"/tasks", "203.0.113.2"))
+	second, err := srv.Client().Do(forgedRequest(t, srv.URL+apiPrefix+"/tasks", "203.0.113.2"))
 	if err != nil {
 		t.Fatalf("second request: %v", err)
 	}
@@ -828,7 +835,7 @@ func TestIntegration_TrustedProxies_HeaderHonouredWhenPeerIsTrusted(t *testing.T
 
 	// Drain the bucket belonging to the first client behind the proxy.
 	for i, want := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
-		resp, err := srv.Client().Do(forgedRequest(t, srv.URL+"/tasks", "203.0.113.1"))
+		resp, err := srv.Client().Do(forgedRequest(t, srv.URL+apiPrefix+"/tasks", "203.0.113.1"))
 		if err != nil {
 			t.Fatalf("client 1 request #%d: %v", i+1, err)
 		}
@@ -839,7 +846,7 @@ func TestIntegration_TrustedProxies_HeaderHonouredWhenPeerIsTrusted(t *testing.T
 	}
 
 	// A different client behind the same proxy is unaffected.
-	resp, err := srv.Client().Do(forgedRequest(t, srv.URL+"/tasks", "203.0.113.2"))
+	resp, err := srv.Client().Do(forgedRequest(t, srv.URL+apiPrefix+"/tasks", "203.0.113.2"))
 	if err != nil {
 		t.Fatalf("client 2 request: %v", err)
 	}
@@ -902,7 +909,7 @@ func uploadFile(t *testing.T, srv *httptest.Server, token, taskID, filename stri
 		t.Fatalf("close multipart writer: %v", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/tasks/"+taskID+"/attachments", &body)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+apiPrefix+"/tasks/"+taskID+"/attachments", &body)
 	if err != nil {
 		t.Fatalf("build upload request: %v", err)
 	}
@@ -920,7 +927,7 @@ func uploadFile(t *testing.T, srv *httptest.Server, token, taskID, filename stri
 func createTask(t *testing.T, srv *httptest.Server, token string) string {
 	t.Helper()
 
-	resp, err := srv.Client().Do(authedRequest(t, token, http.MethodPost, srv.URL+"/tasks", `{"title":"with attachments"}`))
+	resp, err := srv.Client().Do(authedRequest(t, token, http.MethodPost, srv.URL+apiPrefix+"/tasks", `{"title":"with attachments"}`))
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -974,7 +981,7 @@ func TestIntegration_AttachmentLifecycle(t *testing.T) {
 	}
 
 	// List.
-	listResp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+"/tasks/"+taskID+"/attachments", ""))
+	listResp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/tasks/"+taskID+"/attachments", ""))
 	if err != nil {
 		t.Fatalf("list attachments: %v", err)
 	}
@@ -993,7 +1000,7 @@ func TestIntegration_AttachmentLifecycle(t *testing.T) {
 	}
 
 	// Download.
-	dlResp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+"/files/"+uploaded.StorageKey, ""))
+	dlResp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/files/"+uploaded.StorageKey, ""))
 	if err != nil {
 		t.Fatalf("download: %v", err)
 	}
@@ -1043,7 +1050,7 @@ func TestIntegration_Attachment_CrossUserIsRefused(t *testing.T) {
 
 	// The stranger holds a real, valid storage key and must still be
 	// refused — indistinguishably from a key that names nothing.
-	dlResp, err := srv.Client().Do(authedRequest(t, strangerToken, http.MethodGet, srv.URL+"/files/"+uploaded.StorageKey, ""))
+	dlResp, err := srv.Client().Do(authedRequest(t, strangerToken, http.MethodGet, srv.URL+apiPrefix+"/files/"+uploaded.StorageKey, ""))
 	if err != nil {
 		t.Fatalf("stranger download: %v", err)
 	}
@@ -1052,7 +1059,7 @@ func TestIntegration_Attachment_CrossUserIsRefused(t *testing.T) {
 		t.Errorf("stranger download status = %d, want 404", dlResp.StatusCode)
 	}
 
-	listResp, err := srv.Client().Do(authedRequest(t, strangerToken, http.MethodGet, srv.URL+"/tasks/"+taskID+"/attachments", ""))
+	listResp, err := srv.Client().Do(authedRequest(t, strangerToken, http.MethodGet, srv.URL+apiPrefix+"/tasks/"+taskID+"/attachments", ""))
 	if err != nil {
 		t.Fatalf("stranger list: %v", err)
 	}
@@ -1100,5 +1107,252 @@ func TestIntegration_Attachment_DisabledByDefault(t *testing.T) {
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("upload with attachments disabled: status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// --- API versioning ---
+
+// TestIntegration_Versioning_ContractIsUnderV1 pins which routes moved
+// and which deliberately did not.
+//
+// The split is the decision, not an implementation detail: the versioned
+// paths are the contract a client codes against, while the health probes
+// and /debug/vars are operational. An orchestrator probe does not
+// negotiate an API version, and the readiness probe in particular is
+// named in deployment manifests — versioning it would mean re-editing
+// those every time the API version moves.
+func TestIntegration_Versioning_ContractIsUnderV1(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, attachmentConfig(t), discardLogger()).Handler)
+	defer srv.Close()
+
+	tests := []struct {
+		name string
+		path string
+		// versioned routes answer 401 unauthenticated, which is proof
+		// the route exists; 404 would mean it does not.
+		wantVersioned   int
+		wantUnversioned int
+	}{
+		{"tasks", "/tasks", http.StatusUnauthorized, http.StatusNotFound},
+		{"one task", "/tasks/some-id", http.StatusUnauthorized, http.StatusNotFound},
+		{"attachments", "/tasks/some-id/attachments", http.StatusUnauthorized, http.StatusNotFound},
+		{"files", "/files/some-key", http.StatusUnauthorized, http.StatusNotFound},
+		{"auth me", "/auth/me", http.StatusUnauthorized, http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			versioned, err := srv.Client().Get(srv.URL + apiPrefix + tt.path)
+			if err != nil {
+				t.Fatalf("GET %s%s: %v", apiPrefix, tt.path, err)
+			}
+			versioned.Body.Close()
+			if versioned.StatusCode != tt.wantVersioned {
+				t.Errorf("GET %s%s = %d, want %d", apiPrefix, tt.path, versioned.StatusCode, tt.wantVersioned)
+			}
+
+			// The unversioned path must be gone, not quietly still
+			// served. A dual mount would make the version prefix
+			// decorative and let a client keep depending on a contract
+			// nobody is versioning.
+			unversioned, err := srv.Client().Get(srv.URL + tt.path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", tt.path, err)
+			}
+			unversioned.Body.Close()
+			if unversioned.StatusCode != tt.wantUnversioned {
+				t.Errorf("GET %s = %d, want %d — the unprefixed contract must not still be served",
+					tt.path, unversioned.StatusCode, tt.wantUnversioned)
+			}
+		})
+	}
+}
+
+// TestIntegration_Versioning_OperationalRoutesStayUnprefixed is the other
+// half: these must keep working exactly where they were, and must *not*
+// have gained a /v1 alias.
+func TestIntegration_Versioning_OperationalRoutesStayUnprefixed(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	for _, path := range []string{"/health", "/health/ready"} {
+		t.Run(path, func(t *testing.T) {
+			resp, err := srv.Client().Get(srv.URL + path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("GET %s = %d, want 200", path, resp.StatusCode)
+			}
+
+			prefixed, err := srv.Client().Get(srv.URL + apiPrefix + path)
+			if err != nil {
+				t.Fatalf("GET %s%s: %v", apiPrefix, path, err)
+			}
+			prefixed.Body.Close()
+			if prefixed.StatusCode != http.StatusNotFound {
+				t.Errorf("GET %s%s = %d, want 404 — operational routes are not part of the versioned contract",
+					apiPrefix, path, prefixed.StatusCode)
+			}
+		})
+	}
+}
+
+// TestIntegration_Versioning_UnknownPathUnderV1Is404 guards the subtree
+// mount: "/v1/" catches everything beneath it, so an unknown path must
+// 404 from inside the versioned mux rather than falling through to
+// something else.
+func TestIntegration_Versioning_UnknownPathUnderV1Is404(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + apiPrefix + "/no-such-thing")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET %s/no-such-thing = %d, want 404", apiPrefix, resp.StatusCode)
+	}
+}
+
+// --- cross-origin end to end ---
+
+// TestIntegration_CrossOriginFlow walks the whole sequence a browser
+// frontend performs, from an origin other than the API's: register, log
+// in, keep the token, create a task with it, list tasks back.
+//
+// The CORS tests elsewhere in this file assert headers on single
+// requests. This one asserts the *flow* — that a client which only ever
+// sees what CORS exposes to it can actually complete the sequence. The
+// two are different failures: a preflight can be answered correctly and
+// the flow still break because a header the client needs is not on the
+// exposed list.
+//
+// Note there is no CSRF step. Auth is a bearer token in a header the
+// frontend sets itself, not a cookie the browser attaches automatically,
+// so the vector CSRF defends against does not exist here (see
+// docs/DECISIONS.md).
+func TestIntegration_CrossOriginFlow(t *testing.T) {
+	const frontendOrigin = "http://localhost:3000"
+
+	cfg := testConfig()
+	cfg.CORSAllowedOrigins = []string{frontendOrigin}
+
+	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
+	defer srv.Close()
+
+	// A browser sends Origin on every cross-origin request, and refuses
+	// to expose the response to the script unless the reply allows it.
+	// Every request below carries it, and every response is checked.
+	do := func(t *testing.T, method, path, token, body string) *http.Response {
+		t.Helper()
+
+		var reader io.Reader
+		if body != "" {
+			reader = strings.NewReader(body)
+		}
+		req, err := http.NewRequest(method, srv.URL+apiPrefix+path, reader)
+		if err != nil {
+			t.Fatalf("build %s %s: %v", method, path, err)
+		}
+		req.Header.Set("Origin", frontendOrigin)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != frontendOrigin {
+			t.Errorf("%s %s: Access-Control-Allow-Origin = %q, want %q — a browser would not expose this response to the caller",
+				method, path, got, frontendOrigin)
+		}
+		return resp
+	}
+
+	// A real browser preflights the authenticated, JSON-bodied POST
+	// before sending it, because Authorization and Content-Type are not
+	// CORS-safelisted request headers.
+	preflight, err := http.NewRequest(http.MethodOptions, srv.URL+apiPrefix+"/tasks", nil)
+	if err != nil {
+		t.Fatalf("build preflight: %v", err)
+	}
+	preflight.Header.Set("Origin", frontendOrigin)
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	preflight.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+
+	preflightResp, err := srv.Client().Do(preflight)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	preflightResp.Body.Close()
+	if preflightResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want 204", preflightResp.StatusCode)
+	}
+	allowedHeaders := strings.ToLower(preflightResp.Header.Get("Access-Control-Allow-Headers"))
+	if !strings.Contains(allowedHeaders, "authorization") {
+		t.Fatalf("preflight Access-Control-Allow-Headers = %q, want it to permit Authorization — without it the browser never sends the token",
+			preflightResp.Header.Get("Access-Control-Allow-Headers"))
+	}
+
+	// 1. Register.
+	const credentials = `{"email":"frontend@example.com","password":"password12345"}`
+	regResp := do(t, http.MethodPost, "/auth/register", "", credentials)
+	regResp.Body.Close()
+	if regResp.StatusCode != http.StatusCreated {
+		t.Fatalf("register status = %d, want 201", regResp.StatusCode)
+	}
+
+	// 2. Log in and keep the token.
+	loginResp := do(t, http.MethodPost, "/auth/login", "", credentials)
+	defer loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want 200", loginResp.StatusCode)
+	}
+	var login struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(loginResp.Body).Decode(&login); err != nil {
+		t.Fatalf("decode login: %v", err)
+	}
+	if login.Token == "" {
+		t.Fatal("login returned an empty token")
+	}
+
+	// 3. Create a task with the token.
+	createResp := do(t, http.MethodPost, "/tasks", login.Token, `{"title":"from the frontend"}`)
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create task status = %d, want 201", createResp.StatusCode)
+	}
+	var created struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created task: %v", err)
+	}
+
+	// 4. List it back.
+	listResp := do(t, http.MethodGet, "/tasks", login.Token, "")
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, want 200", listResp.StatusCode)
+	}
+	var listed []struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Errorf("list returned %+v, want exactly the task just created (%s)", listed, created.ID)
 	}
 }

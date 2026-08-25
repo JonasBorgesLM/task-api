@@ -4,13 +4,25 @@ info:
   title: Task API
   description: >
     A small, multi-user HTTP REST API for task management, built with Go
-    using only the standard library plus pgx (PostgreSQL) and
-    golang.org/x/crypto (bcrypt). Every task belongs to exactly one user
-    and is only ever visible to that user. Each task has a title, an
+    using only the standard library plus pgx (PostgreSQL),
+    golang.org/x/crypto (bcrypt) and moat (rate limiting, response
+    security headers, path containment). Every task belongs to exactly one
+    user and is only ever visible to that user. Each task has a title, an
     optional description, a status (`pending`, `in_progress`, `done`, or
     `cancelled`, following the transition rules below), and a priority
-    (`low`, `medium`, or `high`). Authentication is opaque bearer session
-    tokens, issued by POST /auth/login.
+    (`low`, `medium`, or `high`), and may carry file attachments.
+    Authentication is opaque bearer session tokens, issued by
+    POST /v1/auth/login.
+
+
+    **Versioning.** The contract lives under `/v1`. The health probes
+    (`/health`, `/health/ready`) and `/debug/vars` are deliberately *not*
+    versioned: they are operational endpoints rather than part of the
+    contract a client codes against — an orchestrator probe does not
+    negotiate an API version, and the readiness probe is named in
+    deployment manifests that should not need re-editing every time the
+    API version moves. The unprefixed contract paths are not served at
+    all; there is no dual mount.
 
 
     This document describes exactly the behavior implemented in
@@ -21,15 +33,22 @@ info:
 
     Every response from every endpoint — including error responses and
     responses produced before routing, such as a `404` for an unknown path
-    — additionally carries a fixed set of security headers
-    (`middleware.SecurityHeaders`): `Content-Security-Policy: default-src
-    'none'; frame-ancestors 'none'`, `X-Frame-Options: DENY`, and
-    `X-Content-Type-Options: nosniff`. They are constant, identical
-    everywhere, and are not part of the API contract a client programs
-    against, so they are documented here once rather than repeated on each
-    response. `Strict-Transport-Security` joins them only when the
-    deployment sets `HSTS_MAX_AGE` — see docs/ARCHITECTURE.md's
-    "Operational Behavior" for why that one is opt-in.
+    or a `429` from the rate limiter — additionally carries a fixed set of
+    security headers, set by moat's `secureheaders`:
+    `Content-Security-Policy: default-src 'none'; base-uri 'none';
+    form-action 'none'; frame-ancestors 'none'`, `X-Frame-Options: DENY`,
+    `X-Content-Type-Options: nosniff`, `Referrer-Policy`,
+    `Permissions-Policy`, the three Cross-Origin-*-Policy headers, and
+    `Strict-Transport-Security`. They are constant, identical everywhere,
+    and are not part of the API contract a client programs against, so
+    they are documented here once rather than repeated on each response.
+
+
+    HSTS is sent unconditionally — a browser is required to ignore it over
+    plain HTTP, and deciding per request from the connection's TLS state
+    would disable it behind the TLS-terminating proxy it exists for.
+    `HSTS_MAX_AGE=0` is the opt-out. See docs/ARCHITECTURE.md's
+    "Operational Behavior".
   version: "2.2.0"
   license:
     name: MIT
@@ -61,7 +80,7 @@ security:
   - bearerAuth: []
 
 paths:
-  /auth/register:
+  /v1/auth/register:
     post:
       tags: [Auth]
       operationId: register
@@ -128,7 +147,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
-  /auth/login:
+  /v1/auth/login:
     post:
       tags: [Auth]
       operationId: login
@@ -202,7 +221,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
-  /auth/logout:
+  /v1/auth/logout:
     post:
       tags: [Auth]
       operationId: logout
@@ -235,7 +254,7 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /auth/me:
+  /v1/auth/me:
     get:
       tags: [Auth]
       operationId: getMe
@@ -276,7 +295,7 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /tasks:
+  /v1/tasks:
     post:
       tags: [Tasks]
       operationId: createTask
@@ -462,7 +481,7 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /tasks/{id}:
+  /v1/tasks/{id}:
     get:
       tags: [Tasks]
       operationId: getTask
@@ -615,7 +634,7 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /tasks/{id}/status:
+  /v1/tasks/{id}/status:
     patch:
       tags: [Tasks]
       operationId: transitionTaskStatus
@@ -701,7 +720,7 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /tasks/{id}/done:
+  /v1/tasks/{id}/done:
     patch:
       tags: [Tasks]
       operationId: completeTask
@@ -784,7 +803,7 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /tasks/{id}/attachments:
+  /v1/tasks/{id}/attachments:
     parameters:
       - $ref: '#/components/parameters/TaskID'
     post:
@@ -912,7 +931,7 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /files/{key}:
+  /v1/files/{key}:
     get:
       tags: [Attachments]
       operationId: downloadAttachment

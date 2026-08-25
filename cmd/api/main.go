@@ -223,6 +223,13 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 		return requireAuth(userLimiter.Middleware(next))
 	}
 
+	// v1 carries the versioned API contract. Every route registered on it
+	// is reached under /v1 (see the mount below), and the handlers stay
+	// unaware of that: they register "POST /tasks", not "POST /v1/tasks",
+	// so introducing a v2 is a second mount rather than an edit to every
+	// RegisterRoutes in the codebase.
+	v1 := http.NewServeMux()
+
 	mux := http.NewServeMux()
 
 	// /debug/vars is authenticated, unlike the two health routes above.
@@ -234,8 +241,8 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	// since the humans and scrapers who read it can carry a token.
 	mux.Handle("GET /debug/vars", authenticated(expvar.Handler()))
 
-	userHandler.RegisterRoutes(mux, authenticated, authLimiter.Middleware)
-	taskHandler.RegisterRoutes(mux, authenticated)
+	userHandler.RegisterRoutes(v1, authenticated, authLimiter.Middleware)
+	taskHandler.RegisterRoutes(v1, authenticated)
 
 	// The liveness and readiness probes deliberately sit outside the
 	// global rate limiter, on an outer mux whose catch-all sends
@@ -287,8 +294,26 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 		}
 
 		attachmentSvc := attachment.NewService(attachmentRepo, blobs, cfg.AttachmentMaxBytes)
-		attachment.NewHandler(attachmentSvc, logger, cfg.AttachmentMaxBytes).RegisterRoutes(mux, authenticated)
+		attachment.NewHandler(attachmentSvc, logger, cfg.AttachmentMaxBytes).RegisterRoutes(v1, authenticated)
 	}
+
+	// Mount the versioned contract. StripPrefix is what lets the handlers
+	// register unprefixed patterns: the sub-mux sees "/tasks/{id}" and
+	// therefore still populates r.PathValue as it would unmounted.
+	//
+	// The trailing slash matters — "/v1/" is a subtree pattern, so it
+	// catches everything beneath it including paths the sub-mux does not
+	// know, which then 404 from inside v1. Without it, only the exact
+	// path "/v1" would match.
+	//
+	// Note what is *not* mounted here: /health, /health/ready and
+	// /debug/vars stay unversioned. They are operational endpoints rather
+	// than part of the contract a client codes against — an orchestrator
+	// probe and a metrics scraper do not negotiate an API version, and
+	// the readiness probe in particular is named in deployment manifests
+	// (see docs/DECISIONS.md), which should not have to be re-edited
+	// every time the API version moves.
+	mux.Handle("/v1/", http.StripPrefix("/v1", v1))
 
 	root := http.NewServeMux()
 	registerHealthRoute(root, logger)
