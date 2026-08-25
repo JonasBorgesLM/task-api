@@ -36,6 +36,11 @@ jobs:
           --health-retries 10
 
     env:
+      # MinIO is started by a step rather than declared under services:
+      # — see "Start MinIO" below for why it cannot be one.
+      TEST_S3_ENDPOINT: localhost:9000
+      TEST_S3_ACCESS_KEY: task_api
+      TEST_S3_SECRET_KEY: task_api_secret
       TEST_DATABASE_URL: postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable
 
     steps:
@@ -50,6 +55,36 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      # Backs internal/attachment's S3 integration tests — the same
+      # assertions the filesystem store runs, against a real
+      # S3-compatible server. Without it those tests skip, which would
+      # leave the S3 backend exercised by nobody until production.
+      #
+      # A step rather than a `services:` entry, and not by preference: a
+      # service container cannot be given a command, and the minio image
+      # needs `server /data` — without it the container prints its usage
+      # and exits. Bitnami's auto-starting image would fit the services
+      # block, but pinning to the upstream one is worth an explicit step.
+      #
+      # The wait loop is here for the same reason: `services:` would have
+      # gated on a healthcheck, and a step has to do that itself. It
+      # polls the endpoint MinIO itself considers "live" rather than
+      # sleeping a fixed amount, so a slow runner waits longer instead of
+      # producing a flake.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio             -p 9000:9000             -e MINIO_ROOT_USER=task_api             -e MINIO_ROOT_PASSWORD=task_api_secret             minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:9000/minio/health/live >/dev/null; then
+              echo "MinIO ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "MinIO did not become ready in 60s"
+          docker logs minio
+          exit 1
 
       - name: Download and verify dependencies
         run: |

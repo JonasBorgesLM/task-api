@@ -266,8 +266,8 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	// runPeriodicCleanup skips the pass rather than being handed a
 	// function that pretends to do nothing.
 	var collectOrphans func(context.Context) (int, error)
-	if cfg.AttachmentStorageDir != "" {
-		blobs, closeStore, err := attachment.NewFSBlobStore(cfg.AttachmentStorageDir)
+	if attachmentsEnabled(cfg) {
+		blobs, closeStore, err := buildBlobStore(ctx, cfg)
 		if err != nil {
 			closeDB()
 			return nil, nil, fmt.Errorf("open attachment storage: %w", err)
@@ -501,6 +501,39 @@ func addressKeyFunc(cfg config.Config) (ratelimit.KeyFunc, error) {
 		return nil, fmt.Errorf("configure trusted proxies: %w", err)
 	}
 	return extractor.KeyFunc(), nil
+}
+
+// attachmentsEnabled reports whether a backend is configured at all.
+// config.Load has already rejected having both, so this only has to find
+// either.
+func attachmentsEnabled(cfg config.Config) bool {
+	return cfg.AttachmentStorageDir != "" || cfg.AttachmentS3Endpoint != ""
+}
+
+// buildBlobStore is the single place that decides which BlobStore backs
+// attachments, so that decision never leaks into Service or Handler —
+// the same role buildRepository plays for persistence.
+//
+// The two backends are for genuinely different deployments rather than a
+// preference. The filesystem store needs no service at all, which is what
+// keeps local development and the test suite cheap; it cannot back a
+// deployment that has to survive a rolling update, because a pod's local
+// disk is not shared with the pod replacing it and is gone if the pod
+// moves node. The object store is what covers that, and addresses MinIO
+// in development and S3 in production through one code path — so neither
+// environment runs a path the other never exercises.
+func buildBlobStore(ctx context.Context, cfg config.Config) (attachment.BlobStore, func() error, error) {
+	if cfg.AttachmentS3Endpoint != "" {
+		return attachment.NewS3BlobStore(ctx, attachment.S3Config{
+			Endpoint:  cfg.AttachmentS3Endpoint,
+			Bucket:    cfg.AttachmentS3Bucket,
+			AccessKey: cfg.AttachmentS3AccessKey,
+			SecretKey: cfg.AttachmentS3SecretKey,
+			Region:    cfg.AttachmentS3Region,
+			UseSSL:    cfg.AttachmentS3UseSSL,
+		})
+	}
+	return attachment.NewFSBlobStore(cfg.AttachmentStorageDir)
 }
 
 // userIDKey keys the per-user rate limiter by the authenticated user's

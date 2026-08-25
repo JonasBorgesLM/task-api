@@ -236,6 +236,33 @@ type Config struct {
 	// Content-Length, which the client writes and can understate.
 	AttachmentMaxBytes int64
 
+	// AttachmentS3 configures the object-storage backend for
+	// attachments. Endpoint empty — the zero value — means it is not in
+	// use, and AttachmentStorageDir selects the filesystem backend
+	// instead. Exactly one of the two may be configured; see Load.
+	//
+	// The two exist for genuinely different deployments rather than as a
+	// preference: a pod's local disk is not shared with the pod that
+	// replaces it during a rolling update, and is gone if the pod moves
+	// node, so the filesystem backend cannot back a deployment that has
+	// to survive either. The filesystem one stays because it needs no
+	// service at all, which is what makes local development and the test
+	// suite cheap.
+	// The fields are flat rather than an attachment.S3Config, so this
+	// package keeps depending on nothing but the standard library — the
+	// same reason defaultHSTSMaxAge is duplicated here instead of
+	// imported from moat. cmd/api assembles them into the store's own
+	// config type, which is the composition root's job anyway.
+	AttachmentS3Endpoint  string
+	AttachmentS3Bucket    string
+	AttachmentS3AccessKey string
+
+	// AttachmentS3SecretKey must never be logged. Nothing in this
+	// codebase logs a whole Config — keep it that way.
+	AttachmentS3SecretKey string
+	AttachmentS3Region    string
+	AttachmentS3UseSSL    bool
+
 	// AttachmentOrphanMinAge is how long a blob must have sat
 	// unreferenced before the orphan collector will delete it (see
 	// attachment.Service.CollectOrphans). Ignored when attachments are
@@ -355,6 +382,18 @@ func Load() (Config, error) {
 	}
 
 	cfg.AttachmentStorageDir = strings.TrimSpace(os.Getenv("ATTACHMENT_STORAGE_DIR"))
+
+	if err := parseAttachmentS3(&cfg); err != nil {
+		return Config{}, err
+	}
+
+	// Two backends configured is not a preference to resolve silently —
+	// whichever one lost would hold files the running process cannot
+	// see, and the operator would discover that as missing attachments
+	// rather than as a configuration error.
+	if cfg.AttachmentStorageDir != "" && cfg.AttachmentS3Endpoint != "" {
+		return Config{}, fmt.Errorf("config: ATTACHMENT_STORAGE_DIR and ATTACHMENT_S3_ENDPOINT are both set; choose one attachment backend")
+	}
 
 	if cfg.AttachmentMaxBytes, err = parsePositiveInt64("ATTACHMENT_MAX_BYTES", defaultAttachmentMaxBytes); err != nil {
 		return Config{}, err
@@ -508,6 +547,56 @@ func parsePositiveFloat(name string, def float64) (float64, error) {
 	}
 
 	return f, nil
+}
+
+// parseAttachmentS3 reads the object-storage settings. An unset endpoint
+// disables the backend and everything else is ignored; a set endpoint
+// requires the bucket and both credentials.
+//
+// Partial configuration is rejected rather than defaulted, because every
+// plausible default here is wrong in a way that is hard to see: an empty
+// bucket name is not a bucket, and empty credentials would be sent as an
+// anonymous request that fails at the first upload rather than at
+// startup.
+func parseAttachmentS3(cfg *Config) error {
+	cfg.AttachmentS3Endpoint = strings.TrimSpace(os.Getenv("ATTACHMENT_S3_ENDPOINT"))
+	if cfg.AttachmentS3Endpoint == "" {
+		return nil
+	}
+
+	cfg.AttachmentS3Bucket = strings.TrimSpace(os.Getenv("ATTACHMENT_S3_BUCKET"))
+	cfg.AttachmentS3AccessKey = strings.TrimSpace(os.Getenv("ATTACHMENT_S3_ACCESS_KEY"))
+	cfg.AttachmentS3SecretKey = os.Getenv("ATTACHMENT_S3_SECRET_KEY")
+	cfg.AttachmentS3Region = strings.TrimSpace(os.Getenv("ATTACHMENT_S3_REGION"))
+
+	// The endpoint is a host[:port], not a URL: minio-go builds the
+	// scheme from UseSSL. Accepting "https://..." here would produce a
+	// confusing failure deep inside the client, so it is caught by name.
+	if strings.Contains(cfg.AttachmentS3Endpoint, "://") {
+		return fmt.Errorf("config: ATTACHMENT_S3_ENDPOINT must be host[:port] without a scheme; use ATTACHMENT_S3_USE_SSL to choose https")
+	}
+
+	for _, required := range []struct {
+		name  string
+		value string
+	}{
+		{"ATTACHMENT_S3_BUCKET", cfg.AttachmentS3Bucket},
+		{"ATTACHMENT_S3_ACCESS_KEY", cfg.AttachmentS3AccessKey},
+		// Reported by name, never by value: this must not be echoed.
+		{"ATTACHMENT_S3_SECRET_KEY", cfg.AttachmentS3SecretKey},
+	} {
+		if strings.TrimSpace(required.value) == "" {
+			return fmt.Errorf("config: %s is required when ATTACHMENT_S3_ENDPOINT is set", required.name)
+		}
+	}
+
+	useSSL, err := parseBool("ATTACHMENT_S3_USE_SSL", true)
+	if err != nil {
+		return err
+	}
+	cfg.AttachmentS3UseSSL = useSSL
+
+	return nil
 }
 
 // parsePositiveInt64 is parsePositiveInt for a value that is a size in

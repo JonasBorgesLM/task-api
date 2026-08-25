@@ -366,3 +366,13 @@ func FuzzFSBlobStore_OpenNeverEscapesRoot(f *testing.F) {
 		}
 	})
 }
+
+// TestFSBlobStore_Contract runs the shared BlobStore contract against the
+// filesystem implementation. Its S3 counterpart is in s3_storage_test.go,
+// under the integration build tag.
+func TestFSBlobStore_Contract(t *testing.T) {
+	runBlobStoreContract(t, func(t *testing.T) BlobStore {
+		t.Helper()
+		return newTestStore(t)
+	})
+}
