@@ -1,6 +1,6 @@
 .PHONY: help run build tidy clean \
         test test-race test-integration test-integration-race coverage coverage-full fuzz \
-        fmt fmt-check vet lint check \
+        fmt fmt-check vet lint vulncheck check \
         docker-build docker-up docker-down db-up \
         migrate-up migrate-down seed seed-reset db-reset
 
@@ -114,7 +114,11 @@ lint: ## Run staticcheck (installs it into $GOBIN if not already present)
 	staticcheck ./...
 	staticcheck -tags=integration ./...
 
-check: fmt-check vet lint test-race ## Run everything the CI quality gate runs (no PostgreSQL required)
+vulncheck: ## Run govulncheck (installs it into $GOBIN if not already present)
+	@command -v govulncheck >/dev/null 2>&1 || go install golang.org/x/vuln/cmd/govulncheck@latest
+	govulncheck ./...
+
+check: fmt-check vet lint vulncheck test-race ## Run everything the CI quality gate runs (no PostgreSQL required)
 
 ##@ Docker
 

@@ -85,6 +85,35 @@ jobs:
           staticcheck ./...
           staticcheck -tags=integration ./...
 
+      # Known vulnerabilities in what we ship. This sits with the other
+      # static gates rather than with the tests because it is the same
+      # kind of check: a tool answering a question about the code, with
+      # no service to stand up and nothing to flake.
+      #
+      # Fail-closed on an *actionable* finding is the decision recorded in
+      # the issue that added this step, and it is govulncheck's own
+      # default rather than something configured here: the command exits
+      # non-zero only for a vulnerability the code can actually reach.
+      # Something present in the dependency graph but never called exits
+      # 0 — verified against the golang.org/x/crypto/openpgp advisory this
+      # repo currently carries, which is unreachable (we use bcrypt) and
+      # has no fix, being unmaintained by design.
+      #
+      # The consequence accepted with that decision: an advisory against
+      # the standard library can block merges until a Go release fixes
+      # it. That is the trade for not letting a reachable vulnerability
+      # into main unnoticed.
+      #
+      # Run once, with default build tags — unlike vet and staticcheck
+      # above, which run twice. The second run there exists because the
+      # integration-tagged files are not otherwise compiled; here it
+      # would only surface vulnerabilities reachable from test helpers,
+      # which are not part of what gets deployed.
+      - name: Vulnerabilities (govulncheck)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
       # Unit tests: memoryRepository, Service, Handler, config, middleware,
       # server lifecycle — everything that needs no external service.
       # postgresRepository's tests are excluded entirely (the "integration"

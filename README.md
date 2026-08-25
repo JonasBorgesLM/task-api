@@ -31,7 +31,7 @@ For AI agents (or new contributors) working in this codebase, see **[CLAUDE.md](
 - **Go 1.26+**, matching `go.mod`.
 - **No external service needed for the core application or the in-memory store** — the entire unit test suite runs without one. Of the three runtime dependencies, [`pgx/v5`](https://github.com/jackc/pgx) matters only once `DATABASE_URL` is configured, [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) only when a password is hashed, and [`moat`](https://github.com/JonasBorgesLM/moat) is in the request path but talks to nothing outside the process.
 - **[Docker](https://www.docker.com/) and Docker Compose** (optional) — to run PostgreSQL locally without installing it directly.
-- **[`staticcheck`](https://staticcheck.dev/)** (optional) — used by `make lint`; installed automatically on first use if missing.
+- **[`staticcheck`](https://staticcheck.dev/)** and **[`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck)** (optional) — used by `make lint` and `make vulncheck`; both installed automatically on first use if missing.
 
 ## Configuration
 
@@ -148,6 +148,10 @@ being fully exercised. `make coverage-full` measures both together
 `internal/task/integration_test.go` (no build tag) is a full-stack HTTP test — real `Handler` → real `Service` → real in-memory `Repository`, for both `task` and `user`, including the real register/login flow — and despite the name has no external dependency; it's part of the unit suite because it validates that the layers (and both domains' auth wiring) are wired together correctly, not that PostgreSQL works. The dividing line for "integration" here is *needs a real external service*, not *spans more than one layer*.
 
 Concurrency-sensitive paths (optimistic-concurrency conflicts) are exercised with real concurrent goroutines under `-race`, both against the in-memory store and against real PostgreSQL.
+
+`make check` is the full local gate — `gofmt`, `go vet`, `staticcheck`, `govulncheck` and the race-tested unit suite — and mirrors what CI runs, minus the PostgreSQL integration tests and the fuzz run.
+
+**`govulncheck` fails the build on a vulnerability the code can actually reach.** That is its own default rather than a setting here: an advisory against something present in the dependency graph but never called exits `0`, and only a reachable one exits non-zero. The trade accepted with that choice is that an advisory against the standard library can block merges until a Go release fixes it — see `docs/DECISIONS.md`. It is worth what it costs: the four standard-library advisories this project carried before Go 1.26.6 were found by running the tool by hand, because nothing in the pipeline was looking.
 
 ## Migrations
 
