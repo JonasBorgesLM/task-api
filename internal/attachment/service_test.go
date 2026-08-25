@@ -5,8 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // pngHeader / gifHeader / pdfHeader are the magic bytes
@@ -254,3 +258,162 @@ func TestListByTask_ReturnsUploads(t *testing.T) {
 		t.Errorf("ListByTask() for a stranger: error = %v, want ErrTaskNotFound", err)
 	}
 }
+
+// --- orphan collection ---
+
+// TestCollectOrphans_RemovesUnreferencedBlob covers the case the whole
+// collector exists for: a task was deleted, its attachment rows cascaded
+// away, and the bytes stayed behind.
+func TestCollectOrphans_RemovesUnreferencedBlob(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	store := newTestStore(t)
+	svc := NewService(repo, store, 1024)
+
+	// A blob with no row behind it — exactly what a cascaded delete
+	// leaves on disk.
+	if _, err := store.Put(context.Background(), "orphan-key", strings.NewReader("abandoned"), 1024); err != nil {
+		t.Fatalf("Put() unexpected error: %v", err)
+	}
+
+	// Pretend it has been there a while. minAge is measured against the
+	// Service's clock, which the test controls.
+	svc.nowFunc = func() time.Time { return time.Now().Add(2 * time.Hour) }
+
+	deleted, err := svc.CollectOrphans(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("CollectOrphans() unexpected error: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("CollectOrphans() removed %d, want 1", deleted)
+	}
+	if _, err := store.Open(context.Background(), "orphan-key"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("orphan blob still readable after collection: %v", err)
+	}
+}
+
+// TestCollectOrphans_KeepsReferencedBlob is the assertion that keeps the
+// collector from being a data-loss machine: a blob a row points at is
+// old, unreferenced-looking to a naive sweep, and must survive.
+func TestCollectOrphans_KeepsReferencedBlob(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	store := newTestStore(t)
+	svc := NewService(repo, store, 1024)
+
+	att, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "report.pdf", bytes.NewReader(pdfHeader))
+	if err != nil {
+		t.Fatalf("Upload() unexpected error: %v", err)
+	}
+
+	svc.nowFunc = func() time.Time { return time.Now().Add(48 * time.Hour) }
+
+	deleted, err := svc.CollectOrphans(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("CollectOrphans() unexpected error: %v", err)
+	}
+	if deleted != 0 {
+		t.Errorf("CollectOrphans() removed %d, want 0 — the blob is referenced", deleted)
+	}
+	if _, err := store.Open(context.Background(), att.StorageKey); err != nil {
+		t.Errorf("referenced blob was deleted: %v", err)
+	}
+}
+
+// TestCollectOrphans_SparesBlobsInsideTheGracePeriod is the test that
+// matters most here, and the reason minAge exists at all.
+//
+// Upload writes the bytes before the metadata row. In that window a
+// healthy upload is byte-for-byte indistinguishable from an orphan: a
+// file no row references. A collector without a grace period would race
+// every upload in flight and delete some of them — intermittently, under
+// load, which is the worst way to discover it.
+//
+// The blob here is fresh and unreferenced, exactly as a mid-flight upload
+// would be, and must be left alone.
+func TestCollectOrphans_SparesBlobsInsideTheGracePeriod(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	store := newTestStore(t)
+	svc := NewService(repo, store, 1024)
+
+	if _, err := store.Put(context.Background(), "upload-in-flight", strings.NewReader("bytes landed, row not yet written"), 1024); err != nil {
+		t.Fatalf("Put() unexpected error: %v", err)
+	}
+
+	// The Service's clock is left alone, so the blob is brand new.
+	deleted, err := svc.CollectOrphans(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("CollectOrphans() unexpected error: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("CollectOrphans() removed %d — it deleted a blob younger than the grace period, which is an upload in flight", deleted)
+	}
+	if _, err := store.Open(context.Background(), "upload-in-flight"); err != nil {
+		t.Errorf("in-flight upload's blob was deleted: %v", err)
+	}
+}
+
+// TestCollectOrphans_RejectsZeroMinAge closes the door on the shape of
+// the bug above: a caller cannot ask for a collector with no grace
+// period, however convenient that would be in a test.
+func TestCollectOrphans_RejectsZeroMinAge(t *testing.T) {
+	svc, _ := newServiceUnderTest(t)
+
+	for _, minAge := range []time.Duration{0, -time.Hour} {
+		if _, err := svc.CollectOrphans(context.Background(), minAge); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("CollectOrphans(%v) error = %v, want ErrInvalidInput", minAge, err)
+		}
+	}
+}
+
+// TestCollectOrphans_LeavesForeignFilesAlone covers the storage
+// directory containing something this application did not write. The
+// collector deletes files; anything it cannot positively identify as its
+// own must survive.
+func TestCollectOrphans_LeavesForeignFilesAlone(t *testing.T) {
+	dir := t.TempDir()
+	store, closeStore, err := NewFSBlobStore(dir)
+	if err != nil {
+		t.Fatalf("NewFSBlobStore() unexpected error: %v", err)
+	}
+	defer closeStore()
+
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("not ours"), 0o600); err != nil {
+		t.Fatalf("write foreign file: %v", err)
+	}
+
+	repo := &keyFilteringRepo{Repository: NewMemoryRepository(fixedOwnership)}
+	svc := NewService(repo, store, 1024)
+	svc.nowFunc = func() time.Time { return time.Now().Add(48 * time.Hour) }
+
+	deleted, err := svc.CollectOrphans(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("CollectOrphans() unexpected error: %v", err)
+	}
+	if deleted != 0 {
+		t.Errorf("CollectOrphans() removed %d, want 0 — a file that is not a storage key is not ours to delete", deleted)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "README")); err != nil {
+		t.Errorf("foreign file was deleted: %v", err)
+	}
+}
+
+// keyFilteringRepo models what the PostgreSQL implementation does with a
+// candidate that is not a UUID: it cannot be a storage key this
+// application wrote, so it is never reported as unreferenced. The
+// in-memory Repository has no such column type to filter on, so the
+// behaviour is supplied here rather than being silently absent from the
+// unit suite.
+type keyFilteringRepo struct {
+	Repository
+}
+
+func (r *keyFilteringRepo) UnreferencedKeys(ctx context.Context, keys []string) ([]string, error) {
+	candidates := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if uuidLike.MatchString(key) {
+			candidates = append(candidates, key)
+		}
+	}
+	return r.Repository.UnreferencedKeys(ctx, candidates)
+}
+
+var uuidLike = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)

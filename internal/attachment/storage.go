@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/JonasBorgesLM/moat/pathguard"
 )
@@ -41,6 +42,29 @@ type BlobStore interface {
 	// Delete removes the blob. Deleting a key that is not there is not an
 	// error: the caller's intent is that the bytes be gone, and they are.
 	Delete(ctx context.Context, key string) error
+
+	// List enumerates what is stored. It exists for the orphan collector
+	// (see Service.CollectOrphans) and has no place on a request path:
+	// the result is proportional to everything ever uploaded.
+	//
+	// ModTime is what makes the collector safe rather than destructive —
+	// see BlobRef.
+	List(ctx context.Context) ([]BlobRef, error)
+}
+
+// BlobRef is one stored blob, as seen from the store rather than from
+// the database.
+//
+// ModTime carries the weight here. Uploads write the bytes *before* the
+// metadata row (see Service.Upload for why that order was chosen), so
+// between those two steps a perfectly healthy upload is indistinguishable
+// from an orphan: a blob no row references. A collector that acted on
+// that would delete files out from under uploads in flight. ModTime is
+// what lets it require a blob to have been sitting unreferenced for
+// longer than any upload could plausibly take.
+type BlobRef struct {
+	Key     string
+	ModTime time.Time
 }
 
 // fsBlobStore stores blobs as files under one directory, through a
@@ -151,6 +175,44 @@ func (s *fsBlobStore) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("attachment: delete blob: %w", err)
 	}
 	return nil
+}
+
+func (s *fsBlobStore) List(ctx context.Context) ([]BlobRef, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(s.guard.Root())
+	if err != nil {
+		return nil, fmt.Errorf("attachment: list blobs: %w", err)
+	}
+
+	refs := make([]BlobRef, 0, len(entries))
+	for _, entry := range entries {
+		// Subdirectories are not something this store creates, and
+		// descending into one would mean handing the collector a key it
+		// could not address anyway. Anything unexpected in the root is
+		// left alone rather than swept up: this code deletes files, and
+		// the conservative branch is the right default.
+		if entry.IsDir() {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			// The file went away between ReadDir and Info. That is not
+			// an error worth failing the whole pass over — it is one
+			// fewer candidate, and a candidate is only ever a deletion.
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("attachment: stat blob %q: %w", entry.Name(), err)
+		}
+
+		refs = append(refs, BlobRef{Key: entry.Name(), ModTime: info.ModTime()})
+	}
+
+	return refs, nil
 }
 
 // remove deletes one blob.
