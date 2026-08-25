@@ -24,7 +24,7 @@ Every task belongs to exactly one user, authenticated with a bearer session toke
 - **A test suite you can actually trust.** Fakes instead of a mocking framework, real concurrent goroutines (run under `-race`) for every concurrency-sensitive path, and a hard build-tag boundary between tests that need PostgreSQL and tests that don't.
 - **A minimal, auditable dependency footprint.** Three runtime dependencies (`pgx` for PostgreSQL, `golang.org/x/crypto` for password hashing, [`moat`](https://github.com/JonasBorgesLM/moat) for rate limiting and response security headers), all pure Go and `moat` itself dependency-free — which is what lets the Docker image be a static binary on `scratch`: no shell, no libc, nothing to patch.
 
-For AI agents (or new contributors) working in this codebase, see **[CLAUDE.md](CLAUDE.md)** — architecture rules, conventions, and things not to change casually. For the full project structure, the rationale behind each design decision, and the roadmap, see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**. For the full API contract, see **[docs/openapi.yaml](docs/openapi.yaml)**.
+For AI agents (or new contributors) working in this codebase, see **[CLAUDE.md](CLAUDE.md)** — architecture rules, conventions, and things not to change casually. For the full project structure, the rationale behind each design decision, and the roadmap, see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**. For the decisions that are easy to reverse by accident — and why — see **[docs/DECISIONS.md](docs/DECISIONS.md)**. For the full API contract, see **[docs/openapi.yaml](docs/openapi.yaml)**.
 
 ## Requirements
 
@@ -232,5 +232,6 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 ## Learn more
 
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — project structure, the reasoning behind every non-obvious design decision (session tokens, ownership model, status transitions, and more), and what's deliberately deferred.
+- **[docs/DECISIONS.md](docs/DECISIONS.md)** — the decisions a future change could undo without noticing, stated as decisions rather than as descriptions: why auth is a header and not a cookie, why attachment bytes are written before their metadata row, why the content-type allow-list ignores what the client declared, and the deploy topology the rate limiter's design assumes. Read it before implementing a backlog issue; if an issue seems to contradict it, ask rather than choose.
 - **[docs/openapi.yaml](docs/openapi.yaml)** — the full API contract.
 - **[CLAUDE.md](CLAUDE.md)** — conventions and rules for anyone (human or agent) changing this codebase.
