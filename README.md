@@ -32,7 +32,7 @@ For AI agents (or new contributors) working in this codebase, see **[CLAUDE.md](
 - **Go 1.26+**, matching `go.mod`.
 - **No external service needed for the core application or the in-memory store** — the entire unit test suite runs without one. Of the four runtime dependencies, [`pgx/v5`](https://github.com/jackc/pgx) matters only once `DATABASE_URL` is configured, [`minio-go`](https://github.com/minio/minio-go) only once `ATTACHMENT_S3_ENDPOINT` is, [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) only when a password is hashed, and [`moat`](https://github.com/JonasBorgesLM/moat) is in the request path but talks to nothing outside the process.
 - **[Docker](https://www.docker.com/) and Docker Compose** (optional) — to run PostgreSQL locally without installing it directly.
-- **[`staticcheck`](https://staticcheck.dev/)** and **[`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck)** (optional) — used by `make lint` and `make vulncheck`; both installed automatically on first use if missing.
+- **Nothing to install for linting.** `make lint` and `make vulncheck` invoke [`staticcheck`](https://staticcheck.dev/) and [`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) through `go run <pkg>@<version>`, at versions pinned in the `Makefile` (`STATICCHECK_VERSION`, `GOVULNCHECK_VERSION`). CI calls the same targets, so a local run and the pipeline cannot drift onto different linter versions.
 
 ## Configuration
 
@@ -156,7 +156,7 @@ being fully exercised. `make coverage-full` measures both together
 
 Concurrency-sensitive paths (optimistic-concurrency conflicts) are exercised with real concurrent goroutines under `-race`, both against the in-memory store and against real PostgreSQL.
 
-`make check` is the full local gate — `gofmt`, `go vet`, `staticcheck`, `govulncheck` and the race-tested unit suite — and mirrors what CI runs, minus the PostgreSQL integration tests and the fuzz run.
+`make check` is the local gate — `gofmt`, `go mod tidy -diff`, `go vet` (default and integration tags), `staticcheck` (both), `govulncheck` and the race-tested unit suite. It is the static half of CI: the pipeline additionally runs the fuzz target, the PostgreSQL/MinIO integration suite, and a build plus smoke test of the production image.
 
 **`govulncheck` fails the build on a vulnerability the code can actually reach.** That is its own default rather than a setting here: an advisory against something present in the dependency graph but never called exits `0`, and only a reachable one exits non-zero. The trade accepted with that choice is that an advisory against the standard library can block merges until a Go release fixes it — see `docs/DECISIONS.md`. It is worth what it costs: the four standard-library advisories this project carried before Go 1.26.6 were found by running the tool by hand, because nothing in the pipeline was looking.
 
