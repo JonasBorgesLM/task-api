@@ -1,10 +1,23 @@
 .PHONY: help run build tidy clean \
         test test-race test-integration test-integration-race coverage coverage-full fuzz \
-        fmt fmt-check vet lint vulncheck check \
+        fmt fmt-check vet lint vulncheck tidy-check check \
         docker-build docker-up docker-down db-up storage-up \
         migrate-up migrate-down seed seed-reset db-reset
 
 .DEFAULT_GOAL := help
+
+# Versões pinadas das ferramentas de análise. Elas são invocadas via
+# `go run <pkg>@<versão>`, não instaladas no $GOBIN: com `go install` +
+# `command -v`, uma versão já presente na máquina é usada em silêncio no
+# lugar da que o projeto escolheu — o que fazia `make lint` local e o CI
+# rodarem linters diferentes sem nada indicar isso. `go run` resolve a
+# versão exata e usa o cache de módulos a partir da primeira execução.
+#
+# Atualizar é deliberado: suba o número aqui, rode `make check`, e o
+# commit registra a troca. O CI chama estes mesmos alvos, então não há um
+# segundo lugar para desalinhar.
+STATICCHECK_VERSION ?= v0.8.1
+GOVULNCHECK_VERSION ?= v1.7.0
 
 # Connection string used by the local PostgreSQL instance started via
 # `make db-up` / `make docker-up` (see docker-compose.yml). Override on
@@ -124,16 +137,22 @@ vet: ## Run go vet (default-tagged and integration-tagged source)
 	go vet ./...
 	go vet -tags=integration ./...
 
-lint: ## Run staticcheck (installs it into $GOBIN if not already present)
-	@command -v staticcheck >/dev/null 2>&1 || go install honnef.co/go/tools/cmd/staticcheck@latest
-	staticcheck ./...
-	staticcheck -tags=integration ./...
+lint: ## Run staticcheck at the pinned version (see STATICCHECK_VERSION)
+	go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
+	go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -tags=integration ./...
 
-vulncheck: ## Run govulncheck (installs it into $GOBIN if not already present)
-	@command -v govulncheck >/dev/null 2>&1 || go install golang.org/x/vuln/cmd/govulncheck@latest
-	govulncheck ./...
+vulncheck: ## Run govulncheck at the pinned version (see GOVULNCHECK_VERSION)
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
-check: fmt-check vet lint vulncheck test-race ## Run everything the CI quality gate runs (no PostgreSQL required)
+tidy-check: ## Fail if go.mod/go.sum are not tidy (matches CI; fix with `make tidy`)
+	@if ! go mod tidy -diff; then \
+		echo ""; \
+		echo "go.mod/go.sum não estão tidy. Rode: make tidy"; \
+		exit 1; \
+	fi
+	go mod verify
+
+check: fmt-check tidy-check vet lint vulncheck test-race ## Run the CI static gate + race-tested unit tests (no PostgreSQL/MinIO; CI also runs fuzz and the integration suite)
 
 ##@ Docker
 

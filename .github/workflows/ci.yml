@@ -10,10 +10,27 @@ on:
 permissions:
   contents: read
 
+# Um push novo na mesma branch torna a execução anterior obsoleta. Sem isto
+# elas se acumulam e disputam o runner — o gate leva ~1m30, mas prende um
+# runner por todo esse tempo para produzir um resultado que ninguém vai ler.
+#
+# main e develop ficam de fora do cancelamento: lá cada commit é um ponto da
+# história que se quer saber se passou, não um passo intermediário de PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/develop' }}
+
 jobs:
   quality-gate:
     name: Quality Gate
     runs-on: ubuntu-latest
+
+    # O gate leva ~1m30 com o cache quente. 15 minutos dão folga de uma ordem
+    # de grandeza e ainda cortam cedo o que interessa: um deadlock sob -race,
+    # um MinIO que passou do loop de espera mas não responde, uma query
+    # pendurada contra o service container. Sem isto o padrão do runner é
+    # 6 horas — tempo suficiente para um teste travado consumir a cota do dia.
+    timeout-minutes: 15
 
     # Backs internal/task and internal/user's postgresRepository
     # integration tests (*_postgres_repository_test.go, built only with
@@ -91,6 +108,15 @@ jobs:
           go mod download
           go mod verify
 
+      # `go mod tidy -diff` verifica sem escrever (Go >= 1.23). Sem este gate,
+      # duas dependências diretas (moat e minio-go) ficaram marcadas como
+      # `// indirect` e ninguém notou: o bloco `require` é onde se lê o que o
+      # projeto escolheu depender, e o CLAUDE.md manda não adicionar
+      # dependência sem critério — um go.mod que mente sobre isso enfraquece a
+      # própria regra.
+      - name: Modules tidy
+        run: make tidy-check
+
       # gofmt -l lists files that are not formatted; a non-empty result
       # must fail the build instead of just being printed as a warning.
       - name: Check formatting (gofmt)
@@ -114,11 +140,15 @@ jobs:
       # staticcheck, not golangci-lint: see docs/ARCHITECTURE.md's Future Improvements —
       # the golangci-lint build available at the time of writing predates
       # the Go version pinned in go.mod and cannot type-check it.
+      #
+      # Invoked through the Makefile rather than inline, so the pinned version
+      # (STATICCHECK_VERSION) lives in exactly one place. It used to be
+      # `@latest` here and `@latest` there, which meant the gate was not
+      # reproducible — the same commit could pass today and fail tomorrow with
+      # no change of ours — and that a developer's `make lint` and this job
+      # could silently run different linters.
       - name: Lint (staticcheck)
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          staticcheck ./...
-          staticcheck -tags=integration ./...
+        run: make lint
 
       # Known vulnerabilities in what we ship. This sits with the other
       # static gates rather than with the tests because it is the same
@@ -145,9 +175,7 @@ jobs:
       # would only surface vulnerabilities reachable from test helpers,
       # which are not part of what gets deployed.
       - name: Vulnerabilities (govulncheck)
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+        run: make vulncheck
 
       # Unit tests: memoryRepository, Service, Handler, config, middleware,
       # server lifecycle — everything that needs no external service.
@@ -200,3 +228,75 @@ jobs:
         run: |
           go test -p 1 -tags=integration -coverpkg=./... -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out | tail -1
+
+  # A imagem é o artefato que roda em produção, e até aqui nada no CI a
+  # construía: uma regressão no build estático — uma dependência nova que
+  # precise de cgo, por exemplo — só apareceria no deploy. O CLAUDE.md diz
+  # explicitamente que "a new dependency that needs cgo breaks the `scratch`
+  # build", e essa invariante não tinha nenhuma verificação automática.
+  #
+  # Job separado, e não um step do gate: não precisa de PostgreSQL nem de
+  # MinIO, roda em paralelo, e uma falha aqui aponta para o Dockerfile sem
+  # ambiguidade.
+  docker-image:
+    name: Docker Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t task-api:ci .
+
+      # O smoke test é também o teste de "é estático mesmo": a base é
+      # `scratch`, sem libc e sem loader, então um binário dinâmico não
+      # chegaria a executar. Se o container responde, ele é estático.
+      #
+      # Sem DATABASE_URL, o processo escolhe os repositórios em memória (ver
+      # openDatabase), então não há serviço nenhum para subir.
+      - name: Smoke test the image
+        run: |
+          docker run -d --name task-api-ci -p 18080:8080 task-api:ci
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18080/health >/dev/null; then
+              echo "API respondeu após ${i}s"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "API não respondeu em 30s"
+              docker logs task-api-ci
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "--- /health ---"
+          curl -sf -o /dev/null -w "  status=%{http_code}\n" http://127.0.0.1:18080/health
+          echo "--- /health/ready (sem banco: pronto por construção) ---"
+          curl -sf -o /dev/null -w "  status=%{http_code}\n" http://127.0.0.1:18080/health/ready
+          echo "--- /v1/tasks sem token deve ser 401 ---"
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/v1/tasks)
+          if [ "$code" != "401" ]; then
+            echo "esperado 401, recebido $code"
+            docker logs task-api-ci
+            exit 1
+          fi
+          echo "  status=401"
+
+      # O binário roda como 65532:65532 (ver Dockerfile). Um `USER` removido
+      # por engano é o tipo de regressão que nenhum teste de comportamento
+      # pega, porque a API funciona igual rodando como root.
+      - name: Assert the container does not run as root
+        run: |
+          uid=$(docker inspect -f '{{.Config.User}}' task-api:ci)
+          if [ "$uid" != "65532:65532" ]; then
+            echo "esperado USER 65532:65532, encontrado \"$uid\""
+            exit 1
+          fi
+          echo "  USER=$uid"
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f task-api-ci || true

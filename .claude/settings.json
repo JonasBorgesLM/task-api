@@ -1,0 +1,60 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make help)",
+      "Bash(make check)",
+      "Bash(make test)",
+      "Bash(make test-race)",
+      "Bash(make test-integration)",
+      "Bash(make test-integration-race)",
+      "Bash(make coverage)",
+      "Bash(make coverage-full)",
+      "Bash(make fmt)",
+      "Bash(make fmt-check)",
+      "Bash(make vet)",
+      "Bash(make lint)",
+      "Bash(make vulncheck)",
+      "Bash(make tidy)",
+      "Bash(make build)",
+      "Bash(make fuzz*)",
+      "Bash(make db-up)",
+      "Bash(make storage-up)",
+      "Bash(make migrate-up)",
+      "Bash(make migrate-down)",
+      "Bash(go build ./...)",
+      "Bash(go vet ./...)",
+      "Bash(go vet -tags=integration ./...)",
+      "Bash(go test ./...)",
+      "Bash(go test -race ./...)",
+      "Bash(go test -cover ./...)",
+      "Bash(go doc *)",
+      "Bash(go mod tidy -diff)",
+      "Bash(go mod verify)",
+      "Bash(gofmt -l .)",
+      "Bash(staticcheck ./...)",
+      "Bash(staticcheck -tags=integration ./...)",
+      "Bash(govulncheck ./...)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git branch*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Bash(git push --no-verify*)",
+      "Bash(git commit --no-verify*)"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'task-api: decompose this request into subtasks and activate the matching .claude/skills. Before changing code, read docs/DECISIONS.md for any decision it touches; a request that contradicts a recorded decision is a question, not an instruction.'"
+          }
+        ]
+      }
+    ]
+  }
+}
