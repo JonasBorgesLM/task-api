@@ -50,6 +50,29 @@ data:
   # Sent unconditionally, and inert over the plaintext this process
   # serves — see docs/DECISIONS.md. Set to 0 to omit it entirely.
   HSTS_MAX_AGE: "8760h"
+
+  # Mirrors every log record to SigNoz, alongside stdout — see
+  # docs/DECISIONS.md's Fase 11 sections for the full validation this
+  # was verified against (real ClickHouse query, not just "the exporter
+  # didn't error").
+  #
+  # SigNoz here runs via Docker Compose (Foundry), on the same host as
+  # this kind cluster, outside Kubernetes entirely — not a Service this
+  # manifest can reference by in-cluster DNS. Its OTLP-ingesting
+  # container is reachable from a pod only because it is attached to
+  # kind's own docker network (the network kind's node containers run
+  # on, literally named "kind" unless a non-default cluster name was
+  # used): `docker network connect kind <signoz-ingester-container>`.
+  # Without that connect, this endpoint is unreachable and the crier
+  # simply buffers and eventually reports loss at shutdown — it never
+  # blocks startup or serving (see cmd/api/crier.go's buildCrier).
+  #
+  # The container name below is what SigNoz's Foundry-based Compose
+  # deploy produces with the default project name ("signoz"): the OTLP
+  # ingester service, replica 1. Confirm with
+  # `docker ps --format '{{.Names}}'` if a different project/cluster
+  # name was used.
+  CRIER_OTLP_ENDPOINT: "http://signoz-ingester-1:4318"
 ---
 # ⚠️  A Kubernetes Secret is base64, NOT encryption.
 #

@@ -439,6 +439,125 @@ recurso construído mais de uma vez por processo de teste.
 
 ---
 
+## SigNoz: Docker Compose (Foundry), mesma máquina do cluster, ligado à rede do `kind` (issue 11.5)
+
+SigNoz roda via **Docker Compose oficial**, fora de qualquer cluster
+Kubernetes, na **mesma máquina** que o cluster de validação do task-api
+— não VM dedicada, não SigNoz Cloud (decisão revisada; substitui uma
+versão anterior desta seção que cogitava VM própria com VPN/peering,
+descartada antes de qualquer provisionamento).
+
+**Instalação reproduzível.** O `deploy/docker` legado do repositório do
+SigNoz está deprecado desde a v0.130.0, substituído pela CLI **Foundry**:
+
+```bash
+curl -fsSL https://signoz.io/foundry.sh | bash   # instala foundryctl
+cat > casting.yaml <<'YAML'
+apiVersion: v1alpha1
+kind: Installation
+metadata:
+  name: signoz
+spec:
+  deployment:
+    flavor: compose
+    mode: docker
+YAML
+foundryctl cast -f casting.yaml   # gera o compose e sobe os containers
+```
+
+Com o nome de projeto padrão ("signoz"), o container que recebe OTLP é
+`signoz-ingester-1`, publicado em `0.0.0.0:4317-4318` no host e também
+acessível por nome dentro da rede Docker `signoz-network` que o Compose
+cria.
+
+### A pergunta que não podia ser assumida: como um pod alcança um serviço no host
+
+A ferramenta que cria o cluster Kubernetes local deste repositório é
+**kind** (confirmado lendo `k8s/rollout-test.sh`) — não minikube, k3d,
+nem o Kubernetes do Docker Desktop. Testados por execução real, num
+cluster kind descartável criado só para isto (não por leitura de
+documentação — a documentação oficial do kind não cobre este cenário, e
+os relatos da comunidade sobre `host.docker.internal` em Linux são, na
+melhor das hipóteses, de segunda mão):
+
+1. **`host.docker.internal`** — funcionou nesta máquina (macOS + Docker
+   Desktop). `docker inspect` do nó do kind mostra `ExtraHosts: null`: a
+   resolução veio do DNS embutido do Docker Desktop, não de configuração
+   do kind. Relatos da comunidade convergem em que isso **não** funciona
+   por padrão em Docker Engine puro no Linux — não verificável aqui por
+   falta de máquina Linux, citado com essa ressalva.
+2. **IP do gateway da rede Docker do kind** — **falhou** aqui (o gateway
+   vive dentro da VM do Docker Desktop, que não expõe portas publicadas
+   pelo próprio macOS).
+3. **Container do SigNoz anexado à mesma rede Docker que o kind usa**
+   (rede `kind`, criada automaticamente pela CLI, compartilhada entre
+   *todos* os clusters kind da máquina) — **funcionou, por nome DNS e por
+   IP**, e é o único dos três que não depende de VM, gateway, ou sistema
+   operacional do host:
+
+   ```bash
+   docker network connect kind signoz-ingester-1
+   ```
+
+   Esta conexão **persiste entre recriações do cluster kind** — a rede
+   `kind` sobrevive a `kind delete cluster`, então o `connect` é
+   necessário só uma vez por máquina, não uma vez por cluster.
+
+**Decisão: mecanismo 3**, registrada em `k8s/30-config.yaml` junto com o
+comando acima. `CRIER_OTLP_ENDPOINT` aponta para o serviço pelo nome do
+container (`http://signoz-ingester-1:4318`), não por IP — nome é estável
+entre restarts do container, IP não é.
+
+**Sem credencial, `http://`** — SigNoz self-hosted não exige chave de
+ingestão por padrão, e "mesma máquina, mesma rede Docker" é um limite de
+confiança pelo menos tão apertado quanto o cogitado antes. `https://`
+continua não fazendo sentido: a imagem `scratch` não tem bundle de CA
+nesta branch, e não há cadeia de confiança adicional a proteger aqui.
+
+**Trade-off aceito:** a disponibilidade do SigNoz fica amarrada à
+disponibilidade da própria máquina do cluster — sem isolamento de falha
+de uma VM separada. Aceito porque `k8s/` já é, por natureza, descartável
+e local (ver `CLAUDE.md`); um SigNoz que só precisa sobreviver enquanto
+essa validação roda não precisa da resiliência de uma segunda máquina.
+Revisitar explicitamente se este projeto ganhar um cluster de produção de
+verdade fora do que `k8s/` representa hoje.
+
+---
+
+## Validação real da issue 11.6: dois registros confirmados no ClickHouse do SigNoz
+
+`CRIER_OTLP_ENDPOINT` verificado entregando de verdade, não apenas "o
+exportador não retornou erro" — cada prova consultou diretamente o
+`signoz_logs.logs_v2` do ClickHouse por `request_id`, não a UI (que
+exigiria resolver o fluxo de login da versão do SigNoz instalada, tempo
+melhor gasto verificando o dado em si):
+
+1. **`run()` local → SigNoz real**, sem Kubernetes envolvido: binário
+   compilado desta branch, `CRIER_OTLP_ENDPOINT=http://localhost:4318`,
+   uma requisição a `/health`, `SIGTERM` gracioso. Log
+   `"crier drain completed", "summary":"drain complete in 1ms, no
+   records lost"`. `SELECT ... FROM signoz_logs.logs_v2 WHERE
+   attributes_string['request_id'] = '<o id do log>'` — **uma linha**,
+   `method`/`path`/`duration`/`request_id` todos intactos.
+2. **Deploy real via os manifests deste repositório**, dentro de um
+   cluster kind: `kubectl apply -f k8s/` com o `CRIER_OTLP_ENDPOINT` já
+   registrado no `ConfigMap` (`k8s/30-config.yaml`), `signoz-ingester-1`
+   conectado à rede `kind`, requisição real contra o `Service`, e então
+   `kubectl rollout restart deploy/task-api` — a mesma operação que
+   `k8s/rollout-test.sh` (issue 11.7) vai medir. O `request_id` da
+   requisição feita **antes** do restart apareceu no ClickHouse **depois**
+   do pod antigo ter sido substituído — prova de que o drain do crier no
+   `closeAll` (ver a seção "Fase 11" acima) de fato roda antes do processo
+   sair, não só em teoria. `resources_string['service.name'] = 'task-api'`
+   confirmado em 87 registros contados no total, batendo com
+   `crierServiceName` (`cmd/api/crier.go`).
+
+Recursos de teste (cluster(s) kind descartáveis, imagem
+`task-api:crier-e2e-test`) removidos depois; o stack do SigNoz continua
+rodando na máquina para a issue 11.7 reaproveitar.
+
+---
+
 ## Princípio geral de validação
 
 Decisões e correções neste projeto são verificadas pela execução real, não
