@@ -52,18 +52,27 @@ func CORS(allowedOrigins []string) Middleware {
 				return
 			}
 
+			// Vary: Origin tells any cache in front of this server that the
+			// response depends on the request's Origin header — set here,
+			// before the allow-list check, because that is true of *every*
+			// response while CORS is enabled, not only the one where the
+			// origin turns out to be allowed. Setting it only inside that
+			// branch (as an earlier version of this middleware did) left
+			// the two other outcomes — no Origin header, or one not on the
+			// list — cacheable without Vary: a shared cache could then
+			// store a response with no Access-Control-Allow-Origin and
+			// later serve that same cached response to a browser whose
+			// Origin *is* allowed, which reads as a cross-origin failure
+			// with nothing wrong on this server's side to point at.
+			w.Header().Add("Vary", "Origin")
+
 			origin := r.Header.Get("Origin")
 			if origin == "" || !allowed[origin] {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			// Vary: Origin tells any cache in front of this server that the
-			// response depends on the request's Origin header, so it never
-			// serves an Access-Control-Allow-Origin meant for one origin to
-			// a browser from another.
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Add("Vary", "Origin")
 
 			if r.Method == http.MethodOptions {
 				w.Header().Set("Access-Control-Allow-Methods", corsAllowedMethods)

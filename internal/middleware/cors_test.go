@@ -180,3 +180,71 @@ func TestCORS_Enabled_AllowedOriginPreflight_UnroutedPathStillAnswered(t *testin
 		t.Errorf("status = %d, want %d — CORS must answer preflight before routing", w.Code, http.StatusNoContent)
 	}
 }
+
+// --- Vary: Origin ---
+//
+// These pin a real bug: Vary: Origin used to be set only inside the
+// allowed-origin branch, leaving a disallowed-origin or no-Origin
+// response cacheable without it. A shared cache could then store one of
+// those and later serve it to a browser whose Origin *is* allowed —
+// silently missing Access-Control-Allow-Origin, read by that browser as
+// a cross-origin failure with nothing wrong on this server's side.
+
+func TestCORS_Enabled_AllowedOrigin_SetsVary(t *testing.T) {
+	next, _ := newCORSTestHandler()
+	handler := CORS([]string{"http://localhost:8082"})(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set("Origin", "http://localhost:8082")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Vary"); got != "Origin" {
+		t.Errorf("Vary = %q, want %q", got, "Origin")
+	}
+}
+
+func TestCORS_Enabled_DisallowedOrigin_StillSetsVary(t *testing.T) {
+	next, _ := newCORSTestHandler()
+	handler := CORS([]string{"http://localhost:8082"})(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Vary"); got != "Origin" {
+		t.Errorf("Vary = %q, want %q — a disallowed origin's response still depends on Origin", got, "Origin")
+	}
+}
+
+func TestCORS_Enabled_NoOriginHeader_StillSetsVary(t *testing.T) {
+	next, _ := newCORSTestHandler()
+	handler := CORS([]string{"http://localhost:8082"})(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Vary"); got != "Origin" {
+		t.Errorf("Vary = %q, want %q — a request with no Origin still depends on whether one is present", got, "Origin")
+	}
+}
+
+func TestCORS_Disabled_NeverSetsVary(t *testing.T) {
+	// CORS is a complete no-op when disabled (see CORS's doc comment) —
+	// Vary: Origin would be actively wrong here, since the response
+	// never depends on Origin when there's no allow-list to check it
+	// against.
+	next, _ := newCORSTestHandler()
+	handler := CORS(nil)(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set("Origin", "http://localhost:8082")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Vary"); got != "" {
+		t.Errorf("Vary = %q, want none — CORS is disabled", got)
+	}
+}

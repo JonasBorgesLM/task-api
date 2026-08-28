@@ -50,13 +50,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 ## ---------------------------------------------------------------------
 ## Runtime stage
 ##
-## `scratch` is literally empty — no shell, no package manager, no libc,
-## no CA certificates. `pgx` (see go.mod) implements the PostgreSQL wire
-## protocol in pure Go, so connecting to PostgreSQL over plain TCP or
-## sslmode=require needs nothing from the image beyond the binary itself.
-## sslmode=verify-full (which validates the server's certificate against
-## a CA) is the one case this image cannot support as-is — it would need
-## a CA bundle added via `COPY --from=builder /etc/ssl/certs/... `.
+## `scratch` is literally empty — no shell, no package manager, no libc.
+## `pgx` (see go.mod) implements the PostgreSQL wire protocol in pure Go,
+## so connecting to PostgreSQL over plain TCP or sslmode=require needs
+## nothing from the image beyond the binary itself.
 ## ---------------------------------------------------------------------
 FROM scratch
 
@@ -66,6 +63,19 @@ FROM scratch
 # needs the number — which matters here since `scratch` has no tooling
 # available to create one.
 USER 65532:65532
+
+# CA bundle for outbound TLS where this process verifies a peer's
+# certificate: DATABASE_URL with sslmode=verify-full,
+# ATTACHMENT_S3_USE_SSL=true against a real S3-compatible endpoint, and
+# any future https:// destination (an OTLP log exporter, for one). None
+# of those worked from this image before this line existed — the golang
+# builder stage above has ca-certificates installed (it needs it too, to
+# fetch modules over HTTPS), and this is the same 178 KB file, copied
+# rather than reinstalled so `scratch` never needs a package manager.
+# Go's crypto/x509 reads exactly this path on Linux by default; nothing
+# else has to be configured for either Go's stdlib or minio-go to pick
+# it up automatically.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 COPY --from=builder /out/task-api /task-api
 
