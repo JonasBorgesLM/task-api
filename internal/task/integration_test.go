@@ -55,7 +55,7 @@ func newIntegrationServer(t *testing.T) (*httptest.Server, string) {
 	taskSvc := NewService(NewMemoryRepository())
 	taskHandler := NewHandler(taskSvc, logger)
 
-	userSvc := user.NewService(user.NewMemoryRepository(), 24*time.Hour)
+	userSvc := user.NewService(user.NewMemoryRepository(), 24*time.Hour, 1000)
 	userHandler := user.NewHandler(userSvc, logger)
 	requireAuth := user.RequireAuth(userSvc, logger)
 

@@ -253,7 +253,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	}
 
 	taskSvc := task.NewService(taskRepo)
-	userSvc := user.NewService(userRepo, cfg.AuthSessionTTL)
+	userSvc := user.NewService(userRepo, cfg.AuthSessionTTL, cfg.AuthMaxSessionsPerUser)
 
 	taskHandler := task.NewHandler(taskSvc, logger)
 	userHandler := user.NewHandler(userSvc, logger)
@@ -407,7 +407,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 			attachmentRepo = attachment.NewPostgresRepository(db)
 		}
 
-		attachmentSvc := attachment.NewService(attachmentRepo, blobs, cfg.AttachmentMaxBytes)
+		attachmentSvc := attachment.NewService(attachmentRepo, blobs, cfg.AttachmentMaxBytes, cfg.AttachmentMaxBytesPerUser)
 		attachment.NewHandler(attachmentSvc, logger, cfg.AttachmentMaxBytes).RegisterRoutes(v1, authenticated)
 		collectOrphans = func(ctx context.Context) (int, error) {
 			return attachmentSvc.CollectOrphans(ctx, cfg.AttachmentOrphanMinAge)

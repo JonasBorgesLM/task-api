@@ -319,6 +319,135 @@ não feche por ter editado o arquivo certo, feche por ter visto rodar.
 
 ---
 
+## Quota de anexos: por usuário, em bytes, checada antes do upload
+
+`ATTACHMENT_MAX_BYTES_PER_USER` (default 500 MiB) limita o total de bytes
+que um usuário pode ter armazenado em anexos, somado através de todas as
+suas tasks.
+
+**O eixo — por usuário, não por task, não por contagem:** por task não
+resolve o problema real — nada impede um atacante de criar mais tasks e
+continuar enchendo o storage, cada uma dentro do próprio limite. Contagem
+de anexos não impede o cenário real (poucos arquivos grandes). Bytes
+totais por usuário é a métrica que a própria motivação da issue nomeia:
+"encher o storage".
+
+**Quando a checagem roda:** antes de qualquer byte do upload ser lido —
+`Repository.TotalBytesForUser` é consultado primeiro, e se o total atual
+já estiver no limite (`>=`), a requisição é recusada sem tocar no corpo.
+Verificado com um `io.Reader` que falha o teste se `Read` for chamado.
+
+**Por que a checagem usa o total *antes* do upload, não *depois*:** o
+tamanho real de um upload só é conhecido quando `BlobStore.Put` termina
+de ler o stream (`Content-Length` é declarado pelo cliente e pode
+mentir — a mesma razão pela qual o limite de um único upload
+(`ATTACHMENT_MAX_BYTES`) já não confia nesse header). Checar depois
+significaria gravar o blob primeiro e apagá-lo se a quota estourou —
+puro desperdício de I/O para um teto que só precisa impedir abuso
+sustentado, não cravar um número exato de bytes.
+
+**Trade-off aceito:** um único upload aceito pode levar o total até
+`ATTACHMENT_MAX_BYTES` acima da quota — o overshoot máximo é limitado
+pelo teto de um upload individual, não é ilimitado. E duas requisições
+concorrentes do mesmo usuário, cada uma vendo o total antes da outra
+commitar, podem ambas passar e juntas ultrapassar a quota por um
+upload a mais do que o previsto — aceito pela mesma razão: é um teto
+operacional contra abuso sustentado, não uma invariante financeira que
+precise de bloqueio.
+
+**A mensagem de erro não revela uso de outro usuário** — garantido por
+construção, já que `TotalBytesForUser` é escopado ao próprio `userID` da
+chamada; nunca há outro usuário para vazar.
+
+---
+
+## Limite de sessões: teto com evicção da mais antiga
+
+`AUTH_MAX_SESSIONS_PER_USER` (default 10) bounds quantas sessões de um
+usuário ficam vivas ao mesmo tempo. Ao exceder, `CreateSession` evict a
+mais antiga (por `CreatedAt`) em vez de recusar o novo login.
+
+**Evicção, não recusa — e por quê:** este projeto não tem (e a issue não
+pede) um endpoint para listar sessões ativas. Recusar o login excedente
+deixaria o usuário sem saída clara — a única opção seria esperar uma
+sessão expirar (até `AUTH_SESSION_TTL` inteiro) ou usar `logout-all`, que
+sequer existia antes desta decisão. Evicção nunca trava um login
+legítimo: o pior caso é o dispositivo mais antigo perder a sessão
+silenciosamente, o mesmo comportamento que serviços reais (bancos, redes
+sociais) já usam para "você foi desconectado em outro lugar".
+
+**`POST /v1/auth/logout-all` entra no escopo**, e é o que de fato resolve
+a segunda motivação da issue — "não há como um usuário encerrar sessões
+que não sejam a atual" — que a evicção sozinha não cobre satisfatoriamente
+(evicção é passiva e só ajuda se o dono continuar logando normalmente em
+outro lugar; um token roubado usado sem mais logins novos nunca seria
+evictado). `LogoutAll` remove **todas** as sessões do usuário,
+**incluindo a que fez a chamada** — "sair de todos os lugares" é o
+padrão real de segurança para quem suspeita de um token vazado, e deixar
+a sessão atual viva contradiria o propósito.
+
+**Implementado no `Repository`, com uma transação *e* um advisory lock —
+a transação sozinha não bastou, e isso só foi descoberto porque o CI
+achou o que o teste local não achava.**
+
+Uma primeira versão só com a transação (`BEGIN`; `INSERT`; `DELETE ...
+NOT IN (SELECT ... ORDER BY created_at DESC LIMIT $2)`; `COMMIT`) passou
+localmente, repetidamente, no teste de concorrência abaixo. Um
+experimento manual foi além: uma versão deliberadamente *sem* transação
+nenhuma, com um delay artificial de 20ms entre o `INSERT` e o `DELETE`
+para alargar a janela de corrida, também **nunca produziu overshoot**
+localmente — a hipótese testada era que a consulta de evicção é
+auto-corretiva (quando roda, aplica a regra contra o estado real da
+tabela naquele momento, não contra um snapshot antigo), e o experimento
+parecia confirmar isso.
+
+**Essa conclusão estava incompleta, e o CI provou isso**: a mesma versão
+com transação, rodada contra o runner do GitHub Actions — rede real
+entre goroutines, não localhost — deixou **7 sessões, não 3**, na
+primeira execução. A causa real: o isolamento padrão do PostgreSQL,
+`READ COMMITTED`, deixa cada transação enxergar apenas o que outras já
+commitaram *antes do seu próprio `SELECT` rodar*, mais sua própria linha
+recém-inserida. Dez logins chegando perto o suficiente uma da outra
+fazem cada transação ver **uma única sessão — a sua própria** — concluir,
+corretamente segundo essa visão limitada, que não há nada para evictar
+(1 <= 3), e todas commitam. Nenhuma transação nunca chega a ver o
+trabalho das outras nove. Isso não é o mesmo cenário do experimento
+manual (uma única goroutine com delay, sem outras rodando em paralelo de
+verdade) — é uma classe de corrida diferente, entre transações
+concorrentes de verdade, que só apareceu com latência de rede real.
+
+A correção: `SELECT pg_advisory_xact_lock(hashtext(user_id))` como
+primeira instrução dentro da transação, serializando toda
+`CreateSession` concorrente para o **mesmo** usuário (nunca bloqueia
+usuários diferentes entre si) — liberado automaticamente no
+commit/rollback pela variante `_xact_`, sem precisar de unlock
+explícito. Revalidado: 30 execuções consecutivas do teste de
+concorrência, localmente, todas com contagem final exata — e a suíte
+completa de CI, verde.
+
+**A lição registrada, não só a correção:** um teste de concorrência que
+só roda localmente pode passar por acaso, mascarando uma corrida real
+que só se manifesta sob latência de rede genuína. O `TestPostgres_
+ConcurrentCreateSession_NeverExceedsCap` continua na suíte porque ainda
+é útil — mas o comentário do teste registra explicitamente que ele não
+pode ser confiado sozinho para pegar essa classe de regressão em
+qualquer máquina; é o CI, não a máquina de quem escreveu o código, que
+efetivamente encontrou o bug aqui.
+
+**Teste de concorrência** (`TestPostgres_ConcurrentCreateSession_
+NeverExceedsCap`), no padrão de `TestConcurrentUpdate_LosersGetErrConflict`:
+10 goroutines reais, um gate de início, `-race`, todas criando sessão para
+o mesmo usuário ao mesmo tempo — a contagem final nunca excede o teto.
+
+**Migration nova** (`0008_add_sessions_user_id_created_at_index`): índice
+composto `(user_id, created_at)`, pela mesma razão de
+`idx_tasks_user_id_created_at_id` — a consulta de evicção filtra por
+`user_id` **e** ordena por `created_at` juntos; o índice simples que já
+existia (`idx_sessions_user_id`, de `0006_add_sessions_indexes`) não serve
+os dois ao mesmo tempo.
+
+---
+
 ## Delete de anexo: síncrono, não só o coletor
 
 `DELETE /v1/files/{key}` remove a linha de metadado e o blob **na mesma

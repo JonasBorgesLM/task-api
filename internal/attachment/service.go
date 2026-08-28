@@ -56,24 +56,28 @@ var allowedContentTypes = map[string]struct{}{
 // under what name it is stored, and how the two halves — metadata and
 // bytes — are kept consistent with each other.
 type Service struct {
-	repo      Repository
-	blobs     BlobStore
-	maxBytes  int64
-	allowed   map[string]struct{}
-	nowFunc   func() time.Time
-	newIDFunc func() (string, error)
+	repo            Repository
+	blobs           BlobStore
+	maxBytes        int64
+	maxBytesPerUser int64
+	allowed         map[string]struct{}
+	nowFunc         func() time.Time
+	newIDFunc       func() (string, error)
 }
 
 // NewService returns a Service writing metadata through repo and bytes
-// through blobs, rejecting any upload over maxBytes.
-func NewService(repo Repository, blobs BlobStore, maxBytes int64) *Service {
+// through blobs, rejecting any upload over maxBytes, and refusing a new
+// upload once userID's total already at or over maxBytesPerUser — see
+// Upload's doc comment for exactly when and how that total is checked.
+func NewService(repo Repository, blobs BlobStore, maxBytes, maxBytesPerUser int64) *Service {
 	return &Service{
-		repo:      repo,
-		blobs:     blobs,
-		maxBytes:  maxBytes,
-		allowed:   allowedContentTypes,
-		nowFunc:   time.Now,
-		newIDFunc: newID,
+		repo:            repo,
+		blobs:           blobs,
+		maxBytes:        maxBytes,
+		maxBytesPerUser: maxBytesPerUser,
+		allowed:         allowedContentTypes,
+		nowFunc:         time.Now,
+		newIDFunc:       newID,
 	}
 }
 
@@ -131,9 +135,44 @@ func isValidID(id string) bool {
 // it, so trusting it would make the allow-list decorative. The detected
 // type is what gets stored, so a later download describes the bytes it is
 // actually serving.
+//
+// # Per-user quota
+//
+// Before anything else, Upload checks userID's current total (via
+// Repository.TotalBytesForUser) against maxBytesPerUser. A user already
+// at or over the quota is refused before a single byte streams in — the
+// point of checking first is exactly to avoid streaming a byte in this
+// case, not to bound the check's cost.
+//
+// The total checked is what the user had *before* this upload — the
+// new upload's own size isn't known until Put finishes reading the
+// stream, so it cannot be part of the number being compared to the
+// limit. One accepted upload can therefore push the total up to
+// maxBytes past maxBytesPerUser. Checking after the write, once the
+// real size is known, would mean writing the blob first and deleting it
+// on rejection — pure waste for a ceiling that only has to stop
+// sustained abuse, not enforce an exact byte count. See
+// docs/DECISIONS.md § "Quota de anexos: por usuário, em bytes" for the
+// full reasoning, including why this doesn't also bound concurrent
+// uploads racing each other past the quota — the same category of
+// accepted, bounded overshoot.
 func (s *Service) Upload(ctx context.Context, userID, taskID, declaredFilename string, r io.Reader) (Attachment, error) {
+	// Shape-checked before the quota lookup, for the same reason
+	// Download/ListByTask check it first: a malformed taskID has no
+	// business reaching Repository at all, and TotalBytesForUser is a
+	// real query — no reason to pay for it against an id that was never
+	// going to resolve to anything.
 	if !isValidID(taskID) {
 		return Attachment{}, ErrTaskNotFound
+	}
+
+	total, err := s.repo.TotalBytesForUser(ctx, userID)
+	if err != nil {
+		return Attachment{}, fmt.Errorf("upload attachment: %w", err)
+	}
+	if total >= s.maxBytesPerUser {
+		return Attachment{}, fmt.Errorf("%w: attachment quota exceeded (%d/%d bytes used)",
+			ErrInvalidInput, total, s.maxBytesPerUser)
 	}
 
 	filename, err := normalizeFilename(declaredFilename)

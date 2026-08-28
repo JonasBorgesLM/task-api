@@ -86,14 +86,71 @@ func (r *postgresRepository) FindUserByID(ctx context.Context, id string) (User,
 }
 
 // CreateSession persists a new session.
-func (r *postgresRepository) CreateSession(ctx context.Context, s Session) error {
-	const query = `
+// CreateSession inserts s and evicts s.UserID's oldest sessions past
+// maxSessions. The DELETE's subquery orders by created_at DESC and keeps
+// the first maxSessions, using idx_sessions_user_id_created_at
+// (0008_add_sessions_user_id_created_at_index.up.sql) to do that without
+// a sort step.
+func (r *postgresRepository) CreateSession(ctx context.Context, s Session, maxSessions int) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("postgres: create session: begin transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit has succeeded
+
+	// Serializes concurrent CreateSession calls for the *same* user —
+	// without this, the transaction below is not enough. PostgreSQL's
+	// default isolation (READ COMMITTED) lets each concurrent
+	// transaction's evict SELECT see only rows already committed by
+	// others *before that SELECT ran*, plus its own just-inserted row.
+	// Ten transactions starting close together each see one session
+	// (their own) — 1 <= maxSessions, so each independently concludes
+	// there is nothing to evict, and all ten commit. This is not a
+	// hypothetical: an earlier version without this lock passed a local
+	// concurrency test but left 7 sessions instead of 3 in CI, where
+	// real network latency let the ten goroutines actually overlap.
+	//
+	// hashtext(user_id) maps the UUID to a stable int4; the advisory
+	// lock is released automatically on commit or rollback (the _xact_
+	// variant), so there is nothing to unlock explicitly, and it never
+	// blocks a *different* user's sessions.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, s.UserID); err != nil {
+		return fmt.Errorf("postgres: create session: acquire lock: %w", err)
+	}
+
+	const insertQuery = `
 		INSERT INTO sessions (token_hash, user_id, expires_at, created_at)
 		VALUES ($1, $2::uuid, $3, $4)
 	`
-	_, err := r.db.ExecContext(ctx, query, s.TokenHash, s.UserID, s.ExpiresAt, s.CreatedAt)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, insertQuery, s.TokenHash, s.UserID, s.ExpiresAt, s.CreatedAt); err != nil {
 		return fmt.Errorf("postgres: create session: %w", err)
+	}
+
+	const evictQuery = `
+		DELETE FROM sessions
+		WHERE user_id = $1::uuid
+		  AND token_hash NOT IN (
+		      SELECT token_hash FROM sessions
+		      WHERE user_id = $1::uuid
+		      ORDER BY created_at DESC
+		      LIMIT $2
+		  )
+	`
+	if _, err := tx.ExecContext(ctx, evictQuery, s.UserID, maxSessions); err != nil {
+		return fmt.Errorf("postgres: create session: evict oldest: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("postgres: create session: commit transaction: %w", err)
+	}
+	return nil
+}
+
+// DeleteSessionsForUser removes every session belonging to userID.
+func (r *postgresRepository) DeleteSessionsForUser(ctx context.Context, userID string) error {
+	const query = `DELETE FROM sessions WHERE user_id = $1::uuid`
+	if _, err := r.db.ExecContext(ctx, query, userID); err != nil {
+		return fmt.Errorf("postgres: delete sessions for user: %w", err)
 	}
 	return nil
 }

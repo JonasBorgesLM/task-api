@@ -254,6 +254,41 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /v1/auth/logout-all:
+    post:
+      tags: [Auth]
+      operationId: logoutAll
+      summary: Invalidate every session belonging to the caller
+      description: >
+        Deletes every session for the authenticated account — including
+        the one that authenticated this very request. Meant for a caller
+        who suspects a token of theirs has leaked: one call guarantees
+        every live session is gone, the active one included, rather than
+        needing to know which token to target individually.
+
+
+        This is the deliberate counterpart to the per-account session cap
+        (see `docs/DECISIONS.md` § "Limite de sessões: teto com evicção
+        da mais antiga"): the cap evicts a user's oldest session
+        automatically once a new login exceeds it, but that is a passive
+        mechanism that only helps if the account keeps logging in
+        normally elsewhere. A caller who wants every session gone *right
+        now* — including a suspected leak — uses this endpoint instead.
+      responses:
+        '204':
+          description: Every session for the account deleted. No response body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /v1/auth/me:
     get:
       tags: [Auth]
@@ -832,6 +867,16 @@ paths:
         `Content-Length`.
 
 
+        The caller's total across every attachment they own —
+        `ATTACHMENT_MAX_BYTES_PER_USER`, 500 MiB by default — is checked
+        *before* the upload streams in, using the total the caller
+        already had. A caller already at or over the quota is refused
+        without a single byte being read; one accepted upload can push
+        the total up to `ATTACHMENT_MAX_BYTES` past the quota (see
+        `docs/DECISIONS.md` § "Quota de anexos" for why that overshoot is
+        accepted).
+
+
         These routes exist only when `ATTACHMENT_STORAGE_DIR` is
         configured; otherwise every one of them returns 404.
       requestBody:
@@ -858,8 +903,10 @@ paths:
         '400':
           description: >
             The body was not multipart, carried no `file` part, exceeded
-            the size limit, or held a content type outside the
-            allow-list.
+            the size limit, held a content type outside the allow-list,
+            or the caller is already at their per-account storage quota
+            (`ATTACHMENT_MAX_BYTES_PER_USER`) — the message never
+            reveals another account's usage, only the caller's own.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -867,8 +914,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-              example:
-                error: 'invalid input: content type "application/octet-stream" is not accepted'
+              examples:
+                unsupportedType:
+                  summary: Content type outside the allow-list
+                  value:
+                    error: 'invalid input: content type "application/octet-stream" is not accepted'
+                quotaExceeded:
+                  summary: Caller already at their per-account quota
+                  value:
+                    error: 'invalid input: attachment quota exceeded (524288000/524288000 bytes used)'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':

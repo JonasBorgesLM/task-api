@@ -19,9 +19,41 @@ type Repository interface {
 	FindUserByEmail(ctx context.Context, email string) (User, error)
 	FindUserByID(ctx context.Context, id string) (User, error)
 
-	CreateSession(ctx context.Context, s Session) error
+	// CreateSession stores s and evicts s.UserID's oldest sessions (by
+	// CreatedAt) past maxSessions, inside one transaction serialized per
+	// user by a PostgreSQL advisory lock — see postgresRepository.
+	// CreateSession's doc comment for exactly why the lock is load-
+	// bearing, not a belt-and-suspenders addition.
+	//
+	// The short version: a transaction around insert+evict is not
+	// enough on its own. PostgreSQL's default isolation (READ COMMITTED)
+	// lets each of several concurrent CreateSession transactions see
+	// only what was already committed *before its own SELECT ran*, plus
+	// its own just-inserted row — so ten logins arriving close together
+	// can each conclude, independently and correctly by its own limited
+	// view, that eviction isn't needed yet. This was caught by CI, not
+	// locally: an earlier version without the lock passed a local
+	// concurrency test repeatedly and left 7 sessions instead of 3 the
+	// one time it ran against a CI runner's real network latency. See
+	// docs/DECISIONS.md § "Limite de sessões: teto com evicção da mais
+	// antiga" for that finding in full.
+	//
+	// maxSessions <= 0 is a programming error, not "unlimited" — every
+	// caller has a real Config.AuthMaxSessionsPerUser to pass; the
+	// zero value of an unset test config is exactly the case this
+	// should not silently accept as "no cap".
+	CreateSession(ctx context.Context, s Session, maxSessions int) error
+
 	FindSessionByTokenHash(ctx context.Context, tokenHash string) (Session, error)
 	DeleteSession(ctx context.Context, tokenHash string) error
+
+	// DeleteSessionsForUser removes every session belonging to userID,
+	// unconditionally — including the one that authenticated the
+	// request that led here. Backs Service.LogoutAll: a caller who
+	// suspects a stolen token gets one operation that guarantees every
+	// live session is gone, active one included, rather than having to
+	// enumerate and delete them individually.
+	DeleteSessionsForUser(ctx context.Context, userID string) error
 
 	// DeleteExpiredSessions removes every session whose ExpiresAt is
 	// before now. See Service.PruneExpiredSessions — the only caller —

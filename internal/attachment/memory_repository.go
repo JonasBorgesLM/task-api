@@ -181,6 +181,39 @@ func (r *memoryRepository) FindByTask(ctx context.Context, taskID, userID string
 	return attachments, nil
 }
 
+// TotalBytesForUser sums SizeBytes across every attachment userID owns.
+//
+// The candidate rows are snapshotted under the read lock and the
+// ownership check runs after releasing it — the same reason Create's
+// ownership check runs before taking the lock at all: ownsTask can call
+// out to another Repository, and holding this one's lock across that
+// call is how an unrelated slow query becomes this store's contention.
+func (r *memoryRepository) TotalBytesForUser(ctx context.Context, userID string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	r.mu.RLock()
+	candidates := make([]Attachment, 0, len(r.store))
+	for _, att := range r.store {
+		candidates = append(candidates, att)
+	}
+	r.mu.RUnlock()
+
+	var total int64
+	for _, att := range candidates {
+		owns, err := r.ownsTask(ctx, att.TaskID, userID)
+		if err != nil {
+			return 0, err
+		}
+		if owns {
+			total += att.SizeBytes
+		}
+	}
+
+	return total, nil
+}
+
 func (r *memoryRepository) UnreferencedKeys(ctx context.Context, keys []string) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

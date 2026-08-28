@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+// unlimitedSessions is a per-user session cap generous enough that no
+// existing test comes close to triggering eviction — used everywhere a
+// test needs CreateSession to work but isn't exercising the cap itself.
+// Tests that do exercise it set their own small value.
+const unlimitedSessions = 1000
+
 func newTestUser(id, email string) User {
 	now := time.Now()
 	return User{
@@ -89,7 +95,7 @@ func TestMemory_CreateAndFindSessionByTokenHash(t *testing.T) {
 	repo := NewMemoryRepository()
 	s := Session{TokenHash: "hash-1", UserID: "1", ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now()}
 
-	if err := repo.CreateSession(context.Background(), s); err != nil {
+	if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
 		t.Fatalf("CreateSession() unexpected error: %v", err)
 	}
 
@@ -115,7 +121,7 @@ func TestMemory_DeleteSession(t *testing.T) {
 	repo := NewMemoryRepository()
 	s := Session{TokenHash: "hash-1", UserID: "1", ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now()}
 
-	if err := repo.CreateSession(context.Background(), s); err != nil {
+	if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
 		t.Fatalf("CreateSession() unexpected error: %v", err)
 	}
 	if err := repo.DeleteSession(context.Background(), "hash-1"); err != nil {
@@ -150,7 +156,7 @@ func TestMemory_DeleteExpiredSessions(t *testing.T) {
 	valid := Session{TokenHash: "valid", UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now}
 
 	for _, s := range []Session{expired, valid} {
-		if err := repo.CreateSession(context.Background(), s); err != nil {
+		if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
 			t.Fatalf("CreateSession() unexpected error: %v", err)
 		}
 	}
@@ -164,5 +170,137 @@ func TestMemory_DeleteExpiredSessions(t *testing.T) {
 	}
 	if _, err := repo.FindSessionByTokenHash(context.Background(), "valid"); err != nil {
 		t.Errorf("FindSessionByTokenHash(valid) after DeleteExpiredSessions() unexpected error: %v", err)
+	}
+}
+
+// --- CreateSession eviction ---
+
+func TestMemory_CreateSession_UnderCap_KeepsAll(t *testing.T) {
+	repo := NewMemoryRepository()
+	now := time.Now()
+
+	for i, hash := range []string{"h1", "h2", "h3"} {
+		s := Session{TokenHash: hash, UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(time.Duration(i) * time.Second)}
+		if err := repo.CreateSession(context.Background(), s, 5); err != nil {
+			t.Fatalf("CreateSession(%s) unexpected error: %v", hash, err)
+		}
+	}
+
+	for _, hash := range []string{"h1", "h2", "h3"} {
+		if _, err := repo.FindSessionByTokenHash(context.Background(), hash); err != nil {
+			t.Errorf("FindSessionByTokenHash(%s) unexpected error: %v", hash, err)
+		}
+	}
+}
+
+// TestMemory_CreateSession_OverCap_EvictsOldestFirst is the property the
+// cap exists for: once a login would put a user over maxSessions, the
+// oldest survivor is exactly the one removed — never the one that was
+// just created, and never a newer one ahead of an older one.
+func TestMemory_CreateSession_OverCap_EvictsOldestFirst(t *testing.T) {
+	repo := NewMemoryRepository()
+	now := time.Now()
+
+	sessions := []Session{
+		{TokenHash: "oldest", UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now},
+		{TokenHash: "middle", UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(time.Second)},
+		{TokenHash: "newest", UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(2 * time.Second)},
+	}
+	for _, s := range sessions {
+		if err := repo.CreateSession(context.Background(), s, 2); err != nil {
+			t.Fatalf("CreateSession(%s) unexpected error: %v", s.TokenHash, err)
+		}
+	}
+
+	if _, err := repo.FindSessionByTokenHash(context.Background(), "oldest"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("FindSessionByTokenHash(oldest) error = %v, want ErrNotFound (should have been evicted)", err)
+	}
+	for _, hash := range []string{"middle", "newest"} {
+		if _, err := repo.FindSessionByTokenHash(context.Background(), hash); err != nil {
+			t.Errorf("FindSessionByTokenHash(%s) unexpected error: %v (should have survived)", hash, err)
+		}
+	}
+}
+
+// TestMemory_CreateSession_EvictionIsPerUser guards the scoping: filling
+// one user's session cap must never evict another user's sessions.
+func TestMemory_CreateSession_EvictionIsPerUser(t *testing.T) {
+	repo := NewMemoryRepository()
+	now := time.Now()
+
+	if err := repo.CreateSession(context.Background(), Session{TokenHash: "other-user", UserID: "2", ExpiresAt: now.Add(time.Hour), CreatedAt: now}, 1); err != nil {
+		t.Fatalf("CreateSession(other-user) unexpected error: %v", err)
+	}
+
+	sessions := []Session{
+		{TokenHash: "u1-a", UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(time.Second)},
+		{TokenHash: "u1-b", UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(2 * time.Second)},
+	}
+	for _, s := range sessions {
+		if err := repo.CreateSession(context.Background(), s, 1); err != nil {
+			t.Fatalf("CreateSession(%s) unexpected error: %v", s.TokenHash, err)
+		}
+	}
+
+	if _, err := repo.FindSessionByTokenHash(context.Background(), "other-user"); err != nil {
+		t.Errorf("FindSessionByTokenHash(other-user) unexpected error: %v — another user's eviction must not touch it", err)
+	}
+	if _, err := repo.FindSessionByTokenHash(context.Background(), "u1-a"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("FindSessionByTokenHash(u1-a) error = %v, want ErrNotFound", err)
+	}
+	if _, err := repo.FindSessionByTokenHash(context.Background(), "u1-b"); err != nil {
+		t.Errorf("FindSessionByTokenHash(u1-b) unexpected error: %v", err)
+	}
+}
+
+// --- DeleteSessionsForUser ---
+
+func TestMemory_DeleteSessionsForUser_RemovesAll(t *testing.T) {
+	repo := NewMemoryRepository()
+	now := time.Now()
+
+	for _, hash := range []string{"a", "b", "c"} {
+		s := Session{TokenHash: hash, UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now}
+		if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
+			t.Fatalf("CreateSession(%s) unexpected error: %v", hash, err)
+		}
+	}
+
+	if err := repo.DeleteSessionsForUser(context.Background(), "1"); err != nil {
+		t.Fatalf("DeleteSessionsForUser() unexpected error: %v", err)
+	}
+
+	for _, hash := range []string{"a", "b", "c"} {
+		if _, err := repo.FindSessionByTokenHash(context.Background(), hash); !errors.Is(err, ErrNotFound) {
+			t.Errorf("FindSessionByTokenHash(%s) after DeleteSessionsForUser() error = %v, want ErrNotFound", hash, err)
+		}
+	}
+}
+
+func TestMemory_DeleteSessionsForUser_LeavesOtherUsersAlone(t *testing.T) {
+	repo := NewMemoryRepository()
+	now := time.Now()
+
+	if err := repo.CreateSession(context.Background(), Session{TokenHash: "mine", UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now}, unlimitedSessions); err != nil {
+		t.Fatalf("CreateSession(mine) unexpected error: %v", err)
+	}
+	if err := repo.CreateSession(context.Background(), Session{TokenHash: "theirs", UserID: "2", ExpiresAt: now.Add(time.Hour), CreatedAt: now}, unlimitedSessions); err != nil {
+		t.Fatalf("CreateSession(theirs) unexpected error: %v", err)
+	}
+
+	if err := repo.DeleteSessionsForUser(context.Background(), "1"); err != nil {
+		t.Fatalf("DeleteSessionsForUser() unexpected error: %v", err)
+	}
+
+	if _, err := repo.FindSessionByTokenHash(context.Background(), "theirs"); err != nil {
+		t.Errorf("FindSessionByTokenHash(theirs) unexpected error: %v — another user's session must survive", err)
+	}
+}
+
+func TestMemory_DeleteSessionsForUser_NoSessions_IsNotAnError(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	if err := repo.DeleteSessionsForUser(context.Background(), "no-such-user"); err != nil {
+		t.Errorf("DeleteSessionsForUser() for a user with no sessions error = %v, want nil", err)
 	}
 }

@@ -480,3 +480,67 @@ func TestPostgres_Delete_MalformedKey_IsAQueryError(t *testing.T) {
 		t.Error("Delete() with a malformed key: got ErrNotFound, want a query/type error")
 	}
 }
+
+// --- TotalBytesForUser ---
+
+func TestPostgres_TotalBytesForUser_SumsOwnedAttachments(t *testing.T) {
+	repo, _, owner, _, taskID := newPostgresTestRepo(t)
+
+	att1 := newPostgresAttachment(t, taskID)
+	att1.SizeBytes = 1000
+	if err := repo.Create(context.Background(), att1, owner); err != nil {
+		t.Fatalf("Create(att1) unexpected error: %v", err)
+	}
+	att2 := newPostgresAttachment(t, taskID)
+	att2.SizeBytes = 2000
+	if err := repo.Create(context.Background(), att2, owner); err != nil {
+		t.Fatalf("Create(att2) unexpected error: %v", err)
+	}
+
+	total, err := repo.TotalBytesForUser(context.Background(), owner)
+	if err != nil {
+		t.Fatalf("TotalBytesForUser() unexpected error: %v", err)
+	}
+	if total != 3000 {
+		t.Errorf("TotalBytesForUser() = %d, want 3000", total)
+	}
+}
+
+// TestPostgres_TotalBytesForUser_NoAttachments_IsZero pins COALESCE:
+// SUM() over zero rows is SQL NULL, not 0, and the query must not let
+// that surface as either an error or a NULL scanned into an int64.
+func TestPostgres_TotalBytesForUser_NoAttachments_IsZero(t *testing.T) {
+	repo, _, owner, _, _ := newPostgresTestRepo(t)
+
+	total, err := repo.TotalBytesForUser(context.Background(), owner)
+	if err != nil {
+		t.Fatalf("TotalBytesForUser() unexpected error: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("TotalBytesForUser() = %d, want 0", total)
+	}
+}
+
+func TestPostgres_TotalBytesForUser_ExcludesOtherUsers(t *testing.T) {
+	repo, db, owner, stranger, taskID := newPostgresTestRepo(t)
+	otherTaskID := insertTask(t, db, stranger)
+
+	mine := newPostgresAttachment(t, taskID)
+	mine.SizeBytes = 500
+	if err := repo.Create(context.Background(), mine, owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+	theirs := newPostgresAttachment(t, otherTaskID)
+	theirs.SizeBytes = 999999
+	if err := repo.Create(context.Background(), theirs, stranger); err != nil {
+		t.Fatalf("Create() for the other user unexpected error: %v", err)
+	}
+
+	total, err := repo.TotalBytesForUser(context.Background(), owner)
+	if err != nil {
+		t.Fatalf("TotalBytesForUser() unexpected error: %v", err)
+	}
+	if total != 500 {
+		t.Errorf("TotalBytesForUser() = %d, want 500 (must exclude the stranger's 999999-byte file)", total)
+	}
+}
