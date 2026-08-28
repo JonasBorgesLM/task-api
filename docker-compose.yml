@@ -86,6 +86,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Same VERSION/COMMIT the Makefile's docker-build target passes,
+      # so GET /debug/vars reports something real here too instead of
+      # the "dev"/"unknown" fallback — see cmd/api/main.go's doc comment
+      # on those two package vars for why. `make docker-up` exports both
+      # before calling `docker compose up --build`; invoking compose
+      # directly falls back to the same defaults the Dockerfile itself
+      # uses when neither ARG is set.
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
     image: task-api:latest
     environment:
       # "postgres" resolves via Docker's embedded DNS to the postgres

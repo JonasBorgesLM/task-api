@@ -77,6 +77,15 @@ func RequireAuth(svc sessionValidator, logger *slog.Logger) middleware.Middlewar
 				return
 			}
 
+			// Called before ctx is built below, and with r.Context()
+			// rather than ctx: either would actually work here (ctx's
+			// parent is r.Context(), and context.Value walks up to find
+			// a key it doesn't own), but reading r.Context() directly is
+			// what stays correct if a future change reorders these two
+			// lines. See middleware.RecordUserIDForLog's doc comment for
+			// why this call exists at all.
+			middleware.RecordUserIDForLog(r.Context(), userID)
+
 			ctx := middleware.ContextWithUserID(r.Context(), userID)
 			ctx = middleware.ContextWithSessionToken(ctx, token)
 			next.ServeHTTP(w, r.WithContext(ctx))

@@ -18,6 +18,16 @@ DATABASE_URL       ?= $(TEST_DATABASE_URL)
 SEED_USERS ?= 5
 SEED_TASKS_PER_USER ?= 10
 
+# What `make build` and `make docker-build` stamp into the binary via
+# -ldflags -X (see cmd/api/main.go's version/commit doc comment for why
+# this exists at all — it's the only way a running pod can be traced
+# back to the exact commit it was built from). Both fall back cleanly
+# when git isn't available or there's no history to describe (a shallow
+# clone, a tarball export): "dev"/"unknown", the same defaults main.go
+# itself uses for a build with no -ldflags.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
 # How long `make fuzz` runs for. CI uses its own budget (see
 # .github/workflows/ci.yml); a longer one here is what you want when
 # deliberately hunting rather than guarding against regression.
@@ -42,8 +52,8 @@ help: ## Show this help
 run: ## Start the API (in-memory store unless DATABASE_URL is set — see README "Configuration")
 	go run ./cmd/api
 
-build: ## Compile the API binary to ./bin/task-api
-	go build -o bin/task-api ./cmd/api
+build: ## Compile the API binary to ./bin/task-api (stamped with VERSION/COMMIT)
+	go build -ldflags="-X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o bin/task-api ./cmd/api
 
 tidy: ## Tidy and verify go.mod/go.sum
 	go mod tidy
@@ -137,11 +147,11 @@ check: fmt-check vet lint vulncheck test-race ## Run everything the CI quality g
 
 ##@ Docker
 
-docker-build: ## Build the production API image (see Dockerfile)
-	docker build -t task-api:latest .
+docker-build: ## Build the production API image (see Dockerfile), stamped with VERSION/COMMIT
+	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t task-api:latest .
 
 docker-up: ## Start the full stack (API + PostgreSQL + Swagger UI at :8082) via docker compose
-	docker compose up -d --build
+	VERSION=$(VERSION) COMMIT=$(COMMIT) docker compose up -d --build
 
 docker-down: ## Stop and remove every container docker compose started (data volume is kept)
 	docker compose down

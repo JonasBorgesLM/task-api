@@ -3,6 +3,7 @@ package middleware
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -326,3 +327,60 @@ type plainRecorder struct {
 func (p *plainRecorder) Header() http.Header         { return p.header }
 func (p *plainRecorder) WriteHeader(status int)      { p.status = status }
 func (p *plainRecorder) Write(b []byte) (int, error) { return p.body.Write(b) }
+
+// TestLogging_UserIDForLog_RecordedByAHandlerRunningLaterInTheChain pins
+// the mechanism Logging.doc-comment describes: a handler running further
+// in — standing in for user.RequireAuth, which is wired per-route rather
+// than into this global chain (see cmd/api/main.go's newServer) — calls
+// RecordUserIDForLog after Logging's own next.ServeHTTP is already in
+// flight, and the resulting access-log line still carries user_id.
+//
+// This is the case a plain context.WithValue cannot handle: a value set
+// by an inner middleware is invisible to an outer middleware's own
+// reference to the request. If this test used ContextWithUserID instead
+// of RecordUserIDForLog to simulate the inner middleware, it would fail
+// — that failure is what proves the pointer indirection is doing real
+// work, not just adding indirection for its own sake.
+func TestLogging_UserIDForLog_RecordedByAHandlerRunningLaterInTheChain(t *testing.T) {
+	logger, buf := newTestLogger()
+
+	handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		RecordUserIDForLog(r.Context(), "user-42")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+	entry := decodeLogLine(t, buf)
+	if entry["user_id"] != "user-42" {
+		t.Errorf("logged user_id = %v, want %q", entry["user_id"], "user-42")
+	}
+}
+
+// TestLogging_NoUserID_OmitsTheField covers the public/unauthenticated
+// path: nothing ever calls RecordUserIDForLog, and the log line must not
+// carry an empty user_id — its absence is what lets a query for "did this
+// request authenticate" filter on the field's presence rather than on it
+// being a non-empty string.
+func TestLogging_NoUserID_OmitsTheField(t *testing.T) {
+	logger, buf := newTestLogger()
+
+	handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	entry := decodeLogLine(t, buf)
+	if _, present := entry["user_id"]; present {
+		t.Errorf("logged entry has a user_id field for an unauthenticated request: %v", entry["user_id"])
+	}
+}
+
+// TestRecordUserIDForLog_NoOpWithoutLogging covers the case
+// RecordUserIDForLog's own doc comment promises: called against a plain
+// context (no Logging in front, e.g. a test exercising RequireAuth in
+// isolation), it must not panic and must simply do nothing observable.
+func TestRecordUserIDForLog_NoOpWithoutLogging(t *testing.T) {
+	RecordUserIDForLog(context.Background(), "user-1") // must not panic
+}
