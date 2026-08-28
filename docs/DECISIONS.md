@@ -305,6 +305,101 @@ como isso volta a quebrar, em silêncio.
 
 ---
 
+## SigNoz: Docker Compose oficial, mesma máquina do cluster, ligado à rede do `kind` (issue 11.5)
+
+**Decisão revisada — substitui a versão anterior desta seção (VM
+dedicada + VPN/peering), descartada antes de qualquer provisionamento.**
+SigNoz roda via **Docker Compose oficial do projeto** (não build próprio,
+não SigNoz Cloud, não VM separada), fora de qualquer cluster Kubernetes,
+na **mesma máquina** que o cluster de validação do task-api.
+
+**Por quê a mudança:** a versão anterior assumia uma segunda máquina
+(VM) com túnel de rede próprio — infraestrutura real a provisionar e
+manter. Rodar na mesma máquina do cluster elimina essa camada inteira:
+não há VM para dimensionar, não há VPN/peering para configurar, o
+Compose oficial do SigNoz já inclui ClickHouse dimensionado para uso de
+desenvolvimento/validação. O dimensionamento de 2 vCPU/4 GB citado na
+versão anterior era um piso pensado para uma VM isolada — deixa de fazer
+sentido como número autônomo quando o SigNoz divide a máquina com o
+Docker do cluster de validação; o que importa agora é a máquina como um
+todo ter memória suficiente para os dois (o Compose oficial documenta os
+próprios requisitos de recurso).
+
+### A pergunta que não podia ser assumida: como um pod alcança um serviço no host
+
+A ferramenta que cria o cluster Kubernetes local neste repositório é
+**kind** — confirmado lendo `k8s/rollout-test.sh` (`kind create cluster`,
+`kind load docker-image`, contexto `kind-$CLUSTER`), não minikube, k3d
+ou o Kubernetes embutido do Docker Desktop. Isso importa porque cada uma
+resolve "pod alcança serviço no host" de um jeito diferente, e a resposta
+certa depende de qual está em uso — presumir errado aqui teria produzido
+um `CRIER_OTLP_ENDPOINT` que funciona na máquina de quem escreveu a
+decisão e falha em qualquer outra.
+
+**Verificado por execução real, três mecanismos, num cluster kind
+descartável criado só para este teste** (não por leitura de
+documentação — a documentação oficial do kind não cobre este cenário
+diretamente, e os relatos da comunidade sobre `host.docker.internal` em
+Linux são, na melhor das hipóteses, de segunda mão):
+
+1. **`host.docker.internal`** — resolveu e respondeu `200` a partir de um
+   pod, nesta máquina (macOS, Docker Desktop). `docker inspect` do nó do
+   kind mostra `ExtraHosts: null`: a resolução não veio de configuração
+   do container nem do kind — veio do DNS embutido do Docker Desktop, que
+   resolve esse nome para **qualquer** container sob seu daemon. É
+   comportamento do **Docker Desktop**, não do kind, e múltiplos relatos
+   da comunidade (issues do próprio `kind`) convergem em: isso **não**
+   funciona por padrão em Docker Engine puro no Linux. Não verificado
+   aqui por falta de uma máquina Linux à mão — citado com essa ressalva
+   explícita, não como fato confirmado.
+2. **IP do gateway da rede Docker do `kind`** (`172.21.0.1` no teste) —
+   **falhou** (`connection refused`) nesta máquina: no Docker Desktop
+   esse gateway vive dentro da VM Linux interna, que não expõe as portas
+   publicadas pelo próprio macOS. Em Docker Engine nativo (Linux, sem
+   VM), esse mesmo mecanismo tende a funcionar, porque o gateway da
+   bridge *é* a interface de rede real do host — mas isso não foi
+   verificado aqui pela mesma razão do item anterior.
+3. **Container do SigNoz anexado à mesma rede Docker que o kind usa**
+   (rede `kind`, criada automaticamente pela própria CLI) — **funcionou,
+   por nome DNS do container e por IP**, nesta máquina. Este é o único
+   dos três que não depende de VM, de gateway, ou de qual sistema
+   operacional roda o Docker: é só "dois containers na mesma rede
+   Docker", o caso mais básico e portátil que existe.
+
+**Decisão: usar o mecanismo 3.** O Compose oficial do SigNoz declara sua
+própria rede por padrão; o `docker-compose.yml` (ou um override) precisa
+declarar essa rede como `external`, apontando para a rede `kind` (nome
+padrão que a CLI do kind cria; conferir com `docker network ls` se um
+nome de cluster não-padrão estiver em uso). `CRIER_OTLP_ENDPOINT` passa
+a apontar para o serviço do coletor OTLP do SigNoz pelo nome do serviço
+Compose, não por IP nem por `host.docker.internal` — nome DNS de
+container é estável entre restarts, IP não é.
+
+**Sem credencial, `http://` — herdado da decisão anterior, ainda vale.**
+SigNoz self-hosted não exige chave de ingestão por padrão, e "mesma
+máquina, mesma rede Docker" é, se algo, um limite de confiança mais
+apertado do que a VPN cogitada antes. `otlp.Config.Credential` continua
+no valor zero. `https://` continua não fazendo sentido pelo mesmo motivo
+de antes (a imagem `scratch` não tem bundle de CA nesta branch, e mesmo
+com um, não há cadeia de confiança adicional a proteger aqui).
+
+**Trade-off aceito:** esta decisão amarra a disponibilidade do SigNoz à
+disponibilidade da própria máquina do cluster — não há isolamento de
+falha entre os dois como uma VM separada daria. Aceito porque o cluster
+de validação já é, pela própria natureza (`k8s/` é descartável, não
+produção — ver `CLAUDE.md`), efêmero e local; um SigNoz que só precisa
+sobreviver enquanto essa validação roda não precisa da resiliência de uma
+segunda máquina. **Se este projeto ganhar um cluster de produção de
+verdade** (fora do que `k8s/` representa hoje), esta decisão — mesma
+máquina, mesma rede Docker — deve ser revisitada explicitamente para
+esse ambiente, não herdada por inércia.
+
+**Antes de instalar de verdade:** limpar os recursos usados nesta
+investigação (cluster kind descartável, container de teste) — feito;
+nada do experimento ficou para trás.
+
+---
+
 ## Auditoria de log: nenhum valor sensível interpolado, e a garantia agora tem teste
 
 Levantamento completo de todo call site de log do projeto (issue 11.1 da
