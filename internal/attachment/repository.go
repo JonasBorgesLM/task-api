@@ -69,6 +69,23 @@ type Repository interface {
 	// stay distinguishable to the caller that is entitled to know.
 	FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error)
 
+	// Delete removes the attachment identified by storageKey, scoped to
+	// userID — the same ownership rule FindByStorageKey enforces: a key
+	// leading to somebody else's task is reported exactly like a key
+	// that names nothing, ErrNotFound either way. Deleting a key that no
+	// longer exists (already deleted, by this call or an earlier one) is
+	// also ErrNotFound — Repository does not make deletion idempotent on
+	// its own terms; Service is what decides how a caller experiences a
+	// second delete of the same key, the same split user.Service.Logout
+	// keeps between itself and Repository.DeleteSession.
+	//
+	// This removes only the metadata row. The blob itself is Service's
+	// concern (see Service.Delete's doc comment for why, and for what
+	// "idempotent" means at that layer) — Repository has no BlobStore to
+	// reach one through, by design (see this file's own doc comment on
+	// why Repository and BlobStore are separate boundaries).
+	Delete(ctx context.Context, storageKey, userID string) error
+
 	// UnreferencedKeys returns those of the given storage keys that no
 	// attachment row references.
 	//

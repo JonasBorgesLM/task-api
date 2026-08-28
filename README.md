@@ -233,6 +233,7 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `POST` | `/v1/tasks/{id}/attachments` | required | Upload a file attachment (multipart, part name `file`) |
 | `GET` | `/v1/tasks/{id}/attachments` | required | List a task's attachments |
 | `GET` | `/v1/files/{key}` | required | Download an attachment by its `storage_key` |
+| `DELETE` | `/v1/files/{key}` | required | Delete an attachment by its `storage_key` — removes the metadata row and the blob in the same request |
 | `GET` | `/health` | — | Liveness — always `200` while the process runs |
 | `GET` | `/health/ready` | — | Readiness — `200` if the database is reachable, `503` if not |
 | `GET` | `/debug/vars` | required | Runtime stats (`expvar`) plus `version`/`commit` for the running build — authenticated, unlike the health routes |

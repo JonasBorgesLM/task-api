@@ -12,6 +12,9 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
 - Anexos em tasks: upload, download, dois backends de storage
   intercambiáveis (filesystem local ou S3-compatível via `minio-go`),
   coletor de blobs órfãos.
+- `DELETE /v1/files/{key}` — remove um anexo individual. Metadado e blob
+  saem na mesma requisição, não só o metadado com o blob deixado para o
+  coletor de órfãos (ver `docs/DECISIONS.md`).
 - Rate limiting (via `moat`) agora cobre toda a superfície da API, não
   só `/auth/*`. Um cliente que fazia rajadas contra rotas de task pode
   passar a ver `429`. Configure `TRUSTED_PROXIES` se a API roda atrás de
