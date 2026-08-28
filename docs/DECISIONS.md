@@ -305,71 +305,98 @@ como isso volta a quebrar, em silêncio.
 
 ---
 
-## SigNoz: VM própria, rede privada, sem credencial (issue 11.5)
+## SigNoz: Docker Compose oficial, mesma máquina do cluster, ligado à rede do `kind` (issue 11.5)
 
-SigNoz roda fora do cluster do task-api, em uma **VM dedicada** — não
-cluster de observabilidade próprio, não SigNoz Cloud. Decisão de
-infraestrutura, tomada e registrada aqui porque o exportador do crier
-(issue 11.6) precisa saber contra o que codificar antes de a VM existir
-de fato.
+**Decisão revisada — substitui a versão anterior desta seção (VM
+dedicada + VPN/peering), descartada antes de qualquer provisionamento.**
+SigNoz roda via **Docker Compose oficial do projeto** (não build próprio,
+não SigNoz Cloud, não VM separada), fora de qualquer cluster Kubernetes,
+na **mesma máquina** que o cluster de validação do task-api.
 
-**Dimensionamento mínimo:** 2 vCPU / 4 GB de RAM, piso para o
-ClickHouse — é o componente do SigNoz com footprint de recurso real; o
-resto (query-service, frontend, coletor OTLP embutido) é leve na escala
-de uma réplica única do task-api. **Isto é um piso, não um
-dimensionamento final:** o consumo de memória do ClickHouse cresce com
-retenção e cardinalidade de atributos, não só com volume de requests —
-revisitar sob carga real é trabalho da issue 11.7, não desta decisão.
+**Por quê a mudança:** a versão anterior assumia uma segunda máquina
+(VM) com túnel de rede próprio — infraestrutura real a provisionar e
+manter. Rodar na mesma máquina do cluster elimina essa camada inteira:
+não há VM para dimensionar, não há VPN/peering para configurar, o
+Compose oficial do SigNoz já inclui ClickHouse dimensionado para uso de
+desenvolvimento/validação. O dimensionamento de 2 vCPU/4 GB citado na
+versão anterior era um piso pensado para uma VM isolada — deixa de fazer
+sentido como número autônomo quando o SigNoz divide a máquina com o
+Docker do cluster de validação; o que importa agora é a máquina como um
+todo ter memória suficiente para os dois (o Compose oficial documenta os
+próprios requisitos de recurso).
 
-**Conectividade: rede privada, nunca porta pública.** O cluster do
-task-api alcança a VM por VPN ou peering (a tecnologia exata — WireGuard,
-peering nativo do provedor de nuvem, etc. — é detalhe de infraestrutura,
-não interessa ao código e não é fixada aqui). O que importa para o
-exportador e para este documento é o resultado: a porta OTLP do SigNoz
-(**4318**, OTLP/HTTP — ver a seção de custo de dependência da Fase 11)
-nunca é exposta à internet pública, e o tráfego é só de saída a partir do
-cluster do task-api — nada precisa alcançar o cluster do task-api de
-volta para isto funcionar.
+### A pergunta que não podia ser assumida: como um pod alcança um serviço no host
 
-**Sem credencial.** SigNoz self-hosted não exige chave de ingestão por
-padrão, e a rede privada já é o controle de acesso — não há o que
-autenticar além disso. `otlp.Config.Credential` fica no valor zero; não
-adicionar uma variável de configuração de credencial agora seria
-especulativo (`CLAUDE.md` já proíbe isso), já que nada a usaria.
+A ferramenta que cria o cluster Kubernetes local neste repositório é
+**kind** — confirmado lendo `k8s/rollout-test.sh` (`kind create cluster`,
+`kind load docker-image`, contexto `kind-$CLUSTER`), não minikube, k3d
+ou o Kubernetes embutido do Docker Desktop. Isso importa porque cada uma
+resolve "pod alcança serviço no host" de um jeito diferente, e a resposta
+certa depende de qual está em uso — presumir errado aqui teria produzido
+um `CRIER_OTLP_ENDPOINT` que funciona na máquina de quem escreveu a
+decisão e falha em qualquer outra.
 
-**Esquema: `http://`, não `https://`, e isto é deliberado.** Duas razões,
-não uma:
+**Verificado por execução real, três mecanismos, num cluster kind
+descartável criado só para este teste** (não por leitura de
+documentação — a documentação oficial do kind não cobre este cenário
+diretamente, e os relatos da comunidade sobre `host.docker.internal` em
+Linux são, na melhor das hipóteses, de segunda mão):
 
-1. A imagem de produção é `FROM scratch` e — nesta branch, antes da
-   issue #69 mergear — **não tem bundle de CA nenhum**; `https://` contra
-   a VM simplesmente não teria como verificar o certificado. Mesmo depois
-   de #69 mergear, a segunda razão continua valendo:
-2. TLS não agrega nada aqui. O limite de confiança já é a rede privada
-   (VPN/peering) — é isso que decide quem alcança a porta OTLP, não o
-   certificado. Adicionar TLS significaria gerenciar um certificado na VM
-   do SigNoz para uma cadeia que a rede já fecha, complexidade sem
-   contrapartida de segurança real.
+1. **`host.docker.internal`** — resolveu e respondeu `200` a partir de um
+   pod, nesta máquina (macOS, Docker Desktop). `docker inspect` do nó do
+   kind mostra `ExtraHosts: null`: a resolução não veio de configuração
+   do container nem do kind — veio do DNS embutido do Docker Desktop, que
+   resolve esse nome para **qualquer** container sob seu daemon. É
+   comportamento do **Docker Desktop**, não do kind, e múltiplos relatos
+   da comunidade (issues do próprio `kind`) convergem em: isso **não**
+   funciona por padrão em Docker Engine puro no Linux. Não verificado
+   aqui por falta de uma máquina Linux à mão — citado com essa ressalva
+   explícita, não como fato confirmado.
+2. **IP do gateway da rede Docker do `kind`** (`172.21.0.1` no teste) —
+   **falhou** (`connection refused`) nesta máquina: no Docker Desktop
+   esse gateway vive dentro da VM Linux interna, que não expõe as portas
+   publicadas pelo próprio macOS. Em Docker Engine nativo (Linux, sem
+   VM), esse mesmo mecanismo tende a funcionar, porque o gateway da
+   bridge *é* a interface de rede real do host — mas isso não foi
+   verificado aqui pela mesma razão do item anterior.
+3. **Container do SigNoz anexado à mesma rede Docker que o kind usa**
+   (rede `kind`, criada automaticamente pela própria CLI) — **funcionou,
+   por nome DNS do container e por IP**, nesta máquina. Este é o único
+   dos três que não depende de VM, de gateway, ou de qual sistema
+   operacional roda o Docker: é só "dois containers na mesma rede
+   Docker", o caso mais básico e portátil que existe.
 
-Como não há credencial, a recusa do exportador do crier a enviar
-credencial sobre `http://` sem `AllowInsecureCredential` (ver
-`exporters/otlp.Config`) **nunca é acionada** — essa proteção existe para
-o caso de credencial, que este deploy não tem.
+**Decisão: usar o mecanismo 3.** O Compose oficial do SigNoz declara sua
+própria rede por padrão; o `docker-compose.yml` (ou um override) precisa
+declarar essa rede como `external`, apontando para a rede `kind` (nome
+padrão que a CLI do kind cria; conferir com `docker network ls` se um
+nome de cluster não-padrão estiver em uso). `CRIER_OTLP_ENDPOINT` passa
+a apontar para o serviço do coletor OTLP do SigNoz pelo nome do serviço
+Compose, não por IP nem por `host.docker.internal` — nome DNS de
+container é estável entre restarts, IP não é.
 
-**Trade-off aceito:** se o túnel privado cair, os registros
-simplesmente enfileiram no buffer do crier e são contados como perda no
-`DrainSummary` do próximo shutdown, ou ficam retidos até a rede voltar —
-mesma semântica *at-least-once*/perda possível já aceita para o crier em
-geral. Se a VM do SigNoz um dia sair da rede privada (rede compartilhada,
-exposição pública, terceiro hospedando) esta decisão — sem credencial,
-sem TLS — precisa ser revisitada explicitamente, não herdada por inércia.
+**Sem credencial, `http://` — herdado da decisão anterior, ainda vale.**
+SigNoz self-hosted não exige chave de ingestão por padrão, e "mesma
+máquina, mesma rede Docker" é, se algo, um limite de confiança mais
+apertado do que a VPN cogitada antes. `otlp.Config.Credential` continua
+no valor zero. `https://` continua não fazendo sentido pelo mesmo motivo
+de antes (a imagem `scratch` não tem bundle de CA nesta branch, e mesmo
+com um, não há cadeia de confiança adicional a proteger aqui).
 
-**O que ainda não está decidido, de propósito:** o endereço real da VM
-(depende do provisionamento, fora do escopo deste repositório) e a
-tecnologia exata de VPN/peering. A issue 11.6 aponta o exportador para o
-endereço real assim que ele existir; até lá, `CRIER_OTLP_ENDPOINT`
-permanece sem valor de produção e o crier permanece desligado (ver a
-seção de integração do crier acima/adiante, conforme o PR que introduziu
-`cmd/api/crier.go` mergear).
+**Trade-off aceito:** esta decisão amarra a disponibilidade do SigNoz à
+disponibilidade da própria máquina do cluster — não há isolamento de
+falha entre os dois como uma VM separada daria. Aceito porque o cluster
+de validação já é, pela própria natureza (`k8s/` é descartável, não
+produção — ver `CLAUDE.md`), efêmero e local; um SigNoz que só precisa
+sobreviver enquanto essa validação roda não precisa da resiliência de uma
+segunda máquina. **Se este projeto ganhar um cluster de produção de
+verdade** (fora do que `k8s/` representa hoje), esta decisão — mesma
+máquina, mesma rede Docker — deve ser revisitada explicitamente para
+esse ambiente, não herdada por inércia.
+
+**Antes de instalar de verdade:** limpar os recursos usados nesta
+investigação (cluster kind descartável, container de teste) — feito;
+nada do experimento ficou para trás.
 
 ---
 
