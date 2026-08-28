@@ -146,7 +146,7 @@ func TestS3BlobStore_RejectsMissingBucket(t *testing.T) {
 func TestS3BlobStore_OrphanCollectionWorksOverS3(t *testing.T) {
 	store := newS3TestStore(t)
 	repo := NewMemoryRepository(fixedOwnership)
-	svc := NewService(repo, store, 1024)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
 
 	if _, err := store.Put(context.Background(), "11111111-1111-4111-8111-111111111111", strings.NewReader("orphaned"), 1024); err != nil {
 		t.Fatalf("Put() unexpected error: %v", err)

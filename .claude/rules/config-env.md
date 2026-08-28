@@ -59,9 +59,12 @@ And, when it affects a deployment: `docker-compose.yml`, `k8s/30-config.yaml`.
 
 ## Runtime image constraints
 
-The runtime image is `FROM scratch`: a static binary, no shell, no libc, **no CA
-bundle**. Any setting that implies outbound TLS verification —
-`DATABASE_URL` with `sslmode=verify-full`, `ATTACHMENT_S3_USE_SSL=true` against
-a real endpoint — cannot work in that image without a CA bundle copied in.
-Document the constraint next to the setting, or add the bundle; do not let a
-setting exist that the shipped image silently cannot honour.
+The runtime image is `FROM scratch`: a static binary, no shell, no libc. It
+does carry a CA bundle (`/etc/ssl/certs/ca-certificates.crt`, copied from the
+`golang:*-alpine` builder stage — see `docs/DECISIONS.md` § "Bundle de CA na
+imagem scratch"), so outbound TLS verification works: `DATABASE_URL` with
+`sslmode=verify-full`, `ATTACHMENT_S3_USE_SSL=true` against a real endpoint,
+and any future `https://` destination all verify correctly. Nothing else is
+present — no shell, no package manager — so a setting that needs something
+*other* than a CA bundle from the OS (a client certificate, a custom trust
+store) still needs that copied in explicitly, the same way the CA bundle was.

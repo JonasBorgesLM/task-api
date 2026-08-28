@@ -642,3 +642,45 @@ func TestLoad_TrustedProxies_RejectsDefaultRoute(t *testing.T) {
 		})
 	}
 }
+
+// --- ATTACHMENT_MAX_BYTES_PER_USER ---
+
+func TestLoad_AttachmentMaxBytesPerUser_Default(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.AttachmentMaxBytesPerUser != defaultAttachmentMaxBytesPerUser {
+		t.Errorf("Load() AttachmentMaxBytesPerUser = %d, want %d", cfg.AttachmentMaxBytesPerUser, defaultAttachmentMaxBytesPerUser)
+	}
+}
+
+func TestLoad_AttachmentMaxBytesPerUser_CustomValue(t *testing.T) {
+	t.Setenv("ATTACHMENT_MAX_BYTES_PER_USER", "1073741824") // 1 GiB
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.AttachmentMaxBytesPerUser != 1073741824 {
+		t.Errorf("Load() AttachmentMaxBytesPerUser = %d, want %d", cfg.AttachmentMaxBytesPerUser, 1073741824)
+	}
+}
+
+func TestLoad_InvalidAttachmentMaxBytesPerUser_NotAnInteger(t *testing.T) {
+	t.Setenv("ATTACHMENT_MAX_BYTES_PER_USER", "not-a-number")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for ATTACHMENT_MAX_BYTES_PER_USER=not-a-number, got nil")
+	}
+}
+
+func TestLoad_InvalidAttachmentMaxBytesPerUser_Zero(t *testing.T) {
+	t.Setenv("ATTACHMENT_MAX_BYTES_PER_USER", "0")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for ATTACHMENT_MAX_BYTES_PER_USER=0, got nil")
+	}
+}

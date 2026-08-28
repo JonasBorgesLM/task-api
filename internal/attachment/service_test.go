@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+// unlimitedQuota is a per-user byte quota generous enough that no
+// existing test comes close to it — used everywhere a test needs a
+// working Service but isn't exercising the quota itself. Tests that do
+// exercise it set their own small value; see the quota tests below.
+const unlimitedQuota = 1 << 30 // 1 GiB
+
 // pngHeader / gifHeader / pdfHeader are the magic bytes
 // http.DetectContentType keys on. They are spelled out here rather than
 // generated so a test reads as "these bytes are a PNG", which is what the
@@ -29,7 +35,7 @@ func newServiceUnderTest(t *testing.T) (*Service, BlobStore) {
 
 	repo := NewMemoryRepository(fixedOwnership)
 	store := newTestStore(t)
-	return NewService(repo, store, 1024), store
+	return NewService(repo, store, 1024, unlimitedQuota), store
 }
 
 func TestUpload_StoresBytesAndMetadata(t *testing.T) {
@@ -122,7 +128,7 @@ func TestUpload_RejectsHTML(t *testing.T) {
 
 func TestUpload_RejectsOversized(t *testing.T) {
 	repo := NewMemoryRepository(fixedOwnership)
-	svc := NewService(repo, newTestStore(t), 10)
+	svc := NewService(repo, newTestStore(t), 10, unlimitedQuota)
 
 	content := append(append([]byte{}, pngHeader...), bytes.Repeat([]byte("x"), 100)...)
 
@@ -139,7 +145,7 @@ func TestUpload_RejectsOversized(t *testing.T) {
 func TestUpload_OnSomeoneElsesTask_LeavesNoOrphanBlob(t *testing.T) {
 	repo := NewMemoryRepository(fixedOwnership)
 	store := newTestStore(t)
-	svc := NewService(repo, store, 1024)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
 
 	_, err := svc.Upload(context.Background(), ownerID, otherTaskID, "photo.png", bytes.NewReader(pngHeader))
 	if !errors.Is(err, ErrTaskNotFound) {
@@ -267,7 +273,7 @@ func TestListByTask_ReturnsUploads(t *testing.T) {
 func TestCollectOrphans_RemovesUnreferencedBlob(t *testing.T) {
 	repo := NewMemoryRepository(fixedOwnership)
 	store := newTestStore(t)
-	svc := NewService(repo, store, 1024)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
 
 	// A blob with no row behind it — exactly what a cascaded delete
 	// leaves on disk.
@@ -297,7 +303,7 @@ func TestCollectOrphans_RemovesUnreferencedBlob(t *testing.T) {
 func TestCollectOrphans_KeepsReferencedBlob(t *testing.T) {
 	repo := NewMemoryRepository(fixedOwnership)
 	store := newTestStore(t)
-	svc := NewService(repo, store, 1024)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
 
 	att, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "report.pdf", bytes.NewReader(pdfHeader))
 	if err != nil {
@@ -332,7 +338,7 @@ func TestCollectOrphans_KeepsReferencedBlob(t *testing.T) {
 func TestCollectOrphans_SparesBlobsInsideTheGracePeriod(t *testing.T) {
 	repo := NewMemoryRepository(fixedOwnership)
 	store := newTestStore(t)
-	svc := NewService(repo, store, 1024)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
 
 	if _, err := store.Put(context.Background(), "upload-in-flight", strings.NewReader("bytes landed, row not yet written"), 1024); err != nil {
 		t.Fatalf("Put() unexpected error: %v", err)
@@ -381,7 +387,7 @@ func TestCollectOrphans_LeavesForeignFilesAlone(t *testing.T) {
 	}
 
 	repo := &keyFilteringRepo{Repository: NewMemoryRepository(fixedOwnership)}
-	svc := NewService(repo, store, 1024)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
 	svc.nowFunc = func() time.Time { return time.Now().Add(48 * time.Hour) }
 
 	deleted, err := svc.CollectOrphans(context.Background(), time.Hour)
@@ -417,3 +423,351 @@ func (r *keyFilteringRepo) UnreferencedKeys(ctx context.Context, keys []string) 
 }
 
 var uuidLike = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// --- Delete ---
+
+// failingDeleteStore wraps a real BlobStore so Delete always fails,
+// letting a test observe Service.Delete's best-effort handling of that
+// failure without needing a real storage backend to break on demand.
+type failingDeleteStore struct {
+	BlobStore
+	deleteCalledWith string
+}
+
+func (s *failingDeleteStore) Delete(_ context.Context, key string) error {
+	s.deleteCalledWith = key
+	return errors.New("simulated blob store failure")
+}
+
+func TestDelete_RemovesMetadataAndBlob(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
+
+	att, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "photo.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("Upload() unexpected error: %v", err)
+	}
+
+	if err := svc.Delete(context.Background(), ownerID, att.StorageKey); err != nil {
+		t.Fatalf("Delete() unexpected error: %v", err)
+	}
+
+	if _, _, err := svc.Download(context.Background(), ownerID, att.StorageKey); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Download() after Delete() error = %v, want ErrNotFound", err)
+	}
+	if _, err := store.Open(context.Background(), att.StorageKey); !errors.Is(err, ErrNotFound) {
+		t.Errorf("blob store Open() after Delete() error = %v, want ErrNotFound — the blob should be gone too", err)
+	}
+}
+
+// TestDelete_OnSomeoneElsesAttachment_IsNotFound covers the ownership
+// rule at the Service layer: a stranger's Delete must fail, and must
+// touch neither the row nor the blob.
+func TestDelete_OnSomeoneElsesAttachment_IsNotFound(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
+
+	att, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "photo.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("Upload() unexpected error: %v", err)
+	}
+
+	if err := svc.Delete(context.Background(), strangerID, att.StorageKey); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() by a non-owner error = %v, want ErrNotFound", err)
+	}
+
+	// Still there, for the real owner.
+	if _, _, err := svc.Download(context.Background(), ownerID, att.StorageKey); err != nil {
+		t.Errorf("Download() after a refused Delete() unexpected error: %v", err)
+	}
+}
+
+func TestDelete_UnknownKey_IsNotFound(t *testing.T) {
+	svc, _ := newServiceUnderTest(t)
+
+	if err := svc.Delete(context.Background(), ownerID, "does-not-exist"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDelete_Twice_SecondCallIsNotFound is the Service-level shape of
+// idempotency this package settled on: not a silent no-op (as
+// user.Service.Logout is for an unknown token), but ErrNotFound on the
+// second call — the same contract task.Service.DeleteTask already has.
+// The two callers converge on the client-observable outcome that matters
+// (the resource is gone either way), and DECISIONS.md records why a
+// second call isn't instead treated as success.
+func TestDelete_Twice_SecondCallIsNotFound(t *testing.T) {
+	svc, _ := newServiceUnderTest(t)
+
+	att, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "photo.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("Upload() unexpected error: %v", err)
+	}
+	if err := svc.Delete(context.Background(), ownerID, att.StorageKey); err != nil {
+		t.Fatalf("first Delete() unexpected error: %v", err)
+	}
+
+	if err := svc.Delete(context.Background(), ownerID, att.StorageKey); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second Delete() error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDelete_BlobDeleteFails_StillSucceeds is the test that would have
+// failed if the blob cleanup were not best-effort: with the row already
+// gone (the client-observable half of "deleted"), a failure removing the
+// underlying bytes must not turn a successful delete into an error
+// response — see Service.Delete's doc comment and DECISIONS.md for why.
+func TestDelete_BlobDeleteFails_StillSucceeds(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	failing := &failingDeleteStore{BlobStore: newTestStore(t)}
+	svc := NewService(repo, failing, 1024, unlimitedQuota)
+
+	att, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "photo.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("Upload() unexpected error: %v", err)
+	}
+
+	if err := svc.Delete(context.Background(), ownerID, att.StorageKey); err != nil {
+		t.Errorf("Delete() with a failing blob store: unexpected error %v, want nil (best-effort blob cleanup)", err)
+	}
+	if failing.deleteCalledWith != att.StorageKey {
+		t.Errorf("blob store Delete() called with %q, want %q — Delete() must still attempt the blob cleanup", failing.deleteCalledWith, att.StorageKey)
+	}
+
+	// The metadata row is gone regardless of the blob failure — that's
+	// what "removed the metadata row first" means observably.
+	if _, _, err := svc.Download(context.Background(), ownerID, att.StorageKey); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Download() after Delete() (blob cleanup failed) error = %v, want ErrNotFound", err)
+	}
+}
+
+// --- Malformed IDs (taskID and storageKey) ---
+//
+// These pin the fix for the same class of bug found in internal/task: a
+// taskID or storageKey that isn't a syntactically valid UUID used to
+// reach postgresRepository's ::uuid cast unchecked, surfacing as a 500
+// instead of the routine 404/task-not-found a client typo deserves.
+// isValidID rejects the shape before Repository is consulted at all.
+
+// countingRepo wraps a real Repository and records whether each method
+// was actually invoked, so a malformed-ID test can prove Service
+// rejected the input itself rather than the wrapped Repository merely
+// returning "not found" for an ID it didn't recognize — the two are
+// observationally identical against memoryRepository (a malformed ID
+// just isn't a key in its map either), which is exactly why call
+// recording, not just the returned error, is what proves the check runs
+// where it's supposed to.
+type countingRepo struct {
+	Repository
+	createCalled           bool
+	findByStorageKeyCalled bool
+	findByTaskCalled       bool
+}
+
+func (r *countingRepo) Create(ctx context.Context, att Attachment, userID string) error {
+	r.createCalled = true
+	return r.Repository.Create(ctx, att, userID)
+}
+
+func (r *countingRepo) FindByStorageKey(ctx context.Context, storageKey, userID string) (Attachment, error) {
+	r.findByStorageKeyCalled = true
+	return r.Repository.FindByStorageKey(ctx, storageKey, userID)
+}
+
+func (r *countingRepo) FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error) {
+	r.findByTaskCalled = true
+	return r.Repository.FindByTask(ctx, taskID, userID)
+}
+
+// malformedIDs is the shared table every test below runs against —
+// identical in spirit to task.malformedTaskIDs, duplicated rather than
+// shared for the same reason the two packages don't import each other.
+var malformedIDs = []struct {
+	name string
+	id   string
+}{
+	{"empty", ""},
+	{"not_uuid_shaped_at_all", "not-a-uuid"},
+	{"too_short", "11111111-1111-1111-1111-11111111"},
+	{"too_long", "11111111-1111-1111-1111-1111111111111"},
+	{"missing_hyphens", "11111111111111111111111111111111"},
+	{"wrong_grouping", "111111111-111-1111-1111-111111111111"},
+	{"non_hex_character", "1111111g-1111-1111-1111-111111111111"},
+	{"sql_injection_attempt", "'; DROP TABLE tasks; --"},
+}
+
+func TestUpload_MalformedTaskID_IsTaskNotFound(t *testing.T) {
+	for _, tc := range malformedIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &countingRepo{Repository: NewMemoryRepository(fixedOwnership)}
+			svc := NewService(repo, newTestStore(t), 1024, unlimitedQuota)
+
+			_, err := svc.Upload(context.Background(), ownerID, tc.id, "photo.png", bytes.NewReader(pngHeader))
+			if !errors.Is(err, ErrTaskNotFound) {
+				t.Errorf("Upload(taskID=%q) error = %v, want ErrTaskNotFound", tc.id, err)
+			}
+			if repo.createCalled {
+				t.Errorf("Upload(taskID=%q) reached Repository.Create; isValidID should have rejected it first", tc.id)
+			}
+		})
+	}
+}
+
+func TestDownload_MalformedStorageKey_IsNotFound(t *testing.T) {
+	for _, tc := range malformedIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &countingRepo{Repository: NewMemoryRepository(fixedOwnership)}
+			svc := NewService(repo, newTestStore(t), 1024, unlimitedQuota)
+
+			_, _, err := svc.Download(context.Background(), ownerID, tc.id)
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("Download(storageKey=%q) error = %v, want ErrNotFound", tc.id, err)
+			}
+			if repo.findByStorageKeyCalled {
+				t.Errorf("Download(storageKey=%q) reached Repository.FindByStorageKey; isValidID should have rejected it first", tc.id)
+			}
+		})
+	}
+}
+
+func TestListByTask_MalformedTaskID_IsTaskNotFound(t *testing.T) {
+	for _, tc := range malformedIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &countingRepo{Repository: NewMemoryRepository(fixedOwnership)}
+			svc := NewService(repo, newTestStore(t), 1024, unlimitedQuota)
+
+			_, err := svc.ListByTask(context.Background(), ownerID, tc.id)
+			if !errors.Is(err, ErrTaskNotFound) {
+				t.Errorf("ListByTask(taskID=%q) error = %v, want ErrTaskNotFound", tc.id, err)
+			}
+			if repo.findByTaskCalled {
+				t.Errorf("ListByTask(taskID=%q) reached Repository.FindByTask; isValidID should have rejected it first", tc.id)
+			}
+		})
+	}
+}
+
+// TestDownload_WellFormedKey_StillReachesRepository is the control case:
+// a syntactically valid UUID that simply isn't stored must still reach
+// Repository and get ErrNotFound from it, not from isValidID. Without
+// this, the tests above could pass for the wrong reason — isValidID
+// rejecting everything, valid IDs included.
+func TestDownload_WellFormedKey_StillReachesRepository(t *testing.T) {
+	repo := &countingRepo{Repository: NewMemoryRepository(fixedOwnership)}
+	svc := NewService(repo, newTestStore(t), 1024, unlimitedQuota)
+
+	const wellFormedButUnknown = "99999999-9999-9999-9999-999999999999"
+	_, _, err := svc.Download(context.Background(), ownerID, wellFormedButUnknown)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Download() error = %v, want ErrNotFound", err)
+	}
+	if !repo.findByStorageKeyCalled {
+		t.Error("Download() with a well-formed key did not reach Repository.FindByStorageKey")
+	}
+}
+
+// --- Per-user quota ---
+
+func TestUpload_UnderQuota_Succeeds(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, newTestStore(t), 1024, int64(len(pngHeader)+100))
+
+	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "photo.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("Upload() under quota: unexpected error: %v", err)
+	}
+}
+
+// TestUpload_AtQuota_Refused covers the boundary explicitly: a user whose
+// existing total already equals the quota is refused, not allowed one
+// more because they haven't gone *over* yet.
+func TestUpload_AtQuota_Refused(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	quota := int64(len(pngHeader))
+	svc := NewService(repo, newTestStore(t), 1024, quota)
+
+	// First upload lands exactly on the quota.
+	if _, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "first.png", bytes.NewReader(pngHeader)); err != nil {
+		t.Fatalf("first Upload() unexpected error: %v", err)
+	}
+
+	// Second upload finds the user already at quota.
+	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "second.png", bytes.NewReader(pngHeader))
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("Upload() at quota: error = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestUpload_OverQuota_Refused_WithoutStreamingAnyBytes proves the quota
+// is checked before the stream is read at all: the reader here panics if
+// Read is ever called, so a passing test is itself the proof that Upload
+// rejected the request before touching it.
+func TestUpload_OverQuota_Refused_WithoutStreamingAnyBytes(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, newTestStore(t), 1024, 1) // quota of 1 byte
+
+	// Put the user over quota first.
+	if _, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "first.png", bytes.NewReader(pngHeader)); err != nil {
+		t.Fatalf("first Upload() unexpected error: %v", err)
+	}
+
+	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "second.png", &panicOnReadReader{t: t})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("Upload() over quota: error = %v, want ErrInvalidInput", err)
+	}
+}
+
+// panicOnReadReader fails the test the moment Read is called on it —
+// used to prove a code path never touches the request body.
+type panicOnReadReader struct{ t *testing.T }
+
+func (r *panicOnReadReader) Read([]byte) (int, error) {
+	r.t.Fatal("Read() called — Upload() should have refused before reading the body")
+	return 0, nil
+}
+
+// TestUpload_QuotaIsPerUser_NotShared covers the scoping: another user's
+// stored bytes must not count against this user's quota, and this
+// user's own usage must not leak into how the other user's requests are
+// judged.
+func TestUpload_QuotaIsPerUser_NotShared(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	quota := int64(len(pngHeader))
+	svc := NewService(repo, newTestStore(t), 1024, quota)
+
+	// strangerID fills their own quota on otherTaskID.
+	if _, err := svc.Upload(context.Background(), strangerID, otherTaskID, "theirs.png", bytes.NewReader(pngHeader)); err != nil {
+		t.Fatalf("stranger's Upload() unexpected error: %v", err)
+	}
+
+	// ownerID, who has uploaded nothing, must still have their full quota.
+	if _, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "mine.png", bytes.NewReader(pngHeader)); err != nil {
+		t.Errorf("owner's Upload() with an untouched quota: unexpected error: %v", err)
+	}
+}
+
+// TestUpload_QuotaExceeded_ErrorDoesNotRevealAnotherUsersUsage is the
+// acceptance criterion the issue named explicitly: the 400 a caller sees
+// must describe only their own usage, never leak what any other account
+// has stored. Scoping TotalBytesForUser to the caller's own userID
+// already guarantees this by construction — this test pins the message
+// shape as a regression guard for whoever edits it next.
+func TestUpload_QuotaExceeded_ErrorDoesNotRevealAnotherUsersUsage(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, newTestStore(t), 1024, 1) // quota of 1 byte
+
+	if _, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "first.png", bytes.NewReader(pngHeader)); err != nil {
+		t.Fatalf("first Upload() unexpected error: %v", err)
+	}
+
+	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "second.png", bytes.NewReader(pngHeader))
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if strings.Contains(err.Error(), strangerID) || strings.Contains(err.Error(), otherTaskID) {
+		t.Errorf("quota error mentions another user's identifiers: %v", err)
+	}
+}

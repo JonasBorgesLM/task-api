@@ -105,6 +105,51 @@ func (r *memoryRepository) FindByStorageKey(ctx context.Context, storageKey, use
 	return found, nil
 }
 
+// Delete removes the attachment with the given storageKey, scoped to
+// userID via the same ownership check FindByStorageKey uses. The two
+// share it — resolving the key to find what to delete is the same
+// question resolving it to find what to serve is.
+func (r *memoryRepository) Delete(ctx context.Context, storageKey, userID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var (
+		id    string
+		found bool
+	)
+	for existingID, existing := range r.store {
+		if existing.StorageKey == storageKey {
+			id, found = existingID, true
+			break
+		}
+	}
+	if !found {
+		return ErrNotFound
+	}
+
+	// The lock is held across this call, unlike Create's ownership check
+	// above it. Create's comment explains why that matters when the
+	// check can be slow: here the row is about to be removed based on
+	// what the check answers, so releasing the lock in between would let
+	// a concurrent write observe (or itself cause) a state this method
+	// never actually decided on. memoryRepository backs the unit suite,
+	// where ownsTask is fast and synchronous, so the trade is free.
+	owns, err := r.ownsTask(ctx, r.store[id].TaskID, userID)
+	if err != nil {
+		return err
+	}
+	if !owns {
+		return ErrNotFound
+	}
+
+	delete(r.store, id)
+	return nil
+}
+
 func (r *memoryRepository) FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error) {
 	owns, err := r.ownsTask(ctx, taskID, userID)
 	if err != nil {
@@ -134,6 +179,39 @@ func (r *memoryRepository) FindByTask(ctx context.Context, taskID, userID string
 	})
 
 	return attachments, nil
+}
+
+// TotalBytesForUser sums SizeBytes across every attachment userID owns.
+//
+// The candidate rows are snapshotted under the read lock and the
+// ownership check runs after releasing it — the same reason Create's
+// ownership check runs before taking the lock at all: ownsTask can call
+// out to another Repository, and holding this one's lock across that
+// call is how an unrelated slow query becomes this store's contention.
+func (r *memoryRepository) TotalBytesForUser(ctx context.Context, userID string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	r.mu.RLock()
+	candidates := make([]Attachment, 0, len(r.store))
+	for _, att := range r.store {
+		candidates = append(candidates, att)
+	}
+	r.mu.RUnlock()
+
+	var total int64
+	for _, att := range candidates {
+		owns, err := r.ownsTask(ctx, att.TaskID, userID)
+		if err != nil {
+			return 0, err
+		}
+		if owns {
+			total += att.SizeBytes
+		}
+	}
+
+	return total, nil
 }
 
 func (r *memoryRepository) UnreferencedKeys(ctx context.Context, keys []string) ([]string, error) {

@@ -12,7 +12,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -165,7 +167,7 @@ func TestPostgres_CreateAndFindSessionByTokenHash(t *testing.T) {
 		ExpiresAt: time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond),
 		CreatedAt: time.Now().UTC().Truncate(time.Microsecond),
 	}
-	if err := repo.CreateSession(context.Background(), s); err != nil {
+	if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
 		t.Fatalf("CreateSession() unexpected error: %v", err)
 	}
 
@@ -199,7 +201,7 @@ func TestPostgres_CreateSession_CascadesOnUserDeletion(t *testing.T) {
 	}
 
 	s := Session{TokenHash: "a-token-hash", UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now()}
-	if err := repo.CreateSession(context.Background(), s); err != nil {
+	if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
 		t.Fatalf("CreateSession() unexpected error: %v", err)
 	}
 
@@ -221,7 +223,7 @@ func TestPostgres_DeleteSession(t *testing.T) {
 	}
 
 	s := Session{TokenHash: "a-token-hash", UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now()}
-	if err := repo.CreateSession(context.Background(), s); err != nil {
+	if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
 		t.Fatalf("CreateSession() unexpected error: %v", err)
 	}
 
@@ -258,7 +260,7 @@ func TestPostgres_DeleteExpiredSessions(t *testing.T) {
 	valid := Session{TokenHash: "valid", UserID: u.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now}
 
 	for _, s := range []Session{expired, valid} {
-		if err := repo.CreateSession(context.Background(), s); err != nil {
+		if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
 			t.Fatalf("CreateSession() unexpected error: %v", err)
 		}
 	}
@@ -294,5 +296,198 @@ func TestPostgres_Schema_UniqueConstraintIsCaseSensitive(t *testing.T) {
 	upper := newPostgresTestUser(t, "User@example.com")
 	if err := repo.CreateUser(context.Background(), upper); err != nil {
 		t.Errorf("CreateUser() with different-case email unexpected error: %v", err)
+	}
+}
+
+// --- CreateSession eviction ---
+
+// countSessions counts a user's rows directly via SQL, bypassing
+// Repository — used only to verify eviction actually happened, not as a
+// method under test.
+func countSessions(t *testing.T, db *sql.DB, userID string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM sessions WHERE user_id = $1::uuid`, userID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	return n
+}
+
+func TestPostgres_CreateSession_UnderCap_KeepsAll(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "under-cap@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	for i, hash := range []string{"h1", "h2", "h3"} {
+		s := Session{TokenHash: hash, UserID: u.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(time.Duration(i) * time.Second)}
+		if err := repo.CreateSession(context.Background(), s, 5); err != nil {
+			t.Fatalf("CreateSession(%s) unexpected error: %v", hash, err)
+		}
+	}
+
+	if got := countSessions(t, repo.db, u.ID); got != 3 {
+		t.Errorf("session count = %d, want 3", got)
+	}
+}
+
+// TestPostgres_CreateSession_OverCap_EvictsOldestFirst is the SQL half of
+// the eviction rule: the DELETE ... NOT IN (... ORDER BY created_at DESC
+// LIMIT $2) subquery must keep the newest maxSessions and remove the
+// rest, verified against a real query plan and real rows, not the
+// in-memory map's own bookkeeping.
+func TestPostgres_CreateSession_OverCap_EvictsOldestFirst(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "over-cap@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	sessions := []Session{
+		{TokenHash: "oldest", UserID: u.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now},
+		{TokenHash: "middle", UserID: u.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(time.Second)},
+		{TokenHash: "newest", UserID: u.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(2 * time.Second)},
+	}
+	for _, s := range sessions {
+		if err := repo.CreateSession(context.Background(), s, 2); err != nil {
+			t.Fatalf("CreateSession(%s) unexpected error: %v", s.TokenHash, err)
+		}
+	}
+
+	if _, err := repo.FindSessionByTokenHash(context.Background(), "oldest"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("FindSessionByTokenHash(oldest) error = %v, want ErrNotFound (should have been evicted)", err)
+	}
+	for _, hash := range []string{"middle", "newest"} {
+		if _, err := repo.FindSessionByTokenHash(context.Background(), hash); err != nil {
+			t.Errorf("FindSessionByTokenHash(%s) unexpected error: %v (should have survived)", hash, err)
+		}
+	}
+	if got := countSessions(t, repo.db, u.ID); got != 2 {
+		t.Errorf("session count = %d, want 2", got)
+	}
+}
+
+// TestPostgres_ConcurrentCreateSession_NeverExceedsCap is the concurrency
+// test the issue asked for, in the same shape as
+// TestPostgres_ConcurrentUpdate_LosersGetErrConflict in internal/task:
+// real goroutines, a start gate, run under -race. Every writer creates a
+// session for the *same* user at the *same* time.
+//
+// The property under test is not "who wins" (there's no winner/loser
+// here — every CreateSession call is expected to succeed) but that the
+// final row count for the user never exceeds the cap, regardless of how
+// the calls interleave.
+//
+// This test is the reason postgresRepository.CreateSession takes an
+// advisory lock: a transaction around insert+evict alone is not enough
+// under READ COMMITTED, PostgreSQL's default isolation — a version
+// without the lock passed here locally, repeatedly, and then left 7
+// sessions instead of 3 the first time it ran in CI against real network
+// latency between goroutines. This test cannot be trusted to catch that
+// class of regression by itself on every machine; see
+// postgresRepository.CreateSession's doc comment and docs/DECISIONS.md
+// for the mechanism and that finding in full.
+func TestPostgres_ConcurrentCreateSession_NeverExceedsCap(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "concurrent-cap@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	const sessionCap = 3
+	const writers = 10
+
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		otherErrs []error
+	)
+	start := make(chan struct{})
+
+	for i := range writers {
+		wg.Go(func() {
+			<-start
+			s := Session{
+				TokenHash: fmt.Sprintf("writer-%d", i),
+				UserID:    u.ID,
+				ExpiresAt: time.Now().Add(time.Hour),
+				CreatedAt: time.Now(),
+			}
+			if err := repo.CreateSession(context.Background(), s, sessionCap); err != nil {
+				mu.Lock()
+				otherErrs = append(otherErrs, err)
+				mu.Unlock()
+			}
+		})
+	}
+
+	close(start)
+	wg.Wait()
+
+	for _, err := range otherErrs {
+		t.Errorf("CreateSession() unexpected error under concurrency: %v", err)
+	}
+
+	if got := countSessions(t, repo.db, u.ID); got != sessionCap {
+		t.Errorf("session count after %d concurrent CreateSession() calls = %d, want exactly %d", writers, got, sessionCap)
+	}
+}
+
+// --- DeleteSessionsForUser ---
+
+func TestPostgres_DeleteSessionsForUser_RemovesAll(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "logout-all@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	for _, hash := range []string{"a", "b", "c"} {
+		s := Session{TokenHash: hash, UserID: u.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now}
+		if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
+			t.Fatalf("CreateSession(%s) unexpected error: %v", hash, err)
+		}
+	}
+
+	if err := repo.DeleteSessionsForUser(context.Background(), u.ID); err != nil {
+		t.Fatalf("DeleteSessionsForUser() unexpected error: %v", err)
+	}
+
+	if got := countSessions(t, repo.db, u.ID); got != 0 {
+		t.Errorf("session count after DeleteSessionsForUser() = %d, want 0", got)
+	}
+}
+
+func TestPostgres_DeleteSessionsForUser_LeavesOtherUsersAlone(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	mine := newPostgresTestUser(t, "mine@example.com")
+	theirs := newPostgresTestUser(t, "theirs@example.com")
+	if err := repo.CreateUser(context.Background(), mine); err != nil {
+		t.Fatalf("CreateUser(mine) unexpected error: %v", err)
+	}
+	if err := repo.CreateUser(context.Background(), theirs); err != nil {
+		t.Fatalf("CreateUser(theirs) unexpected error: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if err := repo.CreateSession(context.Background(), Session{TokenHash: "mine-token", UserID: mine.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now}, unlimitedSessions); err != nil {
+		t.Fatalf("CreateSession(mine) unexpected error: %v", err)
+	}
+	if err := repo.CreateSession(context.Background(), Session{TokenHash: "their-token", UserID: theirs.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now}, unlimitedSessions); err != nil {
+		t.Fatalf("CreateSession(theirs) unexpected error: %v", err)
+	}
+
+	if err := repo.DeleteSessionsForUser(context.Background(), mine.ID); err != nil {
+		t.Fatalf("DeleteSessionsForUser() unexpected error: %v", err)
+	}
+
+	if got := countSessions(t, repo.db, theirs.ID); got != 1 {
+		t.Errorf("the other user's session count = %d, want 1 (must survive)", got)
 	}
 }
