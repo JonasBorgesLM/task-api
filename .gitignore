@@ -35,4 +35,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 .vscode/
-CLAUDE.md
+
+# Claude Code — the shared agent foundation (CLAUDE.md, .claude/rules,
+# .claude/agents, .claude/skills, .claude/settings.json) is tracked on
+# purpose: it is project documentation, not personal tooling. Only the
+# per-developer permission allow-list is local.
+.claude/settings.local.json
