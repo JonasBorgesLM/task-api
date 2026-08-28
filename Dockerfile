@@ -20,28 +20,40 @@ RUN go mod download
 
 COPY . .
 
+# VERSION/COMMIT identify the build this image contains. Neither can be
+# derived from inside this stage: .dockerignore excludes .git from the
+# build context entirely (deliberately — see that file's own comment),
+# so `git describe`/`git rev-parse` have nothing to read here. The
+# Makefile's docker-build target is what supplies real values, reading
+# the host's git history before the build starts; a bare `docker build`
+# with neither ARG set falls back to the same "dev"/"unknown" defaults
+# main.go itself uses for a build with no -ldflags at all — see that
+# file's version/commit doc comment for why they're never empty.
+ARG VERSION=dev
+ARG COMMIT=unknown
+
 # CGO_ENABLED=0 removes the libc dependency, producing a fully static
 # binary — this is what makes it possible to run on the empty `scratch`
 # base below instead of needing glibc/musl in the final image.
 # -trimpath strips local build-machine file paths from the binary.
 # -ldflags="-s -w" strips the symbol table and DWARF debug info: this is
 # a release artifact, not something meant to be attached to with delve.
+# The two -X flags are what let a running container answer "which
+# commit is this" via GET /debug/vars — nothing else in the image can,
+# once -trimpath and the missing .git have done their job.
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
-      -ldflags="-s -w" \
+      -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
       -o /out/task-api \
       ./cmd/api
 
 ## ---------------------------------------------------------------------
 ## Runtime stage
 ##
-## `scratch` is literally empty — no shell, no package manager, no libc,
-## no CA certificates. `pgx` (see go.mod) implements the PostgreSQL wire
-## protocol in pure Go, so connecting to PostgreSQL over plain TCP or
-## sslmode=require needs nothing from the image beyond the binary itself.
-## sslmode=verify-full (which validates the server's certificate against
-## a CA) is the one case this image cannot support as-is — it would need
-## a CA bundle added via `COPY --from=builder /etc/ssl/certs/... `.
+## `scratch` is literally empty — no shell, no package manager, no libc.
+## `pgx` (see go.mod) implements the PostgreSQL wire protocol in pure Go,
+## so connecting to PostgreSQL over plain TCP or sslmode=require needs
+## nothing from the image beyond the binary itself.
 ## ---------------------------------------------------------------------
 FROM scratch
 
@@ -51,6 +63,19 @@ FROM scratch
 # needs the number — which matters here since `scratch` has no tooling
 # available to create one.
 USER 65532:65532
+
+# CA bundle for outbound TLS where this process verifies a peer's
+# certificate: DATABASE_URL with sslmode=verify-full,
+# ATTACHMENT_S3_USE_SSL=true against a real S3-compatible endpoint, and
+# any future https:// destination (an OTLP log exporter, for one). None
+# of those worked from this image before this line existed — the golang
+# builder stage above has ca-certificates installed (it needs it too, to
+# fetch modules over HTTPS), and this is the same 178 KB file, copied
+# rather than reinstalled so `scratch` never needs a package manager.
+# Go's crypto/x509 reads exactly this path on Linux by default; nothing
+# else has to be configured for either Go's stdlib or minio-go to pick
+# it up automatically.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 COPY --from=builder /out/task-api /task-api
 

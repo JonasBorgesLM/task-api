@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
-	"strconv"
 
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 )
@@ -199,13 +198,18 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", att.ContentType)
 	w.Header().Set("Content-Disposition", disposition)
-	w.Header().Set("Content-Length", strconv.FormatInt(att.SizeBytes, 10))
 
 	// ServeContent rather than io.Copy: it handles Range requests and
 	// conditional headers, which is what makes a large download
 	// resumable. The modtime is the attachment's creation time — the
 	// bytes are immutable once stored, so that is genuinely when this
 	// content last changed.
+	//
+	// Content-Length is deliberately not set here: ServeContent computes
+	// and sets it itself from what it actually sends, which is
+	// att.SizeBytes for a full download but the slice's own (smaller)
+	// size for a 206 Partial Content response. Setting it beforehand
+	// would be redundant in the common case and wrong for Range.
 	http.ServeContent(w, r, att.OriginalFilename, att.CreatedAt, blob)
 }
 

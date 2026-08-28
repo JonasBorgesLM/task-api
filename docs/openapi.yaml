@@ -977,9 +977,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           description: >
-            No attachment with this key for this user — covering both a
-            key that names nothing and one belonging to somebody else —
-            or attachments are disabled.
+            No attachment with this key for this user — covering a key
+            that names nothing, one belonging to somebody else, a
+            malformed (not syntactically UUID) key, or attachments being
+            disabled entirely. All four are answered identically, the
+            same way an unknown or foreign task id is (see the `id` path
+            parameter on `/v1/tasks/{id}`).
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -1182,23 +1185,19 @@ components:
         Server-generated task identifier (a UUIDv4 as produced by
         CreateTask), scoped to the authenticated caller.
 
-        A well-formed but unknown id and a well-formed id belonging to a
-        *different* user both result in 404, identically — the API never
-        reveals whether a task ID exists if the caller doesn't own it.
-
-        A **malformed** id (not a syntactically valid UUID) is a separate
-        case and currently yields **500**, not 404: the API performs no
-        UUID validation of its own, so the value reaches PostgreSQL, whose
-        `::uuid` cast rejects it as a query error rather than as "no rows"
-        (`internal/task/postgres_repository.go`;
-        `TestPostgres_FindByID_MalformedID` pins this behavior down). Note
-        this is backend-dependent — the in-memory store, used when
-        DATABASE_URL is unset, returns 404 for the same input. This is a
-        known rough edge rather than an intended contract: malformed
-        client input should be a 4xx, and the two backends should agree.
-        It is documented here because this document describes what the
-        implementation does, not what it ought to do; see the project
-        README/ARCHITECTURE for the tracked follow-up.
+        A well-formed but unknown id, a well-formed id belonging to a
+        *different* user, and a **malformed** id (not a syntactically
+        valid UUID) all result in 404, identically. `Service.isValidID`
+        rejects a malformed shape before either storage backend is
+        consulted (`internal/task/service.go`), which is what makes the
+        in-memory and PostgreSQL-backed stores agree — PostgreSQL's own
+        `::uuid` cast would otherwise reject the value as a query error
+        (500) rather than as "no rows", a divergence
+        `TestPostgres_FindByID_MalformedID` still documents for a caller
+        that reaches `Repository` directly, bypassing `Service`. The API
+        never reveals, through the status code alone, which of the three
+        cases applies — that is what keeps a non-owner from learning
+        whether a given task ID exists.
       schema:
         type: string
       example: f47ac10b-58cc-4372-a567-0e02b2c3d479

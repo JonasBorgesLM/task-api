@@ -399,3 +399,88 @@ e a decisão já registrada prevalece.
 segundo I/O, contra o `BlobStore`, além do `UPDATE`/`DELETE` no banco), e
 ganha um segundo ponto de falha na latência — mas nunca na correção: uma
 falha nesse segundo ponto nunca faz a requisição inteira falhar.
+
+---
+
+## `startupProbe` cobre a migration lenta; Job separado foi rejeitado
+
+`k8s/40-api.yaml` ganhou um `startupProbe` em `/health`, à frente de
+`readinessProbe`/`livenessProbe`. `cmd/api` aplica migrations pendentes
+dentro de `openDatabase` — **antes** de `ListenAndServe` — então até isso
+terminar o processo não escuta em porta nenhuma; sem esse probe, o
+orçamento de liveness sozinho (`initialDelaySeconds: 5` + `periodSeconds:
+10` × `failureThreshold: 3` ≈ 35s) era o teto real para qualquer migration,
+e uma que passasse disso derrubava o pod no meio da migration — o
+seguinte reiniciava no mesmo ponto, crash loop.
+
+**Alternativa considerada:** `DB_AUTO_MIGRATE=false` no `Deployment`, com
+um `Job` separado de `cmd/migrate` rodando antes dele.
+
+**Por que `startupProbe` em vez do `Job`:** `k8s/` deste projeto é
+deliberadamente `kubectl apply -f k8s/` puro — sem Helm, sem ArgoCD, sem
+qualquer ferramenta que garanta ordem entre recursos. Sem um hook de
+release, nada impede o novo `ReplicaSet` do `Deployment` de começar a
+subir antes de o `Job` terminar; garantir a ordem exigiria um passo manual
+de dois comandos (`kubectl apply job.yaml && kubectl wait ... && kubectl
+apply deployment.yaml`) — risco real de rodar fora de ordem, para um
+projeto que já se descreve como cluster de validação descartável, não
+como alvo de produção. `startupProbe` é o mecanismo que o próprio
+Kubernetes oferece exatamente para esse formato de problema (GA desde a
+1.20): nenhum recurso novo, nenhuma orquestração de ordem, e a falha
+continua correta — uma migration que realmente quebra ainda derruba o
+processo (`os.Exit(1)` a partir de `run()`), então o `Job` não teria
+comprado uma detecção de falha melhor, só uma complexidade a mais.
+
+`150 * periodSeconds(2s) = 300s` (5 minutos) é deliberadamente generoso —
+não medido contra nenhuma migration existente hoje (as sete atuais rodam
+em frações de segundo), é um teto para uma migration que ainda não foi
+escrita. Depois que o `startupProbe` sucede uma vez, ele para de rodar
+para sempre, e é aí que `readinessProbe`/`livenessProbe` assumem — o
+`initialDelaySeconds: 5` do liveness passa a contar a partir desse
+momento, não do início do container.
+
+**Trade-off aceito, e um limite real:** um `SIGTERM` recebido durante a
+migration não a interrompe — `migrateCtx` em `cmd/api/main.go` é derivado
+de `context.Background()`, não do `ctx` de sinal que `run()` recebe, então
+o processo só reage ao sinal depois que a migration terminar (sucesso,
+erro, ou seu próprio timeout de 30s). Isso já era assim antes desta
+mudança; o `startupProbe` só dá ao operador mais folga antes de decidir
+matar o pod, não muda o que acontece depois que decide. Não é escopo desta
+decisão corrigir — fica registrado para quem for mexer em
+`RunMigrations`/`openDatabase` depois.
+
+**Validado com o `k8s/rollout-test.sh` existente**, não só lido no
+manifest — ver o resultado real na issue/PR que introduziu esta decisão.
+
+---
+
+## Bundle de CA na imagem `scratch`: copiado do builder, não instalado
+
+A imagem final (`FROM scratch`) passou a incluir
+`/etc/ssl/certs/ca-certificates.crt`, copiado do estágio `builder`
+(`golang:1.26.6-alpine`, que já traz `ca-certificates` instalado — é o
+mesmo arquivo que o próprio `go mod download` usa para falar HTTPS com o
+proxy de módulos).
+
+**Por quê:** sem ele, toda verificação de certificado de saída falhava com
+`x509: certificate signed by unknown authority` — confirmado rodando o
+binário real dentro do container contra `s3.amazonaws.com` com
+`ATTACHMENT_S3_USE_SSL=true`: sem o bundle, a falha é de certificado; com
+o bundle, o handshake TLS completa e o erro que volta é da AWS
+autenticando a credencial (a prova de que a rede/TLS funcionou). O mesmo
+buraco existia para `DATABASE_URL` com `sslmode=verify-full`, documentado
+como limitação conhecida desde a criação do Dockerfile — nunca corrigido
+porque nada até agora exercitava esse caminho.
+
+**Alternativa rejeitada:** não suportar TLS de saída e documentar a
+limitação, como o comentário original fazia. Rejeitada porque a Fase 11
+(integração do crier + SigNoz) depende de falar HTTPS com um endpoint
+OTLP externo, e o próprio exportador do crier recusa enviar credencial
+sobre `http://` sem `AllowInsecureCredential` — sem o bundle, a única
+saída seria aceitar essa opção insegura por padrão, o que é pior.
+
+**Trade-off aceito:** ~179 KB a mais na imagem, e um segundo lugar (o
+`Dockerfile`) que precisa saber que o builder tem esse arquivo no caminho
+esperado. Nenhum pacote novo, nenhuma dependência de rede em tempo de
+build além da que `go mod download` já faz — o arquivo já estava lá, só
+não estava sendo copiado.
