@@ -305,6 +305,74 @@ como isso volta a quebrar, em silêncio.
 
 ---
 
+## SigNoz: VM própria, rede privada, sem credencial (issue 11.5)
+
+SigNoz roda fora do cluster do task-api, em uma **VM dedicada** — não
+cluster de observabilidade próprio, não SigNoz Cloud. Decisão de
+infraestrutura, tomada e registrada aqui porque o exportador do crier
+(issue 11.6) precisa saber contra o que codificar antes de a VM existir
+de fato.
+
+**Dimensionamento mínimo:** 2 vCPU / 4 GB de RAM, piso para o
+ClickHouse — é o componente do SigNoz com footprint de recurso real; o
+resto (query-service, frontend, coletor OTLP embutido) é leve na escala
+de uma réplica única do task-api. **Isto é um piso, não um
+dimensionamento final:** o consumo de memória do ClickHouse cresce com
+retenção e cardinalidade de atributos, não só com volume de requests —
+revisitar sob carga real é trabalho da issue 11.7, não desta decisão.
+
+**Conectividade: rede privada, nunca porta pública.** O cluster do
+task-api alcança a VM por VPN ou peering (a tecnologia exata — WireGuard,
+peering nativo do provedor de nuvem, etc. — é detalhe de infraestrutura,
+não interessa ao código e não é fixada aqui). O que importa para o
+exportador e para este documento é o resultado: a porta OTLP do SigNoz
+(**4318**, OTLP/HTTP — ver a seção de custo de dependência da Fase 11)
+nunca é exposta à internet pública, e o tráfego é só de saída a partir do
+cluster do task-api — nada precisa alcançar o cluster do task-api de
+volta para isto funcionar.
+
+**Sem credencial.** SigNoz self-hosted não exige chave de ingestão por
+padrão, e a rede privada já é o controle de acesso — não há o que
+autenticar além disso. `otlp.Config.Credential` fica no valor zero; não
+adicionar uma variável de configuração de credencial agora seria
+especulativo (`CLAUDE.md` já proíbe isso), já que nada a usaria.
+
+**Esquema: `http://`, não `https://`, e isto é deliberado.** Duas razões,
+não uma:
+
+1. A imagem de produção é `FROM scratch` e — nesta branch, antes da
+   issue #69 mergear — **não tem bundle de CA nenhum**; `https://` contra
+   a VM simplesmente não teria como verificar o certificado. Mesmo depois
+   de #69 mergear, a segunda razão continua valendo:
+2. TLS não agrega nada aqui. O limite de confiança já é a rede privada
+   (VPN/peering) — é isso que decide quem alcança a porta OTLP, não o
+   certificado. Adicionar TLS significaria gerenciar um certificado na VM
+   do SigNoz para uma cadeia que a rede já fecha, complexidade sem
+   contrapartida de segurança real.
+
+Como não há credencial, a recusa do exportador do crier a enviar
+credencial sobre `http://` sem `AllowInsecureCredential` (ver
+`exporters/otlp.Config`) **nunca é acionada** — essa proteção existe para
+o caso de credencial, que este deploy não tem.
+
+**Trade-off aceito:** se o túnel privado cair, os registros
+simplesmente enfileiram no buffer do crier e são contados como perda no
+`DrainSummary` do próximo shutdown, ou ficam retidos até a rede voltar —
+mesma semântica *at-least-once*/perda possível já aceita para o crier em
+geral. Se a VM do SigNoz um dia sair da rede privada (rede compartilhada,
+exposição pública, terceiro hospedando) esta decisão — sem credencial,
+sem TLS — precisa ser revisitada explicitamente, não herdada por inércia.
+
+**O que ainda não está decidido, de propósito:** o endereço real da VM
+(depende do provisionamento, fora do escopo deste repositório) e a
+tecnologia exata de VPN/peering. A issue 11.6 aponta o exportador para o
+endereço real assim que ele existir; até lá, `CRIER_OTLP_ENDPOINT`
+permanece sem valor de produção e o crier permanece desligado (ver a
+seção de integração do crier acima/adiante, conforme o PR que introduziu
+`cmd/api/crier.go` mergear).
+
+---
+
 ## Princípio geral de validação
 
 Decisões e correções neste projeto são verificadas pela execução real, não
