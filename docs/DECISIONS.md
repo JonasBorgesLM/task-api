@@ -305,6 +305,58 @@ como isso volta a quebrar, em silêncio.
 
 ---
 
+## Auditoria de log: nenhum valor sensível interpolado, e a garantia agora tem teste
+
+Levantamento completo de todo call site de log do projeto (issue 11.1 da
+Fase 11): nenhum deles interpola valor sensível — DSN do Postgres,
+credencial de S3, token de sessão, título/descrição de task — na
+*mensagem* do log. Todo `logger.Error` do projeto passa `err` como
+atributo estruturado (`"error", err`), nunca via `fmt.Sprintf` na string.
+
+**A pergunta que importava não era essa, e sim uma mais sutil:** mesmo um
+atributo estruturado carrega o texto de `err.Error()` como valor — se
+esse texto em si contiver a credencial, a estrutura do log call site não
+salva nada. Verificado por experimento, não por leitura de código:
+
+- **pgx** (erro de `sql.Open`/`Ping` com `DATABASE_URL` malformada ou
+  inalcançável): a senha nunca aparece. Erro de conexão mostra só
+  `user=... database=...`; erro de parse ecoa a DSN de volta, mas com a
+  senha substituída por `xxxxx` — redação embutida no próprio driver.
+- **minio-go** (`BucketExists` contra endpoint inalcançável): a
+  `SecretKey` nunca aparece no erro — confirmado contra um host que
+  recusa conexão.
+- **moat/validate**: documentado e garantido pelo próprio pacote a nunca
+  ecoar o valor validado (`validate.go`'s doc comment) — é por isso que
+  `user.normalizeEmail`'s erro de validação é seguro para logar.
+- Nenhum `panic()` explícito no código carrega dado de request — os três
+  existentes são falhas de construção na inicialização (dependência
+  ausente, hash dummy do bcrypt) ou o re-panic de
+  `http.ErrAbortHandler`.
+- `middleware.Logging` já excluía corpo e query string deliberadamente
+  (só loga `r.URL.Path`, nunca `r.URL.RawQuery`) — confirmado, sem
+  mudança necessária.
+
+**Conclusão da 11.2:** não havia call site para *converter* — a auditoria
+não encontrou nenhum. O trabalho real foi provar a propriedade com teste,
+não com comentário, exatamente como a issue pedia para o caso do S3:
+`TestRun_DatabaseURLPasswordNeverLeaks` (`cmd/api/main_test.go`) e
+`TestNewS3BlobStore_SecretKeyNeverLeaksOnFailure`
+(`internal/attachment/s3_credential_leak_test.go`). Cada um foi
+verificado por regressão real antes de mergear: uma interpolação da
+credencial injetada temporariamente no código de produção fez o teste
+correspondente falhar, depois revertida.
+
+**Trade-off aceito:** a garantia continua dependendo do comportamento de
+redação do pgx e do minio-go, bibliotecas de terceiro que o projeto não
+controla — não de nada que o task-api implemente. Esses dois testes são o
+que detecta uma regressão *deles*, não uma correção definitiva contra
+ela: se uma versão futura de qualquer um dos dois parar de redigir a
+credencial, o teste começa a falhar em vez de a vulnerabilidade passar
+despercebida — a mesma filosofia do `govulncheck` acima, aplicada a uma
+garantia que não vem de código próprio.
+
+---
+
 ## Princípio geral de validação
 
 Decisões e correções neste projeto são verificadas pela execução real, não
