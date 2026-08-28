@@ -386,23 +386,53 @@ evictado). `LogoutAll` remove **todas** as sessões do usuário,
 padrão real de segurança para quem suspeita de um token vazado, e deixar
 a sessão atual viva contradiria o propósito.
 
-**Implementado no `Repository`, dentro de uma transação — mas não pela
-razão óbvia.** A consulta de evicção (`DELETE ... NOT IN (SELECT ...
-ORDER BY created_at DESC LIMIT $2)`) é auto-corretiva: quando roda, ela
-sempre aplica a regra contra o estado real da tabela naquele momento, não
-contra um snapshot antigo. **Verificado por experimento**: uma versão
-deliberadamente não-transacional (`SELECT count`, decide, depois
-`DELETE`, sem transação) foi testada contra o teste de concorrência —
-inclusive com um delay artificial de 20ms entre as duas metades para
-alargar a janela de corrida — e **nunca produziu overshoot** em execuções
-repetidas. A razão: o último `DELETE` a rodar, não importa qual writer,
-sempre limpa corretamente o excesso baseado no estado real. A transação
-existe por um motivo mais sutil e real: **atomicidade em caso de falha
-parcial** — se a metade de evicção falhar (timeout, conexão caída)
-depois que o insert já commitou sem transação, a sessão nova fica
-armazenada e nunca avaliada para evicção, o único jeito real de o teto
-ainda ser furado ao longo de muitas falhas desse tipo. A transação faz
-insert+evict ter sucesso ou falhar juntos.
+**Implementado no `Repository`, com uma transação *e* um advisory lock —
+a transação sozinha não bastou, e isso só foi descoberto porque o CI
+achou o que o teste local não achava.**
+
+Uma primeira versão só com a transação (`BEGIN`; `INSERT`; `DELETE ...
+NOT IN (SELECT ... ORDER BY created_at DESC LIMIT $2)`; `COMMIT`) passou
+localmente, repetidamente, no teste de concorrência abaixo. Um
+experimento manual foi além: uma versão deliberadamente *sem* transação
+nenhuma, com um delay artificial de 20ms entre o `INSERT` e o `DELETE`
+para alargar a janela de corrida, também **nunca produziu overshoot**
+localmente — a hipótese testada era que a consulta de evicção é
+auto-corretiva (quando roda, aplica a regra contra o estado real da
+tabela naquele momento, não contra um snapshot antigo), e o experimento
+parecia confirmar isso.
+
+**Essa conclusão estava incompleta, e o CI provou isso**: a mesma versão
+com transação, rodada contra o runner do GitHub Actions — rede real
+entre goroutines, não localhost — deixou **7 sessões, não 3**, na
+primeira execução. A causa real: o isolamento padrão do PostgreSQL,
+`READ COMMITTED`, deixa cada transação enxergar apenas o que outras já
+commitaram *antes do seu próprio `SELECT` rodar*, mais sua própria linha
+recém-inserida. Dez logins chegando perto o suficiente uma da outra
+fazem cada transação ver **uma única sessão — a sua própria** — concluir,
+corretamente segundo essa visão limitada, que não há nada para evictar
+(1 <= 3), e todas commitam. Nenhuma transação nunca chega a ver o
+trabalho das outras nove. Isso não é o mesmo cenário do experimento
+manual (uma única goroutine com delay, sem outras rodando em paralelo de
+verdade) — é uma classe de corrida diferente, entre transações
+concorrentes de verdade, que só apareceu com latência de rede real.
+
+A correção: `SELECT pg_advisory_xact_lock(hashtext(user_id))` como
+primeira instrução dentro da transação, serializando toda
+`CreateSession` concorrente para o **mesmo** usuário (nunca bloqueia
+usuários diferentes entre si) — liberado automaticamente no
+commit/rollback pela variante `_xact_`, sem precisar de unlock
+explícito. Revalidado: 30 execuções consecutivas do teste de
+concorrência, localmente, todas com contagem final exata — e a suíte
+completa de CI, verde.
+
+**A lição registrada, não só a correção:** um teste de concorrência que
+só roda localmente pode passar por acaso, mascarando uma corrida real
+que só se manifesta sob latência de rede genuína. O `TestPostgres_
+ConcurrentCreateSession_NeverExceedsCap` continua na suíte porque ainda
+é útil — mas o comentário do teste registra explicitamente que ele não
+pode ser confiado sozinho para pegar essa classe de regressão em
+qualquer máquina; é o CI, não a máquina de quem escreveu o código, que
+efetivamente encontrou o bug aqui.
 
 **Teste de concorrência** (`TestPostgres_ConcurrentCreateSession_
 NeverExceedsCap`), no padrão de `TestConcurrentUpdate_LosersGetErrConflict`:

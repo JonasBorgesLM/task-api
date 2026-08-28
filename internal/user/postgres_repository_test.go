@@ -381,14 +381,17 @@ func TestPostgres_CreateSession_OverCap_EvictsOldestFirst(t *testing.T) {
 // The property under test is not "who wins" (there's no winner/loser
 // here — every CreateSession call is expected to succeed) but that the
 // final row count for the user never exceeds the cap, regardless of how
-// the calls interleave. This holds even without the transaction —
-// verified by hand against a deliberately non-transactional version,
-// including one with an artificial delay between insert and evict to
-// widen the race window — because the eviction query is self-correcting
-// against the table's real state whenever it runs, not against a stale
-// count. See Repository.CreateSession's doc comment for what the
-// transaction is actually for (partial-failure atomicity), and
-// docs/DECISIONS.md for that finding recorded in full.
+// the calls interleave.
+//
+// This test is the reason postgresRepository.CreateSession takes an
+// advisory lock: a transaction around insert+evict alone is not enough
+// under READ COMMITTED, PostgreSQL's default isolation — a version
+// without the lock passed here locally, repeatedly, and then left 7
+// sessions instead of 3 the first time it ran in CI against real network
+// latency between goroutines. This test cannot be trusted to catch that
+// class of regression by itself on every machine; see
+// postgresRepository.CreateSession's doc comment and docs/DECISIONS.md
+// for the mechanism and that finding in full.
 func TestPostgres_ConcurrentCreateSession_NeverExceedsCap(t *testing.T) {
 	repo := newPostgresTestRepo(t)
 	u := newPostgresTestUser(t, "concurrent-cap@example.com")

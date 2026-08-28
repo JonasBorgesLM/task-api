@@ -20,25 +20,23 @@ type Repository interface {
 	FindUserByID(ctx context.Context, id string) (User, error)
 
 	// CreateSession stores s and evicts s.UserID's oldest sessions (by
-	// CreatedAt) past maxSessions, both inside one transaction.
+	// CreatedAt) past maxSessions, inside one transaction serialized per
+	// user by a PostgreSQL advisory lock — see postgresRepository.
+	// CreateSession's doc comment for exactly why the lock is load-
+	// bearing, not a belt-and-suspenders addition.
 	//
-	// The eviction query itself is self-correcting against whatever the
-	// table actually holds at the moment it runs — it is not "read a
-	// count, then decide", so two logins racing each other converge to
-	// the same correct outcome regardless of interleaving; a concurrency
-	// test confirmed this holds even for a deliberately non-transactional
-	// version with an artificial delay between insert and evict (see
+	// The short version: a transaction around insert+evict is not
+	// enough on its own. PostgreSQL's default isolation (READ COMMITTED)
+	// lets each of several concurrent CreateSession transactions see
+	// only what was already committed *before its own SELECT ran*, plus
+	// its own just-inserted row — so ten logins arriving close together
+	// can each conclude, independently and correctly by its own limited
+	// view, that eviction isn't needed yet. This was caught by CI, not
+	// locally: an earlier version without the lock passed a local
+	// concurrency test repeatedly and left 7 sessions instead of 3 the
+	// one time it ran against a CI runner's real network latency. See
 	// docs/DECISIONS.md § "Limite de sessões: teto com evicção da mais
-	// antiga" for that finding in full — it's why the transaction here is
-	// justified by partial-failure atomicity, not by a race the eviction
-	// query wins on its own anyway).
-	//
-	// What the transaction actually buys: if the eviction half fails —
-	// a timeout, a dropped connection — after the insert half already
-	// committed, an un-transacted version would leave the new session
-	// stored and never evaluated for eviction, the one way this cap can
-	// still be defeated over many such failures. The transaction makes
-	// insert-then-evict succeed or fail together.
+	// antiga" for that finding in full.
 	//
 	// maxSessions <= 0 is a programming error, not "unlimited" — every
 	// caller has a real Config.AuthMaxSessionsPerUser to pass; the
