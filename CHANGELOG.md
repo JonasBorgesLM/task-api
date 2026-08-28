@@ -12,6 +12,15 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
 - Anexos em tasks: upload, download, dois backends de storage
   intercambiáveis (filesystem local ou S3-compatível via `minio-go`),
   coletor de blobs órfãos.
+- Quota de armazenamento de anexos por usuário
+  (`ATTACHMENT_MAX_BYTES_PER_USER`, 500 MiB por padrão). Checada antes do
+  upload; um usuário já no limite recebe `400` sem que o arquivo seja
+  lido.
+- Teto de sessões simultâneas por usuário (`AUTH_MAX_SESSIONS_PER_USER`,
+  10 por padrão) — login além do limite evict a sessão mais antiga em vez
+  de recusar. `POST /v1/auth/logout-all` — encerra todas as sessões da
+  conta de uma vez, incluindo a que fez a chamada, para quem suspeita de
+  um token vazado.
 - Rate limiting (via `moat`) agora cobre toda a superfície da API, não
   só `/auth/*`. Um cliente que fazia rajadas contra rotas de task pode
   passar a ver `429`. Configure `TRUSTED_PROXIES` se a API roda atrás de

@@ -126,6 +126,26 @@ func (r *postgresRepository) FindByStorageKey(ctx context.Context, storageKey, u
 	return att, nil
 }
 
+// TotalBytesForUser sums size_bytes across every attachment owned
+// through the user's tasks, in one aggregate query — the same join
+// shape FindByStorageKey and FindByTask use, without the trip through
+// Go to add up what the query itself can.
+func (r *postgresRepository) TotalBytesForUser(ctx context.Context, userID string) (int64, error) {
+	const query = `
+		SELECT COALESCE(SUM(a.size_bytes), 0)
+		FROM attachments a
+		JOIN tasks t ON t.id = a.task_id
+		WHERE t.user_id = $1::uuid
+	`
+
+	var total int64
+	if err := r.db.QueryRowContext(ctx, query, userID).Scan(&total); err != nil {
+		return 0, fmt.Errorf("postgres: total bytes for user: %w", err)
+	}
+
+	return total, nil
+}
+
 func (r *postgresRepository) FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error) {
 	// The ownership check is its own statement here, unlike in the two
 	// methods above, because this one has to tell "your task, no

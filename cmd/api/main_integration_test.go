@@ -55,6 +55,15 @@ func testConfig() config.Config {
 		AuthRateLimitPerSec: 1000,
 		UserRateLimitBurst:  1000,
 		UserRateLimitPerSec: 1000,
+
+		// The same trap as the rate limiters above, in a different
+		// shape: user.Repository.CreateSession's eviction keeps at most
+		// this many of a user's sessions, so a bare zero value here
+		// would evict *every* session on the very login that created
+		// it — including the one the test just made and is about to
+		// use. The tests that exercise the cap itself set their own
+		// tight value.
+		AuthMaxSessionsPerUser: 1000,
 	}
 }
 
@@ -889,6 +898,11 @@ func attachmentConfig(t *testing.T) config.Config {
 	cfg := testConfig()
 	cfg.AttachmentStorageDir = t.TempDir()
 	cfg.AttachmentMaxBytes = 4096
+	// Far above anything a test in this file uploads — the tests that
+	// exercise the per-user quota itself set their own tight value, the
+	// same pattern testConfig()'s own doc comment already establishes
+	// for the rate limiters.
+	cfg.AttachmentMaxBytesPerUser = 1 << 30 // 1 GiB
 	return cfg
 }
 
@@ -1354,5 +1368,70 @@ func TestIntegration_CrossOriginFlow(t *testing.T) {
 	}
 	if len(listed) != 1 || listed[0].ID != created.ID {
 		t.Errorf("list returned %+v, want exactly the task just created (%s)", listed, created.ID)
+	}
+}
+
+// TestIntegration_LogoutAll_InvalidatesEverySession drives two real
+// logins for the same account, confirms both tokens work, calls
+// POST /auth/logout-all with one of them, and confirms *both* — including
+// the one that made the call — are rejected afterward. This is the
+// behavior user.Service.LogoutAll's doc comment promises explicitly:
+// "sign out everywhere" includes the session doing the signing out.
+func TestIntegration_LogoutAll_InvalidatesEverySession(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	const email = "logout-all@example.com"
+	const password = "password12345"
+	body := `{"email":"` + email + `","password":"` + password + `"}`
+
+	tokenA := registerAndLoginAs(t, srv, email)
+
+	loginResp, err := srv.Client().Post(srv.URL+apiPrefix+"/auth/login", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("second POST /auth/login: %v", err)
+	}
+	defer loginResp.Body.Close()
+	var loginBody struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(loginResp.Body).Decode(&loginBody); err != nil {
+		t.Fatalf("decode second login response: %v", err)
+	}
+	tokenB := loginBody.Token
+
+	// Both sessions work before logout-all.
+	for name, token := range map[string]string{"A": tokenA, "B": tokenB} {
+		resp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/auth/me", ""))
+		if err != nil {
+			t.Fatalf("GET /auth/me (token %s): %v", name, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /auth/me (token %s) before logout-all: status = %d, want %d", name, resp.StatusCode, http.StatusOK)
+		}
+	}
+
+	// Call logout-all using token B.
+	resp, err := srv.Client().Do(authedRequest(t, tokenB, http.MethodPost, srv.URL+apiPrefix+"/auth/logout-all", ""))
+	if err != nil {
+		t.Fatalf("POST /auth/logout-all: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /auth/logout-all status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	// Both tokens must now be rejected — including B, the one that made
+	// the logout-all call itself.
+	for name, token := range map[string]string{"A": tokenA, "B (the caller)": tokenB} {
+		resp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/auth/me", ""))
+		if err != nil {
+			t.Fatalf("GET /auth/me (token %s) after logout-all: %v", name, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET /auth/me (token %s) after logout-all: status = %d, want %d", name, resp.StatusCode, http.StatusUnauthorized)
+		}
 	}
 }

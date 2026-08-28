@@ -57,15 +57,19 @@ func mustHashDummyPassword() []byte {
 // Service holds the business logic for user accounts and session-based
 // authentication.
 type Service struct {
-	repo       Repository
-	sessionTTL time.Duration
+	repo               Repository
+	sessionTTL         time.Duration
+	maxSessionsPerUser int
 }
 
 // NewService returns a new Service with the given Repository. sessionTTL
 // bounds how long a token issued by CreateSession remains valid — see
 // config.Config.AuthSessionTTL, the only place that sets it.
-func NewService(repo Repository, sessionTTL time.Duration) *Service {
-	return &Service{repo: repo, sessionTTL: sessionTTL}
+// maxSessionsPerUser bounds how many of a user's sessions CreateSession
+// keeps alive at once — see config.Config.AuthMaxSessionsPerUser and
+// Repository.CreateSession's doc comment for what happens past it.
+func NewService(repo Repository, sessionTTL time.Duration, maxSessionsPerUser int) *Service {
+	return &Service{repo: repo, sessionTTL: sessionTTL, maxSessionsPerUser: maxSessionsPerUser}
 }
 
 // newID generates a random UUID v4. Duplicated from task.Service's
@@ -172,11 +176,25 @@ func (s *Service) CreateSession(ctx context.Context, userID string) (token strin
 		ExpiresAt: expiresAt,
 		CreatedAt: now,
 	}
-	if err := s.repo.CreateSession(ctx, session); err != nil {
+	if err := s.repo.CreateSession(ctx, session, s.maxSessionsPerUser); err != nil {
 		return "", time.Time{}, fmt.Errorf("create session: %w", err)
 	}
 
 	return token, expiresAt, nil
+}
+
+// LogoutAll deletes every session belonging to userID — including the
+// one that authenticated the request calling this, which the caller
+// should expect: this is the "sign out everywhere" operation, for a
+// user who suspects a token of theirs has leaked and wants every live
+// session gone at once rather than needing to know which one to target.
+// Deleting a user with no sessions is not an error, the same
+// idempotency Logout already has for one token.
+func (s *Service) LogoutAll(ctx context.Context, userID string) error {
+	if err := s.repo.DeleteSessionsForUser(ctx, userID); err != nil {
+		return fmt.Errorf("logout all: %w", err)
+	}
+	return nil
 }
 
 // ValidateToken looks up the session for token and returns the owning

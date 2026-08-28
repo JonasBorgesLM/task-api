@@ -235,6 +235,7 @@ func TestPostgres_RunMigrationsDown_NoMigrationsToRevert(t *testing.T) {
 // change — not just that it returns nil — by stepping back through the
 // most recent ones and checking what each specifically did:
 //
+//	0008_add_sessions_user_id_created_at_index -> the composite index is gone
 //	0007_create_attachments_table        -> the attachments table is gone
 //	0006_add_sessions_indexes            -> its two indexes are dropped
 //	0005_expand_task_status_and_priority -> priority column and the widened
@@ -251,10 +252,22 @@ func TestPostgres_RunMigrationsDown_RevertsMostRecentMigration(t *testing.T) {
 	ctx := context.Background()
 	wantMigrationCount := embeddedMigrationCount(t)
 
-	assertNewestMigrationIs(t, "0007_create_attachments_table")
+	assertNewestMigrationIs(t, "0008_add_sessions_user_id_created_at_index")
 
 	if err := RunMigrations(ctx, db); err != nil {
 		t.Fatalf("RunMigrations() unexpected error: %v", err)
+	}
+
+	// --- Revert 0008_add_sessions_user_id_created_at_index ---
+	if !indexExists(t, db, "sessions", "idx_sessions_user_id_created_at") {
+		t.Fatal("idx_sessions_user_id_created_at does not exist after RunMigrations — test setup is wrong")
+	}
+
+	if err := RunMigrationsDown(ctx, db); err != nil {
+		t.Fatalf("RunMigrationsDown() unexpected error: %v", err)
+	}
+	if indexExists(t, db, "sessions", "idx_sessions_user_id_created_at") {
+		t.Error("idx_sessions_user_id_created_at still exists after reverting 0008_add_sessions_user_id_created_at_index")
 	}
 
 	// --- Revert 0007_create_attachments_table ---
@@ -279,8 +292,8 @@ func TestPostgres_RunMigrationsDown_RevertsMostRecentMigration(t *testing.T) {
 	if err := RunMigrationsDown(ctx, db); err != nil {
 		t.Fatalf("RunMigrationsDown() unexpected error: %v", err)
 	}
-	if got := appliedMigrationCount(t, db); got != wantMigrationCount-2 {
-		t.Errorf("schema_migrations has %d rows after two RunMigrationsDown, want %d", got, wantMigrationCount-2)
+	if got := appliedMigrationCount(t, db); got != wantMigrationCount-3 {
+		t.Errorf("schema_migrations has %d rows after three RunMigrationsDown, want %d", got, wantMigrationCount-3)
 	}
 	for _, index := range []string{"idx_sessions_expires_at", "idx_sessions_user_id"} {
 		if indexExists(t, db, "sessions", index) {
@@ -290,11 +303,11 @@ func TestPostgres_RunMigrationsDown_RevertsMostRecentMigration(t *testing.T) {
 
 	// --- Revert 0005_expand_task_status_and_priority ---
 	if err := RunMigrationsDown(ctx, db); err != nil {
-		t.Fatalf("RunMigrationsDown() (third) unexpected error: %v", err)
+		t.Fatalf("RunMigrationsDown() (fourth) unexpected error: %v", err)
 	}
 
-	if got := appliedMigrationCount(t, db); got != wantMigrationCount-3 {
-		t.Errorf("schema_migrations has %d rows after three RunMigrationsDown, want %d", got, wantMigrationCount-3)
+	if got := appliedMigrationCount(t, db); got != wantMigrationCount-4 {
+		t.Errorf("schema_migrations has %d rows after four RunMigrationsDown, want %d", got, wantMigrationCount-4)
 	}
 	if columnExists(t, db, "tasks", "priority") {
 		t.Error("priority column still exists after reverting 0005_expand_task_status_and_priority")

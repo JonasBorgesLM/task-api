@@ -223,3 +223,60 @@ func TestNewMemoryRepository_PanicsWithoutOwnershipCheck(t *testing.T) {
 	}()
 	NewMemoryRepository(nil)
 }
+
+// --- TotalBytesForUser ---
+
+func TestMemory_TotalBytesForUser_SumsOwnedAttachments(t *testing.T) {
+	repo := newTestRepo(t)
+	if err := repo.Create(context.Background(), testAttachment("a1", "key-1", ownedTaskID), ownerID); err != nil {
+		t.Fatalf("Create(a1) unexpected error: %v", err)
+	}
+	att2 := testAttachment("a2", "key-2", ownedTaskID)
+	att2.SizeBytes = 2048
+	if err := repo.Create(context.Background(), att2, ownerID); err != nil {
+		t.Fatalf("Create(a2) unexpected error: %v", err)
+	}
+
+	total, err := repo.TotalBytesForUser(context.Background(), ownerID)
+	if err != nil {
+		t.Fatalf("TotalBytesForUser() unexpected error: %v", err)
+	}
+	if want := int64(1024 + 2048); total != want {
+		t.Errorf("TotalBytesForUser() = %d, want %d", total, want)
+	}
+}
+
+func TestMemory_TotalBytesForUser_NoAttachments_IsZero(t *testing.T) {
+	repo := newTestRepo(t)
+
+	total, err := repo.TotalBytesForUser(context.Background(), ownerID)
+	if err != nil {
+		t.Fatalf("TotalBytesForUser() unexpected error: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("TotalBytesForUser() = %d, want 0", total)
+	}
+}
+
+// TestMemory_TotalBytesForUser_ExcludesOtherUsers guards the scoping
+// itself: another user's stored bytes must never count toward this
+// user's total.
+func TestMemory_TotalBytesForUser_ExcludesOtherUsers(t *testing.T) {
+	repo := newTestRepo(t)
+	if err := repo.Create(context.Background(), testAttachment("mine", "k1", ownedTaskID), ownerID); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+	theirs := testAttachment("theirs", "k2", otherTaskID)
+	theirs.SizeBytes = 999999
+	if err := repo.Create(context.Background(), theirs, strangerID); err != nil {
+		t.Fatalf("Create() for the other user unexpected error: %v", err)
+	}
+
+	total, err := repo.TotalBytesForUser(context.Background(), ownerID)
+	if err != nil {
+		t.Fatalf("TotalBytesForUser() unexpected error: %v", err)
+	}
+	if total != 1024 {
+		t.Errorf("TotalBytesForUser() = %d, want 1024 (must exclude the stranger's 999999-byte file)", total)
+	}
+}

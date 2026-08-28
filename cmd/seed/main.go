@@ -150,7 +150,7 @@ func run(opts seedOptions) error {
 		return nil
 	}
 
-	userSvc := user.NewService(user.NewPostgresRepository(db), cfg.AuthSessionTTL)
+	userSvc := user.NewService(user.NewPostgresRepository(db), cfg.AuthSessionTTL, cfg.AuthMaxSessionsPerUser)
 	taskSvc := task.NewService(task.NewPostgresRepository(db))
 
 	tasksCreated, statusCounts := 0, map[task.Status]int{}

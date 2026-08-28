@@ -1,0 +1,17 @@
+-- Adds a composite index serving the query
+-- postgresRepository.CreateSession runs to enforce
+-- AUTH_MAX_SESSIONS_PER_USER: after inserting a new session, it deletes
+-- every session for that user except the most-recent N (ORDER BY
+-- created_at DESC LIMIT N).
+--
+-- 0006_add_sessions_indexes.up.sql already added a plain idx_sessions_user_id
+-- for the ON DELETE CASCADE path, but a bare column index cannot also
+-- serve an ORDER BY — the eviction query filters by user_id *and* orders
+-- by created_at together, the same shape idx_tasks_user_id_created_at_id
+-- exists to serve for tasks. A plain user_id index would still need a
+-- sort step for every session-creating request.
+--
+-- Leading with user_id (the equality filter) and trailing with created_at
+-- (the ordering) is what lets PostgreSQL walk the index directly for
+-- "this user's sessions, newest first" without a separate sort.
+CREATE INDEX idx_sessions_user_id_created_at ON sessions (user_id, created_at);

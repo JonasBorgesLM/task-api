@@ -69,6 +69,20 @@ type Repository interface {
 	// stay distinguishable to the caller that is entitled to know.
 	FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error)
 
+	// TotalBytesForUser sums SizeBytes across every attachment userID
+	// owns, through their tasks — the same quantity Service.Upload
+	// checks against ATTACHMENT_MAX_BYTES_PER_USER before accepting a
+	// new upload. It exists as its own method rather than being derived
+	// from FindByTask across every task a user has, because that would
+	// mean Service enumerating tasks it has no other reason to know
+	// about; this answers the aggregate question directly, the same
+	// reasoning that gives UnreferencedKeys its own method instead of
+	// requiring the caller to reconstruct it from FindByTask.
+	//
+	// Returns 0, nil for a user with no attachments — never an error for
+	// "nothing to sum".
+	TotalBytesForUser(ctx context.Context, userID string) (int64, error)
+
 	// UnreferencedKeys returns those of the given storage keys that no
 	// attachment row references.
 	//

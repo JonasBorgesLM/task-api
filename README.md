@@ -60,6 +60,7 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `DB_CONN_MAX_LIFETIME` | Max lifetime of a pooled connection | `5m` |
 | `DB_AUTO_MIGRATE` | Apply pending migrations automatically on startup | `true` |
 | `AUTH_SESSION_TTL` | How long a `POST /v1/auth/login` token stays valid | `24h` |
+| `AUTH_MAX_SESSIONS_PER_USER` | How many of a user's sessions stay alive at once. A login past the cap evicts that user's oldest session rather than being refused — see `docs/DECISIONS.md` | `10` |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call this API. Unset ⇒ CORS disabled | *(unset)* |
 | `HSTS_MAX_AGE` | `Strict-Transport-Security` max-age, as a Go duration (e.g. `8760h`). `0` omits the header entirely, for a permanently-plaintext deployment. Never sent with `includeSubDomains` or `preload` | `8760h` (1 year) |
 | `RATE_LIMIT_BURST` / `RATE_LIMIT_PER_SEC` | Global token bucket, keyed by client address, in front of every route except the health probes | `60` / `20` |
@@ -68,6 +69,7 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `TRUSTED_PROXIES` | Comma-separated CIDRs/addresses of reverse proxies you operate. Only then is `X-Forwarded-For` used to key the address-based limits — list your proxies, never your clients | *(unset)* |
 | `ATTACHMENT_STORAGE_DIR` | Directory file attachments are stored under. Unset disables attachments entirely (the routes 404). Must already exist — there is no default because the `scratch` image has nowhere to write | *(unset)* |
 | `ATTACHMENT_MAX_BYTES` | Largest single attachment accepted | `10485760` (10 MiB) |
+| `ATTACHMENT_MAX_BYTES_PER_USER` | Total bytes across every attachment one user owns, checked before an upload streams in — see `docs/DECISIONS.md` | `524288000` (500 MiB) |
 | `ATTACHMENT_ORPHAN_MIN_AGE` | How long a blob must sit unreferenced before the orphan collector removes it. A safety margin against deleting uploads in flight, not a tuning knob | `1h` |
 | `ATTACHMENT_S3_ENDPOINT` | Object-storage backend, as `host[:port]` without a scheme. The alternative to `ATTACHMENT_STORAGE_DIR` — setting both is rejected at startup. Required for any deployment where the process can move between machines | *(unset)* |
 | `ATTACHMENT_S3_BUCKET` / `..._ACCESS_KEY` / `..._SECRET_KEY` | Required when the endpoint is set. The bucket must already exist | *(unset)* |
@@ -222,6 +224,7 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `POST` | `/v1/auth/register` | — | Create a user account |
 | `POST` | `/v1/auth/login` | — | Authenticate, receive a bearer session token |
 | `POST` | `/v1/auth/logout` | required | Invalidate the current session token |
+| `POST` | `/v1/auth/logout-all` | required | Invalidate every session for the account, including the one making the call |
 | `GET` | `/v1/auth/me` | required | Get the authenticated user |
 | `POST` | `/v1/tasks` | required | Create a task |
 | `GET` | `/v1/tasks` | required | List the caller's tasks, oldest first (`?limit=`, `?offset=`) |

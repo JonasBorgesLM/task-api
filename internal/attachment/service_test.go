@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+// unlimitedQuota is a per-user byte quota generous enough that no
+// existing test comes close to it — used everywhere a test needs a
+// working Service but isn't exercising the quota itself. Tests that do
+// exercise it set their own small value; see the quota tests below.
+const unlimitedQuota = 1 << 30 // 1 GiB
+
 // pngHeader / gifHeader / pdfHeader are the magic bytes
 // http.DetectContentType keys on. They are spelled out here rather than
 // generated so a test reads as "these bytes are a PNG", which is what the
@@ -29,7 +35,7 @@ func newServiceUnderTest(t *testing.T) (*Service, BlobStore) {
 
 	repo := NewMemoryRepository(fixedOwnership)
 	store := newTestStore(t)
-	return NewService(repo, store, 1024), store
+	return NewService(repo, store, 1024, unlimitedQuota), store
 }
 
 func TestUpload_StoresBytesAndMetadata(t *testing.T) {
@@ -122,7 +128,7 @@ func TestUpload_RejectsHTML(t *testing.T) {
 
 func TestUpload_RejectsOversized(t *testing.T) {
 	repo := NewMemoryRepository(fixedOwnership)
-	svc := NewService(repo, newTestStore(t), 10)
+	svc := NewService(repo, newTestStore(t), 10, unlimitedQuota)
 
 	content := append(append([]byte{}, pngHeader...), bytes.Repeat([]byte("x"), 100)...)
 
@@ -139,7 +145,7 @@ func TestUpload_RejectsOversized(t *testing.T) {
 func TestUpload_OnSomeoneElsesTask_LeavesNoOrphanBlob(t *testing.T) {
 	repo := NewMemoryRepository(fixedOwnership)
 	store := newTestStore(t)
-	svc := NewService(repo, store, 1024)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
 
 	_, err := svc.Upload(context.Background(), ownerID, otherTaskID, "photo.png", bytes.NewReader(pngHeader))
 	if !errors.Is(err, ErrTaskNotFound) {
@@ -267,7 +273,7 @@ func TestListByTask_ReturnsUploads(t *testing.T) {
 func TestCollectOrphans_RemovesUnreferencedBlob(t *testing.T) {
 	repo := NewMemoryRepository(fixedOwnership)
 	store := newTestStore(t)
-	svc := NewService(repo, store, 1024)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
 
 	// A blob with no row behind it — exactly what a cascaded delete
 	// leaves on disk.
@@ -297,7 +303,7 @@ func TestCollectOrphans_RemovesUnreferencedBlob(t *testing.T) {
 func TestCollectOrphans_KeepsReferencedBlob(t *testing.T) {
 	repo := NewMemoryRepository(fixedOwnership)
 	store := newTestStore(t)
-	svc := NewService(repo, store, 1024)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
 
 	att, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "report.pdf", bytes.NewReader(pdfHeader))
 	if err != nil {
@@ -332,7 +338,7 @@ func TestCollectOrphans_KeepsReferencedBlob(t *testing.T) {
 func TestCollectOrphans_SparesBlobsInsideTheGracePeriod(t *testing.T) {
 	repo := NewMemoryRepository(fixedOwnership)
 	store := newTestStore(t)
-	svc := NewService(repo, store, 1024)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
 
 	if _, err := store.Put(context.Background(), "upload-in-flight", strings.NewReader("bytes landed, row not yet written"), 1024); err != nil {
 		t.Fatalf("Put() unexpected error: %v", err)
@@ -381,7 +387,7 @@ func TestCollectOrphans_LeavesForeignFilesAlone(t *testing.T) {
 	}
 
 	repo := &keyFilteringRepo{Repository: NewMemoryRepository(fixedOwnership)}
-	svc := NewService(repo, store, 1024)
+	svc := NewService(repo, store, 1024, unlimitedQuota)
 	svc.nowFunc = func() time.Time { return time.Now().Add(48 * time.Hour) }
 
 	deleted, err := svc.CollectOrphans(context.Background(), time.Hour)
@@ -417,3 +423,106 @@ func (r *keyFilteringRepo) UnreferencedKeys(ctx context.Context, keys []string) 
 }
 
 var uuidLike = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// --- Per-user quota ---
+
+func TestUpload_UnderQuota_Succeeds(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, newTestStore(t), 1024, int64(len(pngHeader)+100))
+
+	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "photo.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("Upload() under quota: unexpected error: %v", err)
+	}
+}
+
+// TestUpload_AtQuota_Refused covers the boundary explicitly: a user whose
+// existing total already equals the quota is refused, not allowed one
+// more because they haven't gone *over* yet.
+func TestUpload_AtQuota_Refused(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	quota := int64(len(pngHeader))
+	svc := NewService(repo, newTestStore(t), 1024, quota)
+
+	// First upload lands exactly on the quota.
+	if _, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "first.png", bytes.NewReader(pngHeader)); err != nil {
+		t.Fatalf("first Upload() unexpected error: %v", err)
+	}
+
+	// Second upload finds the user already at quota.
+	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "second.png", bytes.NewReader(pngHeader))
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("Upload() at quota: error = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestUpload_OverQuota_Refused_WithoutStreamingAnyBytes proves the quota
+// is checked before the stream is read at all: the reader here panics if
+// Read is ever called, so a passing test is itself the proof that Upload
+// rejected the request before touching it.
+func TestUpload_OverQuota_Refused_WithoutStreamingAnyBytes(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, newTestStore(t), 1024, 1) // quota of 1 byte
+
+	// Put the user over quota first.
+	if _, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "first.png", bytes.NewReader(pngHeader)); err != nil {
+		t.Fatalf("first Upload() unexpected error: %v", err)
+	}
+
+	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "second.png", &panicOnReadReader{t: t})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("Upload() over quota: error = %v, want ErrInvalidInput", err)
+	}
+}
+
+// panicOnReadReader fails the test the moment Read is called on it —
+// used to prove a code path never touches the request body.
+type panicOnReadReader struct{ t *testing.T }
+
+func (r *panicOnReadReader) Read([]byte) (int, error) {
+	r.t.Fatal("Read() called — Upload() should have refused before reading the body")
+	return 0, nil
+}
+
+// TestUpload_QuotaIsPerUser_NotShared covers the scoping: another user's
+// stored bytes must not count against this user's quota, and this
+// user's own usage must not leak into how the other user's requests are
+// judged.
+func TestUpload_QuotaIsPerUser_NotShared(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	quota := int64(len(pngHeader))
+	svc := NewService(repo, newTestStore(t), 1024, quota)
+
+	// strangerID fills their own quota on otherTaskID.
+	if _, err := svc.Upload(context.Background(), strangerID, otherTaskID, "theirs.png", bytes.NewReader(pngHeader)); err != nil {
+		t.Fatalf("stranger's Upload() unexpected error: %v", err)
+	}
+
+	// ownerID, who has uploaded nothing, must still have their full quota.
+	if _, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "mine.png", bytes.NewReader(pngHeader)); err != nil {
+		t.Errorf("owner's Upload() with an untouched quota: unexpected error: %v", err)
+	}
+}
+
+// TestUpload_QuotaExceeded_ErrorDoesNotRevealAnotherUsersUsage is the
+// acceptance criterion the issue named explicitly: the 400 a caller sees
+// must describe only their own usage, never leak what any other account
+// has stored. Scoping TotalBytesForUser to the caller's own userID
+// already guarantees this by construction — this test pins the message
+// shape as a regression guard for whoever edits it next.
+func TestUpload_QuotaExceeded_ErrorDoesNotRevealAnotherUsersUsage(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, newTestStore(t), 1024, 1) // quota of 1 byte
+
+	if _, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "first.png", bytes.NewReader(pngHeader)); err != nil {
+		t.Fatalf("first Upload() unexpected error: %v", err)
+	}
+
+	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "second.png", bytes.NewReader(pngHeader))
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if strings.Contains(err.Error(), strangerID) || strings.Contains(err.Error(), otherTaskID) {
+		t.Errorf("quota error mentions another user's identifiers: %v", err)
+	}
+}

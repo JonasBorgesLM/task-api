@@ -316,3 +316,102 @@ resolvida depois de ver a execução real no pipeline (contagem de
 iterações, tempo, resultado). Aplique o mesmo padrão em qualquer issue
 que envolva CI, deploy, ou qualquer configuração que se pretende validar:
 não feche por ter editado o arquivo certo, feche por ter visto rodar.
+
+---
+
+## Quota de anexos: por usuário, em bytes, checada antes do upload
+
+`ATTACHMENT_MAX_BYTES_PER_USER` (default 500 MiB) limita o total de bytes
+que um usuário pode ter armazenado em anexos, somado através de todas as
+suas tasks.
+
+**O eixo — por usuário, não por task, não por contagem:** por task não
+resolve o problema real — nada impede um atacante de criar mais tasks e
+continuar enchendo o storage, cada uma dentro do próprio limite. Contagem
+de anexos não impede o cenário real (poucos arquivos grandes). Bytes
+totais por usuário é a métrica que a própria motivação da issue nomeia:
+"encher o storage".
+
+**Quando a checagem roda:** antes de qualquer byte do upload ser lido —
+`Repository.TotalBytesForUser` é consultado primeiro, e se o total atual
+já estiver no limite (`>=`), a requisição é recusada sem tocar no corpo.
+Verificado com um `io.Reader` que falha o teste se `Read` for chamado.
+
+**Por que a checagem usa o total *antes* do upload, não *depois*:** o
+tamanho real de um upload só é conhecido quando `BlobStore.Put` termina
+de ler o stream (`Content-Length` é declarado pelo cliente e pode
+mentir — a mesma razão pela qual o limite de um único upload
+(`ATTACHMENT_MAX_BYTES`) já não confia nesse header). Checar depois
+significaria gravar o blob primeiro e apagá-lo se a quota estourou —
+puro desperdício de I/O para um teto que só precisa impedir abuso
+sustentado, não cravar um número exato de bytes.
+
+**Trade-off aceito:** um único upload aceito pode levar o total até
+`ATTACHMENT_MAX_BYTES` acima da quota — o overshoot máximo é limitado
+pelo teto de um upload individual, não é ilimitado. E duas requisições
+concorrentes do mesmo usuário, cada uma vendo o total antes da outra
+commitar, podem ambas passar e juntas ultrapassar a quota por um
+upload a mais do que o previsto — aceito pela mesma razão: é um teto
+operacional contra abuso sustentado, não uma invariante financeira que
+precise de bloqueio.
+
+**A mensagem de erro não revela uso de outro usuário** — garantido por
+construção, já que `TotalBytesForUser` é escopado ao próprio `userID` da
+chamada; nunca há outro usuário para vazar.
+
+---
+
+## Limite de sessões: teto com evicção da mais antiga
+
+`AUTH_MAX_SESSIONS_PER_USER` (default 10) bounds quantas sessões de um
+usuário ficam vivas ao mesmo tempo. Ao exceder, `CreateSession` evict a
+mais antiga (por `CreatedAt`) em vez de recusar o novo login.
+
+**Evicção, não recusa — e por quê:** este projeto não tem (e a issue não
+pede) um endpoint para listar sessões ativas. Recusar o login excedente
+deixaria o usuário sem saída clara — a única opção seria esperar uma
+sessão expirar (até `AUTH_SESSION_TTL` inteiro) ou usar `logout-all`, que
+sequer existia antes desta decisão. Evicção nunca trava um login
+legítimo: o pior caso é o dispositivo mais antigo perder a sessão
+silenciosamente, o mesmo comportamento que serviços reais (bancos, redes
+sociais) já usam para "você foi desconectado em outro lugar".
+
+**`POST /v1/auth/logout-all` entra no escopo**, e é o que de fato resolve
+a segunda motivação da issue — "não há como um usuário encerrar sessões
+que não sejam a atual" — que a evicção sozinha não cobre satisfatoriamente
+(evicção é passiva e só ajuda se o dono continuar logando normalmente em
+outro lugar; um token roubado usado sem mais logins novos nunca seria
+evictado). `LogoutAll` remove **todas** as sessões do usuário,
+**incluindo a que fez a chamada** — "sair de todos os lugares" é o
+padrão real de segurança para quem suspeita de um token vazado, e deixar
+a sessão atual viva contradiria o propósito.
+
+**Implementado no `Repository`, dentro de uma transação — mas não pela
+razão óbvia.** A consulta de evicção (`DELETE ... NOT IN (SELECT ...
+ORDER BY created_at DESC LIMIT $2)`) é auto-corretiva: quando roda, ela
+sempre aplica a regra contra o estado real da tabela naquele momento, não
+contra um snapshot antigo. **Verificado por experimento**: uma versão
+deliberadamente não-transacional (`SELECT count`, decide, depois
+`DELETE`, sem transação) foi testada contra o teste de concorrência —
+inclusive com um delay artificial de 20ms entre as duas metades para
+alargar a janela de corrida — e **nunca produziu overshoot** em execuções
+repetidas. A razão: o último `DELETE` a rodar, não importa qual writer,
+sempre limpa corretamente o excesso baseado no estado real. A transação
+existe por um motivo mais sutil e real: **atomicidade em caso de falha
+parcial** — se a metade de evicção falhar (timeout, conexão caída)
+depois que o insert já commitou sem transação, a sessão nova fica
+armazenada e nunca avaliada para evicção, o único jeito real de o teto
+ainda ser furado ao longo de muitas falhas desse tipo. A transação faz
+insert+evict ter sucesso ou falhar juntos.
+
+**Teste de concorrência** (`TestPostgres_ConcurrentCreateSession_
+NeverExceedsCap`), no padrão de `TestConcurrentUpdate_LosersGetErrConflict`:
+10 goroutines reais, um gate de início, `-race`, todas criando sessão para
+o mesmo usuário ao mesmo tempo — a contagem final nunca excede o teto.
+
+**Migration nova** (`0008_add_sessions_user_id_created_at_index`): índice
+composto `(user_id, created_at)`, pela mesma razão de
+`idx_tasks_user_id_created_at_id` — a consulta de evicção filtra por
+`user_id` **e** ordena por `created_at` juntos; o índice simples que já
+existia (`idx_sessions_user_id`, de `0006_add_sessions_indexes`) não serve
+os dois ao mesmo tempo.
