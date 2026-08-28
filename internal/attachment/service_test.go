@@ -453,3 +453,128 @@ func (r *keyFilteringRepo) UnreferencedKeys(ctx context.Context, keys []string) 
 }
 
 var uuidLike = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// --- Malformed IDs (taskID and storageKey) ---
+//
+// These pin the fix for the same class of bug found in internal/task: a
+// taskID or storageKey that isn't a syntactically valid UUID used to
+// reach postgresRepository's ::uuid cast unchecked, surfacing as a 500
+// instead of the routine 404/task-not-found a client typo deserves.
+// isValidID rejects the shape before Repository is consulted at all.
+
+// countingRepo wraps a real Repository and records whether each method
+// was actually invoked, so a malformed-ID test can prove Service
+// rejected the input itself rather than the wrapped Repository merely
+// returning "not found" for an ID it didn't recognize — the two are
+// observationally identical against memoryRepository (a malformed ID
+// just isn't a key in its map either), which is exactly why call
+// recording, not just the returned error, is what proves the check runs
+// where it's supposed to.
+type countingRepo struct {
+	Repository
+	createCalled           bool
+	findByStorageKeyCalled bool
+	findByTaskCalled       bool
+}
+
+func (r *countingRepo) Create(ctx context.Context, att Attachment, userID string) error {
+	r.createCalled = true
+	return r.Repository.Create(ctx, att, userID)
+}
+
+func (r *countingRepo) FindByStorageKey(ctx context.Context, storageKey, userID string) (Attachment, error) {
+	r.findByStorageKeyCalled = true
+	return r.Repository.FindByStorageKey(ctx, storageKey, userID)
+}
+
+func (r *countingRepo) FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error) {
+	r.findByTaskCalled = true
+	return r.Repository.FindByTask(ctx, taskID, userID)
+}
+
+// malformedIDs is the shared table every test below runs against —
+// identical in spirit to task.malformedTaskIDs, duplicated rather than
+// shared for the same reason the two packages don't import each other.
+var malformedIDs = []struct {
+	name string
+	id   string
+}{
+	{"empty", ""},
+	{"not_uuid_shaped_at_all", "not-a-uuid"},
+	{"too_short", "11111111-1111-1111-1111-11111111"},
+	{"too_long", "11111111-1111-1111-1111-1111111111111"},
+	{"missing_hyphens", "11111111111111111111111111111111"},
+	{"wrong_grouping", "111111111-111-1111-1111-111111111111"},
+	{"non_hex_character", "1111111g-1111-1111-1111-111111111111"},
+	{"sql_injection_attempt", "'; DROP TABLE tasks; --"},
+}
+
+func TestUpload_MalformedTaskID_IsTaskNotFound(t *testing.T) {
+	for _, tc := range malformedIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &countingRepo{Repository: NewMemoryRepository(fixedOwnership)}
+			svc := NewService(repo, newTestStore(t), 1024)
+
+			_, err := svc.Upload(context.Background(), ownerID, tc.id, "photo.png", bytes.NewReader(pngHeader))
+			if !errors.Is(err, ErrTaskNotFound) {
+				t.Errorf("Upload(taskID=%q) error = %v, want ErrTaskNotFound", tc.id, err)
+			}
+			if repo.createCalled {
+				t.Errorf("Upload(taskID=%q) reached Repository.Create; isValidID should have rejected it first", tc.id)
+			}
+		})
+	}
+}
+
+func TestDownload_MalformedStorageKey_IsNotFound(t *testing.T) {
+	for _, tc := range malformedIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &countingRepo{Repository: NewMemoryRepository(fixedOwnership)}
+			svc := NewService(repo, newTestStore(t), 1024)
+
+			_, _, err := svc.Download(context.Background(), ownerID, tc.id)
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("Download(storageKey=%q) error = %v, want ErrNotFound", tc.id, err)
+			}
+			if repo.findByStorageKeyCalled {
+				t.Errorf("Download(storageKey=%q) reached Repository.FindByStorageKey; isValidID should have rejected it first", tc.id)
+			}
+		})
+	}
+}
+
+func TestListByTask_MalformedTaskID_IsTaskNotFound(t *testing.T) {
+	for _, tc := range malformedIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &countingRepo{Repository: NewMemoryRepository(fixedOwnership)}
+			svc := NewService(repo, newTestStore(t), 1024)
+
+			_, err := svc.ListByTask(context.Background(), ownerID, tc.id)
+			if !errors.Is(err, ErrTaskNotFound) {
+				t.Errorf("ListByTask(taskID=%q) error = %v, want ErrTaskNotFound", tc.id, err)
+			}
+			if repo.findByTaskCalled {
+				t.Errorf("ListByTask(taskID=%q) reached Repository.FindByTask; isValidID should have rejected it first", tc.id)
+			}
+		})
+	}
+}
+
+// TestDownload_WellFormedKey_StillReachesRepository is the control case:
+// a syntactically valid UUID that simply isn't stored must still reach
+// Repository and get ErrNotFound from it, not from isValidID. Without
+// this, the tests above could pass for the wrong reason — isValidID
+// rejecting everything, valid IDs included.
+func TestDownload_WellFormedKey_StillReachesRepository(t *testing.T) {
+	repo := &countingRepo{Repository: NewMemoryRepository(fixedOwnership)}
+	svc := NewService(repo, newTestStore(t), 1024)
+
+	const wellFormedButUnknown = "99999999-9999-9999-9999-999999999999"
+	_, _, err := svc.Download(context.Background(), ownerID, wellFormedButUnknown)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Download() error = %v, want ErrNotFound", err)
+	}
+	if !repo.findByStorageKeyCalled {
+		t.Error("Download() with a well-formed key did not reach Repository.FindByStorageKey")
+	}
+}

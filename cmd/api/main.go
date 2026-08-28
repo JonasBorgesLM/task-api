@@ -247,6 +247,26 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 		ratelimit.WithKeyFunc(userIDKey),
 	)
 
+	// closeLimiters releases the three Limiters' underlying store.
+	//
+	// At moat v0.2.0 (the pinned version), ratelimit.MemoryStore runs no
+	// background goroutine of its own — buckets are reclaimed lazily,
+	// amortized over calls to Take — so today Close only drops the
+	// store's internal map. It is still called on every path that built
+	// these Limiters, including the error path below (buildBlobStore
+	// failing) that used to call only closeDB() and skip them: "close
+	// what you opened" is worth keeping as an invariant on its own
+	// terms, independent of what the current dependency version happens
+	// to need it for, and it is what protects this code if a future
+	// moat release reintroduces one — moat's own doc/DESIGN.md §10 records
+	// that a janitor goroutine was the original plan for MemoryStore
+	// before the amortized-eviction design replaced it.
+	closeLimiters := func() {
+		globalLimiter.Close()
+		authLimiter.Close()
+		userLimiter.Close()
+	}
+
 	// authenticated is what every non-public route is wrapped in:
 	// authenticate first, then charge the request to that user's bucket.
 	// The nesting order is load-bearing — userLimiter's key function
@@ -303,6 +323,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	if attachmentsEnabled(cfg) {
 		blobs, closeStore, err := buildBlobStore(ctx, cfg)
 		if err != nil {
+			closeLimiters()
 			closeDB()
 			return nil, nil, fmt.Errorf("open attachment storage: %w", err)
 		}
@@ -421,15 +442,13 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 		IdleTimeout:  cfg.IdleTimeout,
 	}
 
-	// Each Limiter owns the in-process store it created, and Close stops
-	// the goroutine that expires idle buckets in it. Closing the database
-	// alone would leave three of those running for the lifetime of the
-	// process — harmless in main(), a leak across a test suite that
-	// builds a server per test.
+	// Each Limiter owns the in-process store it created (see
+	// closeLimiters above), and closeBlobs/closeDB release the other two
+	// resources newServer may have opened. Order does not matter between
+	// them — none depends on another being open — but all three must run
+	// once the HTTP server has stopped serving requests, never before.
 	closeAll := func() error {
-		globalLimiter.Close()
-		authLimiter.Close()
-		userLimiter.Close()
+		closeLimiters()
 		if err := closeBlobs(); err != nil {
 			return err
 		}

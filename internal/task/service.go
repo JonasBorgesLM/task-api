@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -87,6 +88,35 @@ func newID() (string, error) {
 	), nil
 }
 
+// idPattern matches the shape newID generates and the shape PostgreSQL's
+// ::uuid cast accepts — 8-4-4-4-12 hex, case-insensitive. It is
+// deliberately not a strict version-4 check: a valid RFC 4122 UUID of any
+// version reaches this far unrejected today (via the ::uuid cast), and
+// tightening the check beyond "is this a UUID at all" would reject input
+// PostgreSQL itself would have accepted.
+var idPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// isValidID reports whether id is shaped like a UUID.
+//
+// Called at the top of every Service method that takes a caller-supplied
+// task ID, before Repository ever sees it. Without this, a malformed ID
+// reached postgresRepository's `::uuid` cast, which rejected it as a
+// query error — surfacing as 500, and logged as an unexpected failure,
+// for what is actually a routine case of client-supplied garbage. Worse,
+// memoryRepository disagreed: the same input returned ErrNotFound (404)
+// there, so which status a client saw depended on which backend happened
+// to be running. Checking here, above both, is what makes them agree —
+// see TestPostgres_FindByID_MalformedID and its memory counterpart.
+//
+// A malformed ID maps to ErrNotFound, not a distinct "malformed ID"
+// error: this package's rule for a task belonging to someone else is
+// ErrNotFound rather than a shape that would confirm a well-formed ID
+// exists (see Repository's doc comment) — a malformed one gets the exact
+// same treatment, for the same reason.
+func isValidID(id string) bool {
+	return idPattern.MatchString(id)
+}
+
 // CreateTask validates input, builds a new Task owned by userID and
 // persists it. An empty priority defaults to PriorityMedium; otherwise it
 // must be one of low/medium/high.
@@ -127,6 +157,10 @@ func (s *Service) CreateTask(ctx context.Context, userID, title, description, pr
 
 // GetTask retrieves userID's Task by its ID.
 func (s *Service) GetTask(ctx context.Context, userID, id string) (Task, error) {
+	if !isValidID(id) {
+		return Task{}, ErrNotFound
+	}
+
 	task, err := s.repo.FindByID(ctx, id, userID)
 	if err != nil {
 		return Task{}, fmt.Errorf("get task: %w", err)
@@ -165,6 +199,10 @@ func (s *Service) ListTasks(ctx context.Context, userID string, limit, offset in
 // another writer updated the same task in between. The caller should treat
 // ErrConflict as retryable — re-read the task and try again.
 func (s *Service) UpdateTask(ctx context.Context, userID, id, title, description, priority string) (Task, error) {
+	if !isValidID(id) {
+		return Task{}, ErrNotFound
+	}
+
 	title, description, err := validateTitleAndDescription(title, description)
 	if err != nil {
 		return Task{}, err
@@ -194,6 +232,10 @@ func (s *Service) UpdateTask(ctx context.Context, userID, id, title, description
 
 // DeleteTask removes userID's Task by its ID.
 func (s *Service) DeleteTask(ctx context.Context, userID, id string) error {
+	if !isValidID(id) {
+		return ErrNotFound
+	}
+
 	if err := s.repo.Delete(ctx, id, userID); err != nil {
 		return fmt.Errorf("delete task: %w", err)
 	}
@@ -211,6 +253,9 @@ func (s *Service) DeleteTask(ctx context.Context, userID, id string) error {
 // Like UpdateTask, this uses optimistic concurrency control via the
 // Version read from FindByID; see UpdateTask's doc comment.
 func (s *Service) TransitionStatus(ctx context.Context, userID, id string, target Status) (Task, error) {
+	if !isValidID(id) {
+		return Task{}, ErrNotFound
+	}
 	if !validStatuses[target] {
 		return Task{}, fmt.Errorf("%w: unknown status %q", ErrInvalidInput, target)
 	}
