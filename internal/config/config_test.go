@@ -240,6 +240,29 @@ func TestLoad_DatabaseURL_Custom(t *testing.T) {
 	}
 }
 
+func TestLoad_CrierOTLPEndpoint_DefaultsToEmpty(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.CrierOTLPEndpoint != "" {
+		t.Errorf("Load() CrierOTLPEndpoint = %q, want empty (crier disabled)", cfg.CrierOTLPEndpoint)
+	}
+}
+
+func TestLoad_CrierOTLPEndpoint_Custom(t *testing.T) {
+	const endpoint = "https://collector.example.com:4318"
+	t.Setenv("CRIER_OTLP_ENDPOINT", endpoint)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.CrierOTLPEndpoint != endpoint {
+		t.Errorf("Load() CrierOTLPEndpoint = %q, want %q", cfg.CrierOTLPEndpoint, endpoint)
+	}
+}
+
 func TestLoad_DBPoolDefaults(t *testing.T) {
 	cfg, err := Load()
 	if err != nil {

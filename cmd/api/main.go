@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	core "github.com/JonasBorgesLM/crier/core"
+
 	"github.com/JonasBorgesLM/moat/ratelimit"
 	"github.com/JonasBorgesLM/moat/realip"
 	"github.com/JonasBorgesLM/moat/secureheaders"
@@ -66,9 +68,24 @@ func run(ctx context.Context, out io.Writer) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	// crier is built here, alongside the logger it mirrors, rather than
+	// inside newServer: everything logged through logger below — by
+	// run() itself and by everything newServer wires up, since it is
+	// handed this same *slog.Logger — is what a configured
+	// CRIER_OTLP_ENDPOINT sends onward. Building it any later would miss
+	// run()'s own "server started"/shutdown lines; building it separately
+	// per call site would require every existing logger.X call to change.
+	crier, err := buildCrier(cfg)
+	if err != nil {
+		return fmt.Errorf("build crier: %w", err)
+	}
+	var handler slog.Handler = slog.NewJSONHandler(out, &slog.HandlerOptions{Level: cfg.LogLevel})
+	if crier != nil {
+		handler = newCrierTeeHandler(handler, crier)
+	}
+	logger := slog.New(handler)
 
-	srv, closeDB, err := newServer(ctx, cfg, logger)
+	srv, closeDB, err := newServer(ctx, cfg, logger, crier)
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
@@ -177,7 +194,7 @@ func run(ctx context.Context, out io.Writer) error {
 // newServer returns a non-nil error only if the database itself could not
 // be opened (e.g. PostgreSQL is configured but unreachable) — in that case
 // both other return values are nil and there is nothing to close.
-func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*http.Server, func() error, error) {
+func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crier *core.Crier) (*http.Server, func() error, error) {
 	db, err := openDatabase(cfg, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open database: %w", err)
@@ -431,6 +448,16 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 		authLimiter.Close()
 		userLimiter.Close()
 		if err := closeBlobs(); err != nil {
+			return err
+		}
+		// Before closeDB, not after: the drain still has a database to
+		// use if any of the records it manages to flush needed one — it
+		// never does today, but the ordering costs nothing and closing
+		// the database first would be the wrong default to leave in
+		// place for a future exporter that does.
+		crierCtx, cancel := context.WithTimeout(context.Background(), crierShutdownTimeout)
+		defer cancel()
+		if err := shutdownCrier(crierCtx, crier, logger); err != nil {
 			return err
 		}
 		return closeDB()

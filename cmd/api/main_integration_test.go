@@ -72,7 +72,7 @@ func newTestServer(t *testing.T, cfg config.Config, logger *slog.Logger) *http.S
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	srv, closeDB, err := newServer(ctx, cfg, logger)
+	srv, closeDB, err := newServer(ctx, cfg, logger, nil)
 	if err != nil {
 		t.Fatalf("newServer() unexpected error: %v", err)
 	}
@@ -868,7 +868,7 @@ func TestNewServer_RejectsDangerousTrustedProxies(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	srv, closeAll, err := newServer(ctx, cfg, discardLogger())
+	srv, closeAll, err := newServer(ctx, cfg, discardLogger(), nil)
 	if err == nil {
 		if closeAll != nil {
 			closeAll()

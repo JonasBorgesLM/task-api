@@ -305,6 +305,140 @@ como isso volta a quebrar, em silêncio.
 
 ---
 
+## Fase 11: crier embutido, stdout mantido em paralelo
+
+`cmd/api/crier.go` integra a biblioteca `crier` (`core.New()` + o
+exportador `exporters/otlp`) como um segundo destino de log, opt-in via
+`CRIER_OTLP_ENDPOINT`. Sem essa variável, `buildCrier` retorna `nil` e
+nada muda — mesmo padrão de "desligável por configuração" já usado para
+`ATTACHMENT_S3_*`.
+
+**stdout nunca é substituído, só espelhado.** `crierTeeHandler`
+(`cmd/api/crier.go`) envolve o `slog.Handler` que já escreve em stdout;
+`Handle()` sempre chama o handler original primeiro, e o resultado que
+`Handle()` devolve é o dele — o espelhamento para o crier é best-effort e
+nunca pode afetar o caminho principal.
+
+**Por quê manter os dois:** o buffer do crier é em memória, de uma
+instância só, reiniciada a cada rollout. stdout já é capturado pelo
+runtime do container e sobrevive a qualquer coisa que aconteça com o
+crier — inclusive ele nunca ter sido configurado. O README do crier é
+explícito: entrega é *at-least-once*, e perda no shutdown é possível e
+sempre contada (`DrainSummary`), nunca silenciosa.
+
+**Trade-off aceito:** manter os dois sinks custa uma linha de log
+duplicada por request quando o crier está ligado — armazenamento e
+egress dobrados para o volume de acesso. Aceito porque a alternativa
+(substituir stdout) reintroduz exatamente o ponto único de falha que o
+parágrafo acima descreve.
+
+### Um "tee" de `slog.Handler`, não uma chamada por call site
+
+A alternativa considerada foi adicionar `crier.Log(...)` em cada um dos
+~20 call sites de log do projeto (cmd/api e os três Handlers de domínio).
+Rejeitada: exigiria mudar toda linha de log existente e criaria dois
+caminhos para divergir. Em vez disso, `crierTeeHandler` embrulha o
+`slog.Handler` uma única vez, em `run()` — todo `logger.Error/Info/Warn`
+já existente passa a alcançar o crier automaticamente, `request_id`
+incluído (é só mais um atributo que a linha de log já carregava).
+
+### Um achado real, não só leitura de documentação: atributos precisam de conversão
+
+Verificado por experimento, não por ler o código do crier: um atributo
+`slog` de tipo `error` (o que `"error", err` produz — `error` não é um
+`slog.Kind` nativo) chega ao `Limits` do crier como tipo não suportado, e
+é **silenciosamente substituído** por um marcador `"…[unsupported value
+type]"` antes da exportação — descartando exatamente o campo que uma
+pessoa abre o log para ler. `crierAttrValue` (`cmd/api/crier.go`) resolve
+isso: converte qualquer atributo fora da lista seguros do crier (string,
+bool, os inteiros, float, `time.Duration`, `time.Time`) para sua
+representação em texto (`slog.Value.String()`, que corretamente chama
+`.Error()`/`.String()` do valor por baixo) antes de entregar ao crier.
+`TestCrierTeeHandler_PreservesWrappedOutput_AndMirrorsToCrier` e
+`TestCrierAttrValue` (`cmd/api/crier_test.go`) travam essa propriedade —
+cada um foi verificado falhando de propósito (a conversão removida
+temporariamente) antes de mergear.
+
+### Custo de dependência (issue 11.3)
+
+`go get` real, grafo conferido (não suposto): `CRIER_OTLP_ENDPOINT`
+configurado adiciona exatamente **4 módulos** —
+`github.com/JonasBorgesLM/crier/core`,
+`github.com/JonasBorgesLM/crier/exporters/otlp`,
+`go.opentelemetry.io/proto/slim/otlp` (a variante *slim*, que existe
+precisamente para não trazer a árvore de dependência do coletor/gRPC
+completo) e `google.golang.org/protobuf`. `moat` já era dependência
+direta, sem bump de versão. Todos Go puro — confirmado, não só assumido,
+pelo próprio build estático (`FROM scratch`, `CGO_ENABLED=0`) continuar
+funcionando com eles no grafo. `govulncheck` limpo com as quatro
+dependências novas presentes.
+
+**Trade-off aceito:** o exportador é OTLP/HTTP apenas (porta **4318**,
+path `/v1/logs` — não há transporte gRPC nem porta 4317, ao contrário do
+esboço original desta fase). Se um backend de observabilidade futuro só
+falar gRPC, essa decisão precisa ser revisitada — não é o caso do SigNoz,
+que traz coletor OTLP/HTTP embutido.
+
+### Nome de serviço e versão
+
+`Options.ServiceName` é a constante `"task-api"` (`crierServiceName`).
+`Options.ServiceVersion` fica vazio por ora — o mecanismo de
+versão/commit do binário (`version`/`commit` em `cmd/api/main.go`) ainda
+não existe nesta branch (issue #83/#84, PR separado). Preenchê-lo é
+consequência de uma linha só assim que aquele PR mergear; não vale
+duplicar aqui o mecanismo de detecção de versão só para adiantar este
+campo opcional.
+
+### `crierShutdownTimeout`: provisório, não a aritmética final
+
+`crier.Shutdown` roda dentro de `closeAll`, **antes** de `closeDB` e
+**depois** de `closeBlobs` — na mesma ordem já estabelecida para os
+outros recursos. O timeout usado (`crierShutdownTimeout`, 5s) é uma
+constante própria, deliberadamente **não** reaproveitando
+`cfg.ShutdownTimeout`: `closeAll` roda *depois* de `srv.Shutdown` já ter
+gasto até `cfg.ShutdownTimeout` do seu próprio orçamento, e empilhar um
+segundo orçamento completo em cima estufaria o tempo total de shutdown
+silenciosamente para além do que `terminationGracePeriodSeconds` no
+manifest do Kubernetes contabiliza.
+
+**Isto é provisório.** 5s foi escolhido pelo mesmo raciocínio do timeout
+de ping do banco (`openDatabase`), não por medição contra um SigNoz real
+— não existe um ainda (issue 11.5, bloqueada em decisão de
+infraestrutura). A issue 11.7 revisita essa aritmética depois de existir
+um deploy real para rodar `k8s/rollout-test.sh` contra ele, igual ao que
+já foi feito para `HTTP_PRE_SHUTDOWN_DELAY` — ver a seção "Drain antes do
+shutdown" acima.
+
+### `/health/ready` não é acoplado ao crier (issue 11.8)
+
+`core.Crier.Health()` existe e reporta liveness/readiness do próprio
+pipeline do crier — e **deliberadamente não é consultado por**
+`GET /health/ready`. Profundidade do buffer e contadores de perda por
+motivo são publicados em `/debug/vars`
+(`crier_buffer_depth`, `crier_records_dropped`) em vez disso.
+
+**Por quê:** `/health/ready` existe para a dependência de que a API
+*precisa* para servir — o banco (ver `k8s/40-api.yaml`). Um backend de
+log inacessível não impede a API de atender ninguém; acoplar os dois
+faria um SigNoz fora do ar tirar réplicas saudáveis de serviço, a mesma
+inversão de prioridade já rejeitada para liveness não checar dependência.
+`core.Health.Live()` do próprio crier documenta esse raciocínio para o
+pipeline dele mesmo — este projeto aplica o mesmo princípio uma camada
+acima, à sua própria composição do crier como dependência opcional.
+
+**Como o expvar permanece correto entre testes.** `expvar.Publish` só
+pode ser chamado uma vez por nome — mas `buildCrier` roda uma vez por
+`*testing.T` na suíte deste pacote, não uma vez por processo como em
+`main()`. `publishCrierExpvarOnce` (guardado por `sync.Once`) resolve
+isso publicando os `expvar.Func` uma única vez, fechando sobre variáveis
+de pacote (`currentCrierInstance`/`currentCrierMetrics`, ponteiros
+atômicos) que cada chamada de `buildCrier` reaponta — o mesmo padrão já
+estabelecido no projeto de "fechar sobre a variável de pacote, nunca
+sobre um parâmetro capturado", aplicado aqui pela primeira vez a um
+recurso construído mais de uma vez por processo de teste.
+
+---
+
 ## Princípio geral de validação
 
 Decisões e correções neste projeto são verificadas pela execução real, não
