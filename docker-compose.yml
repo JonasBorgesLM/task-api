@@ -102,11 +102,36 @@ services:
       # frontend on another port) instead, or set it to an empty value to
       # disable CORS again.
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8082}
+      # Attachments are opt-in (see config.Config.AttachmentStorageDir):
+      # without ATTACHMENT_STORAGE_DIR or the ATTACHMENT_S3_* variables
+      # set, attachmentsEnabled(cfg) is false and the upload/download
+      # routes are never registered — they 404 rather than existing and
+      # failing. This stack's minio and minio-bucket services below exist
+      # specifically so the S3 backend is exercised by whoever runs
+      # `docker compose up`, the same reasoning that put MinIO in the CI
+      # pipeline (see .github/workflows/ci.yml) — a backend only ever run
+      # in production is a backend nobody has tested. Pointing api at it
+      # is what makes that true locally too.
+      ATTACHMENT_S3_ENDPOINT: minio:9000
+      ATTACHMENT_S3_BUCKET: task-api-attachments
+      ATTACHMENT_S3_ACCESS_KEY: task_api
+      ATTACHMENT_S3_SECRET_KEY: task_api_secret
+      ATTACHMENT_S3_USE_SSL: "false"
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
+      # Waits for the bucket to actually exist, not just for MinIO to be
+      # reachable — minio-bucket's own depends_on already covers "MinIO
+      # is healthy" (see below), and service_completed_successfully is
+      # what lets api wait one step further, for the one-shot job that
+      # runs after it. Without this, `docker compose up` could start api
+      # and minio-bucket at the same moment MinIO reports healthy, and
+      # the first upload would race NewS3BlobStore's own BucketExists
+      # check against mc still creating the bucket.
+      minio-bucket:
+        condition: service_completed_successfully
     # Restart on crash, but stay down after an explicit `docker compose
     # stop` / `down`. The API exits non-zero when it cannot reach
     # PostgreSQL at startup (see openDatabase's Ping), so without this a
