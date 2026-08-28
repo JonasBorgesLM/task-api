@@ -29,7 +29,8 @@ data:
   # cannot do — it is a static binary on scratch, with no shell to exec.
   #
   # terminationGracePeriodSeconds must cover this *plus*
-  # HTTP_SHUTDOWN_TIMEOUT. 5 + 10 < 30. See k8s/40-api.yaml.
+  # HTTP_SHUTDOWN_TIMEOUT *plus* the crier drain budget.
+  # 5 + 10 + 5 = 20 < 30. See k8s/40-api.yaml.
   HTTP_PRE_SHUTDOWN_DELAY: "5s"
 
   # In-cluster DNS: the Services in 10-postgres.yaml and 20-minio.yaml.

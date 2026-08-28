@@ -299,9 +299,13 @@ honesto: o processo sabe que está desligando, e a espera é parte de como
 ele desliga.
 
 **Restrição a manter:** o `terminationGracePeriodSeconds` do orquestrador
-precisa cobrir este atraso **mais** o `HTTP_SHUTDOWN_TIMEOUT`. Hoje
-5 + 10 < 30. Aumentar qualquer um dos dois sem aumentar o grace period é
-como isso volta a quebrar, em silêncio.
+precisa cobrir este atraso **mais** o `HTTP_SHUTDOWN_TIMEOUT` **mais**,
+desde a integração do crier (Fase 11), o orçamento de drain do crier
+que roda depois (`crierShutdownTimeout`, `cmd/api/crier.go`) — `closeAll`
+roda os dois em sequência, nunca em paralelo. Hoje 5 + 10 + 5 = 20 < 30.
+Aumentar qualquer um dos três sem aumentar o grace period é como isso
+volta a quebrar, em silêncio. Ver a seção "Fase 11.7" abaixo para a
+medição real desse orçamento sob carga, não só a aritmética.
 
 ---
 
@@ -555,6 +559,76 @@ melhor gasto verificando o dado em si):
 Recursos de teste (cluster(s) kind descartáveis, imagem
 `task-api:crier-e2e-test`) removidos depois; o stack do SigNoz continua
 rodando na máquina para a issue 11.7 reaproveitar.
+
+---
+
+## Issue 11.7: shutdown sob carga real, drain do crier reconciliado com o SigNoz
+
+`k8s/rollout-test.sh` estendido para, quando encontra um SigNoz rodando
+(`SIGNOZ_UP=true`, mesma detecção da seção acima), reconciliar o que o
+crier reportou ter perdido no drain contra o que de fato chegou ao
+ClickHouse — não só medir requisições HTTP perdidas, que já era o que o
+script fazia.
+
+**Dois pods, não um.** Uma primeira versão só capturava o drain do pod
+que o rollout substitui, deixando os últimos segundos de carga contra o
+pod *novo* — que segue rodando até o script terminar — de fora de
+qualquer contabilidade. Corrigido fazendo o script também desligar esse
+pod final graciosamente (`kubectl delete pod`, o mesmo caminho de
+shutdown de um rollout ou de `kind delete cluster` com Kubernetes real,
+diferente de um `kind delete cluster` puro — que mata os containers sem
+dar chance de shutdown gracioso nenhum) antes de consultar o ClickHouse.
+
+**A divergência apareceu, foi investigada, e a causa raiz não é bug do
+task-api.** Com os dois pods desligados graciosamente e ambos reportando
+`"crier drain completed"` (zero perda), o ClickHouse ainda assim mostrou
+menos registros do que os enviados logo em seguida — 148 de 159 numa
+medição. A causa: `Export()` do exportador OTLP retornar sucesso
+significa apenas que o **receptor OTLP do SigNoz aceitou o lote** (ver o
+doc comment de `exporters/otlp.Exporter.Export`), não que o registro já
+está indexado no ClickHouse — o próprio SigNoz faz seu processamento e
+inserção de forma assíncrona, num ciclo que o crier não enxerga nem
+controla. Confirmado eliminando a divergência com uma espera adicional
+*depois* dos dois drains — 15s, medido, não suposto — e reproduzindo o
+resultado limpo (sent = received, 0 perdas) em duas execuções
+consecutivas com durações de carga diferentes (166/166 com 20s de carga,
+207/207 com 25s).
+
+**O que isso não prova, e é importante dizer:** que o crier nunca perde
+nada. Prova que, nas condições testadas (rede local, sem pressão de
+buffer, sem circuito aberto), o caminho feliz é exato. `DrainSummary`
+continua sendo o mecanismo que conta perda real quando ela acontece — a
+reconciliação aqui é o que verifica, por execução repetida, que esse
+mecanismo bate com a realidade quando diz que não perdeu nada.
+
+**Aritmética do grace period revista** (issue explicitamente pede isto
+junto): com o drain do crier agora parte do `closeAll`,
+`terminationGracePeriodSeconds` precisa cobrir `HTTP_PRE_SHUTDOWN_DELAY`
+(5s) + `HTTP_SHUTDOWN_TIMEOUT` (10s) + `crierShutdownTimeout` (5s) = 20s,
+contra os 30s configurados — folga de 1.5x, contra 3x antes da Fase 11.
+Comentários atualizados em `k8s/40-api.yaml` e `k8s/30-config.yaml` no
+mesmo commit desta seção. Nenhuma das execuções acima chegou perto do
+orçamento de 20s — o shutdown gracioso, com o SigNoz local e saudável,
+levou uma fração de segundo, não o pior caso.
+
+**Um achado à parte, investigado e não confirmado como bug — registrado
+para não se perder.** Numa das primeiras tentativas de criar o cluster
+do zero com o crier já configurado, o pod de `task-api` foi
+`OOMKilled` (limite de 256Mi) nos primeiros segundos, antes de qualquer
+carga real. Comparação direta de RSS local (com e sem
+`CRIER_OTLP_ENDPOINT` configurado) mostrou diferença de menos de 1 MiB —
+não sustenta um vazamento de memória do crier. Repetindo a mesma sequência
+(cluster novo, manifests com o crier já configurado, aplicados a frio)
+mais de uma vez depois, o mesmo pod subiu com o padrão de restart já
+conhecido e documentado deste projeto (`Error`, exit 1 — Postgres ainda
+não pronto no instante em que `task-api` tenta migrar, corrigido
+sozinho pela política de restart do Kubernetes em segundos) — **sem**
+`OOMKilled`, com ou sem o crier configurado. Não foi possível reproduzir
+o OOM sob condições controladas; o mais provável é uma picada
+transitória de memória no host durante criação/remoção rápida e repetida
+de clusters kind nesta máquina de desenvolvimento, não algo que o código
+do crier introduziu. Registrado em vez de descartado, para que uma
+reaparição futura tenha este parágrafo como ponto de partida.
 
 ---
 
