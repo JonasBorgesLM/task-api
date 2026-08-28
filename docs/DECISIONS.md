@@ -316,3 +316,86 @@ resolvida depois de ver a execução real no pipeline (contagem de
 iterações, tempo, resultado). Aplique o mesmo padrão em qualquer issue
 que envolva CI, deploy, ou qualquer configuração que se pretende validar:
 não feche por ter editado o arquivo certo, feche por ter visto rodar.
+
+---
+
+## Delete de anexo: síncrono, não só o coletor
+
+`DELETE /v1/files/{key}` remove a linha de metadado e o blob **na mesma
+requisição** — não apenas a linha, deixando o blob para
+`Service.CollectOrphans` (#46) encontrar no próximo ciclo.
+
+**Os dois caminhos considerados:**
+
+1. **Síncrono** (escolhido): `Service.Delete` remove a linha via
+   `Repository.Delete`, depois chama `BlobStore.Delete` na mesma
+   requisição, best-effort.
+2. **Só o coletor**: `Service.Delete` só remove a linha; o blob vira
+   candidato a órfão e some quando `CollectOrphans` rodar — hoje até
+   `ATTACHMENT_ORPHAN_MIN_AGE` (1h de default) depois.
+
+**Por quê o síncrono:** um `DELETE` que só *agenda* a remoção por até uma
+hora não corresponde ao que o endpoint promete a quem o chama. O coletor
+existe para cobrir o rastro de **falhas** — um upload que gravou o blob e
+morreu antes da linha, um delete cujo passo de blob falhou — não para ser
+o caminho normal de uma operação que o próprio `Service` já tem acesso
+completo a executar de ponta a ponta. É a mesma distinção que já existe no
+próprio código: `CollectOrphans`' doc comment explica que o *cascade* de
+task (`ON DELETE CASCADE` no SQL) não pode limpar blobs porque nada no
+caminho do SQL alcança o filesystem — mas `Service.Delete` não tem essa
+restrição arquitetural: ele já segura tanto `Repository` quanto
+`BlobStore`, exatamente como `Upload` segura os dois.
+
+**Ordem dentro do síncrono — metadado primeiro, blob depois — é o espelho
+deliberado de `Upload`:** `Upload` grava bytes antes da linha porque a
+ordem inversa deixaria uma linha apontando para um arquivo que nunca foi
+escrito — um download que 500 pra sempre, sem indicar por quê. `Delete`
+inverte isso pela mesma razão invertida: remover a linha primeiro faz uma
+falha no passo seguinte (apagar o blob) deixar **um arquivo órfão**, que
+custa disco e nada mais — a alternativa (blob primeiro) deixaria, no
+mesmo cenário de falha, uma linha apontando para um arquivo que já não
+existe, exatamente a forma de referência quebrada que a ordem de `Upload`
+existe para evitar.
+
+**A falha no delete do blob é best-effort, não propagada ao chamador:**
+uma vez que a linha foi removida, o anexo já está fora do alcance do
+chamador (`Download`/`ListByTask` já não o veem) — reportar a requisição
+como falha nesse ponto seria enganoso, o cliente pediu "remova isto" e o
+efeito observável já aconteceu. A falha vira um blob órfão, que
+`CollectOrphans` recolhe no próprio ciclo — o mesmo mecanismo de segurança
+que já protege o lado inverso da falha em `Upload`.
+
+**Idempotência — o que "coerente com `BlobStore.Delete` e `Logout`" da
+issue original significa aqui, e o que não significa:** os dois
+`BlobStore` já são idempotentes por conta própria ("deleting a key that
+is not there is not an error" — `fsBlobStore` e `s3BlobStore`), e isso é
+aproveitado sem código extra: se o blob já tiver sido removido antes por
+qualquer motivo, a chamada best-effort dentro de `Service.Delete` não
+falha por isso. Isso **não** significa que o endpoint HTTP inteiro seja
+idempotente no sentido de `user.Service.Logout` (sucesso silencioso
+sempre, mesmo para um token que nunca existiu) — essa comparação não se
+aplica aqui porque `Logout` não tem verificação de dono formal, enquanto
+`attachment` tem uma invariante mais forte para preservar: **um anexo de
+outro usuário é `ErrNotFound`, nunca sucesso** (a própria issue exige
+isso). Deletar a mesma chave duas vezes segue o mesmo contrato que
+`task.Service.DeleteTask` já estabelece neste projeto: primeira chamada
+sucesso (`204`), segunda chamada `ErrNotFound` (`404`) — porque a linha já
+não existe. Isso ainda é "idempotente" no sentido REST formal (o estado
+final do servidor é o mesmo depois de qualquer número de chamadas), só
+que o código HTTP muda entre a primeira e as seguintes — o mesmo padrão
+já usado em toda parte deste projeto para "delete de um recurso
+identificado por dono".
+
+**Rota — `DELETE /v1/files/{key}`, não `/v1/tasks/{id}/attachments/{key}`
+como a issue original propunha:** o comentário já existente em
+`Handler.RegisterRoutes` explica por que `GET /files/{key}` não é
+aninhado sob `/tasks/{id}` — evita o *confused-deputy shape* em que o
+`{id}` do path e a task real por trás da `{key}` podem discordar, e um
+dos dois é acreditado por engano. A mesma razão vale, sem alteração, para
+o delete: a issue propôs o path aninhado sem levar essa decisão em conta,
+e a decisão já registrada prevalece.
+
+**Trade-off aceito:** a requisição `DELETE` fica um pouco mais lenta (um
+segundo I/O, contra o `BlobStore`, além do `UPDATE`/`DELETE` no banco), e
+ganha um segundo ponto de falha na latência — mas nunca na correção: uma
+falha nesse segundo ponto nunca faz a requisição inteira falhar.

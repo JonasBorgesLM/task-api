@@ -199,6 +199,44 @@ func (s *Service) Download(ctx context.Context, userID, storageKey string) (Atta
 	return att, blob, nil
 }
 
+// Delete removes the attachment identified by storageKey, scoped to
+// userID — the same ownership rule Download enforces: a key leading to
+// somebody else's task is reported exactly like a key that names
+// nothing, ErrNotFound either way.
+//
+// # Order: metadata row first, then the blob — deliberately the mirror
+// of Upload
+//
+// Upload writes bytes before the row, because the reverse leaves a row
+// pointing at a file that was never written — a download that 500s
+// forever. Delete inverts that for the same reason inverted: removing
+// the row first means a failure on the step that follows (deleting the
+// blob) leaves an orphaned file, which costs disk and nothing else — the
+// row-first alternative would instead leave a row pointing at a file
+// that is already gone, exactly the broken-reference shape Upload's
+// ordering exists to avoid in the first place. See docs/DECISIONS.md §
+// "Delete de anexo: síncrono, não só o coletor" for the fuller
+// reasoning, including why this doesn't just leave the blob for
+// CollectOrphans (#46) to find on its own schedule.
+//
+// # The blob delete is best-effort
+//
+// Once the row is gone, the attachment is already gone from the
+// caller's perspective — Download and ListByTask stop seeing it. A
+// failure removing the underlying blob doesn't change that, so it is
+// not reported to the caller as a failed delete; it leaves an orphan
+// that CollectOrphans reclaims on its own schedule, the same safety net
+// Upload's cleanup relies on for the failure it can't fully undo either.
+func (s *Service) Delete(ctx context.Context, userID, storageKey string) error {
+	if err := s.repo.Delete(ctx, storageKey, userID); err != nil {
+		return fmt.Errorf("delete attachment: %w", err)
+	}
+
+	_ = s.blobs.Delete(ctx, storageKey)
+
+	return nil
+}
+
 // ListByTask returns every attachment on taskID, which must belong to
 // userID.
 func (s *Service) ListByTask(ctx context.Context, userID, taskID string) ([]Attachment, error) {

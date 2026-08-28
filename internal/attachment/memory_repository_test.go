@@ -223,3 +223,88 @@ func TestNewMemoryRepository_PanicsWithoutOwnershipCheck(t *testing.T) {
 	}()
 	NewMemoryRepository(nil)
 }
+
+// --- Delete ---
+
+func TestMemory_Delete_RemovesTheRow(t *testing.T) {
+	repo := newTestRepo(t)
+	if err := repo.Create(context.Background(), testAttachment("a1", "key-1", ownedTaskID), ownerID); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	if err := repo.Delete(context.Background(), "key-1", ownerID); err != nil {
+		t.Fatalf("Delete() unexpected error: %v", err)
+	}
+
+	if _, err := repo.FindByStorageKey(context.Background(), "key-1", ownerID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("FindByStorageKey() after Delete() = %v, want ErrNotFound", err)
+	}
+}
+
+// TestMemory_Delete_OnSomeoneElsesTask_IsNotFound pins the ownership
+// rule this method promises: a key resolving to another user's task is
+// reported exactly like a key that names nothing, and nothing is
+// removed.
+func TestMemory_Delete_OnSomeoneElsesTask_IsNotFound(t *testing.T) {
+	repo := newTestRepo(t)
+	if err := repo.Create(context.Background(), testAttachment("a1", "key-1", ownedTaskID), ownerID); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	if err := repo.Delete(context.Background(), "key-1", strangerID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() by a non-owner = %v, want ErrNotFound", err)
+	}
+
+	// And it is still there for the real owner.
+	if _, err := repo.FindByStorageKey(context.Background(), "key-1", ownerID); err != nil {
+		t.Errorf("FindByStorageKey() after a refused Delete() unexpected error: %v", err)
+	}
+}
+
+func TestMemory_Delete_UnknownKey_IsNotFound(t *testing.T) {
+	repo := newTestRepo(t)
+
+	if err := repo.Delete(context.Background(), "nope", ownerID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestMemory_Delete_Twice_SecondCallIsNotFound documents Repository's
+// own contract at this layer: deleting an already-deleted key is
+// ErrNotFound, not a silent success. Service is what may choose to
+// present a second delete differently to a caller — see Service.Delete's
+// doc comment.
+func TestMemory_Delete_Twice_SecondCallIsNotFound(t *testing.T) {
+	repo := newTestRepo(t)
+	if err := repo.Create(context.Background(), testAttachment("a1", "key-1", ownedTaskID), ownerID); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+	if err := repo.Delete(context.Background(), "key-1", ownerID); err != nil {
+		t.Fatalf("first Delete() unexpected error: %v", err)
+	}
+
+	if err := repo.Delete(context.Background(), "key-1", ownerID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second Delete() = %v, want ErrNotFound", err)
+	}
+}
+
+// TestMemory_Delete_DoesNotAffectOtherAttachments guards the lookup
+// itself: deleting one key must not disturb another row that happens to
+// share a task or an owner.
+func TestMemory_Delete_DoesNotAffectOtherAttachments(t *testing.T) {
+	repo := newTestRepo(t)
+	if err := repo.Create(context.Background(), testAttachment("a1", "key-1", ownedTaskID), ownerID); err != nil {
+		t.Fatalf("Create(a1) unexpected error: %v", err)
+	}
+	if err := repo.Create(context.Background(), testAttachment("a2", "key-2", ownedTaskID), ownerID); err != nil {
+		t.Fatalf("Create(a2) unexpected error: %v", err)
+	}
+
+	if err := repo.Delete(context.Background(), "key-1", ownerID); err != nil {
+		t.Fatalf("Delete() unexpected error: %v", err)
+	}
+
+	if _, err := repo.FindByStorageKey(context.Background(), "key-2", ownerID); err != nil {
+		t.Errorf("FindByStorageKey(key-2) after deleting key-1 unexpected error: %v", err)
+	}
+}

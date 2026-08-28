@@ -417,3 +417,123 @@ func (r *keyFilteringRepo) UnreferencedKeys(ctx context.Context, keys []string) 
 }
 
 var uuidLike = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// --- Delete ---
+
+// failingDeleteStore wraps a real BlobStore so Delete always fails,
+// letting a test observe Service.Delete's best-effort handling of that
+// failure without needing a real storage backend to break on demand.
+type failingDeleteStore struct {
+	BlobStore
+	deleteCalledWith string
+}
+
+func (s *failingDeleteStore) Delete(_ context.Context, key string) error {
+	s.deleteCalledWith = key
+	return errors.New("simulated blob store failure")
+}
+
+func TestDelete_RemovesMetadataAndBlob(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, store, 1024)
+
+	att, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "photo.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("Upload() unexpected error: %v", err)
+	}
+
+	if err := svc.Delete(context.Background(), ownerID, att.StorageKey); err != nil {
+		t.Fatalf("Delete() unexpected error: %v", err)
+	}
+
+	if _, _, err := svc.Download(context.Background(), ownerID, att.StorageKey); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Download() after Delete() error = %v, want ErrNotFound", err)
+	}
+	if _, err := store.Open(context.Background(), att.StorageKey); !errors.Is(err, ErrNotFound) {
+		t.Errorf("blob store Open() after Delete() error = %v, want ErrNotFound — the blob should be gone too", err)
+	}
+}
+
+// TestDelete_OnSomeoneElsesAttachment_IsNotFound covers the ownership
+// rule at the Service layer: a stranger's Delete must fail, and must
+// touch neither the row nor the blob.
+func TestDelete_OnSomeoneElsesAttachment_IsNotFound(t *testing.T) {
+	store := newTestStore(t)
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, store, 1024)
+
+	att, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "photo.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("Upload() unexpected error: %v", err)
+	}
+
+	if err := svc.Delete(context.Background(), strangerID, att.StorageKey); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() by a non-owner error = %v, want ErrNotFound", err)
+	}
+
+	// Still there, for the real owner.
+	if _, _, err := svc.Download(context.Background(), ownerID, att.StorageKey); err != nil {
+		t.Errorf("Download() after a refused Delete() unexpected error: %v", err)
+	}
+}
+
+func TestDelete_UnknownKey_IsNotFound(t *testing.T) {
+	svc, _ := newServiceUnderTest(t)
+
+	if err := svc.Delete(context.Background(), ownerID, "does-not-exist"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDelete_Twice_SecondCallIsNotFound is the Service-level shape of
+// idempotency this package settled on: not a silent no-op (as
+// user.Service.Logout is for an unknown token), but ErrNotFound on the
+// second call — the same contract task.Service.DeleteTask already has.
+// The two callers converge on the client-observable outcome that matters
+// (the resource is gone either way), and DECISIONS.md records why a
+// second call isn't instead treated as success.
+func TestDelete_Twice_SecondCallIsNotFound(t *testing.T) {
+	svc, _ := newServiceUnderTest(t)
+
+	att, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "photo.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("Upload() unexpected error: %v", err)
+	}
+	if err := svc.Delete(context.Background(), ownerID, att.StorageKey); err != nil {
+		t.Fatalf("first Delete() unexpected error: %v", err)
+	}
+
+	if err := svc.Delete(context.Background(), ownerID, att.StorageKey); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second Delete() error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDelete_BlobDeleteFails_StillSucceeds is the test that would have
+// failed if the blob cleanup were not best-effort: with the row already
+// gone (the client-observable half of "deleted"), a failure removing the
+// underlying bytes must not turn a successful delete into an error
+// response — see Service.Delete's doc comment and DECISIONS.md for why.
+func TestDelete_BlobDeleteFails_StillSucceeds(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	failing := &failingDeleteStore{BlobStore: newTestStore(t)}
+	svc := NewService(repo, failing, 1024)
+
+	att, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "photo.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("Upload() unexpected error: %v", err)
+	}
+
+	if err := svc.Delete(context.Background(), ownerID, att.StorageKey); err != nil {
+		t.Errorf("Delete() with a failing blob store: unexpected error %v, want nil (best-effort blob cleanup)", err)
+	}
+	if failing.deleteCalledWith != att.StorageKey {
+		t.Errorf("blob store Delete() called with %q, want %q — Delete() must still attempt the blob cleanup", failing.deleteCalledWith, att.StorageKey)
+	}
+
+	// The metadata row is gone regardless of the blob failure — that's
+	// what "removed the metadata row first" means observably.
+	if _, _, err := svc.Download(context.Background(), ownerID, att.StorageKey); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Download() after Delete() (blob cleanup failed) error = %v, want ErrNotFound", err)
+	}
+}

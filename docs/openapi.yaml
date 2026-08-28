@@ -996,6 +996,59 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+    delete:
+      tags: [Attachments]
+      operationId: deleteAttachment
+      summary: Delete an attachment
+      description: >
+        Removes both the metadata row and the underlying file, in the
+        same request — not deferred to the orphan collector's own
+        schedule. See docs/DECISIONS.md § "Delete de anexo: síncrono, não
+        só o coletor" for the full reasoning, including why a second
+        delete of the same key returns 404 rather than a silent 204.
+
+
+        Ownership follows the same rule as download: a key belonging to
+        another user's task is answered exactly like a key that names
+        nothing. No request body.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: The attachment's `storage_key`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Attachment deleted successfully. No response body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >
+            No attachment with this key for this user — covering a key
+            that names nothing, one belonging to somebody else, or one
+            already deleted (by this call or an earlier one) — or
+            attachments are disabled.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: attachment not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /debug/vars:
     get:
       tags: [Observability]
