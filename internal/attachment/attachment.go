@@ -38,9 +38,12 @@ type Attachment struct {
 	// this row and re-checks that the caller owns the task it hangs off.
 	StorageKey string `json:"storage_key"`
 
-	// ContentType is what the upload declared. It is stored so a
-	// download can echo it back, not because it is a trustworthy
-	// statement about the bytes — a client can declare anything.
+	// ContentType is what Service.Upload detected from the bytes
+	// themselves (http.DetectContentType), never what the client
+	// declared — see validateTitleAndDescription's sibling,
+	// detectContentType, for why: a client-declared header would make
+	// the upload allow-list decorative. It is stored so a download can
+	// echo back the type the server actually determined.
 	ContentType string `json:"content_type"`
 
 	// SizeBytes is the size of the stored blob, as measured while
