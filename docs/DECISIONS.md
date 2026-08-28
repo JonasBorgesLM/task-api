@@ -316,3 +316,55 @@ resolvida depois de ver a execução real no pipeline (contagem de
 iterações, tempo, resultado). Aplique o mesmo padrão em qualquer issue
 que envolva CI, deploy, ou qualquer configuração que se pretende validar:
 não feche por ter editado o arquivo certo, feche por ter visto rodar.
+
+---
+
+## `startupProbe` cobre a migration lenta; Job separado foi rejeitado
+
+`k8s/40-api.yaml` ganhou um `startupProbe` em `/health`, à frente de
+`readinessProbe`/`livenessProbe`. `cmd/api` aplica migrations pendentes
+dentro de `openDatabase` — **antes** de `ListenAndServe` — então até isso
+terminar o processo não escuta em porta nenhuma; sem esse probe, o
+orçamento de liveness sozinho (`initialDelaySeconds: 5` + `periodSeconds:
+10` × `failureThreshold: 3` ≈ 35s) era o teto real para qualquer migration,
+e uma que passasse disso derrubava o pod no meio da migration — o
+seguinte reiniciava no mesmo ponto, crash loop.
+
+**Alternativa considerada:** `DB_AUTO_MIGRATE=false` no `Deployment`, com
+um `Job` separado de `cmd/migrate` rodando antes dele.
+
+**Por que `startupProbe` em vez do `Job`:** `k8s/` deste projeto é
+deliberadamente `kubectl apply -f k8s/` puro — sem Helm, sem ArgoCD, sem
+qualquer ferramenta que garanta ordem entre recursos. Sem um hook de
+release, nada impede o novo `ReplicaSet` do `Deployment` de começar a
+subir antes de o `Job` terminar; garantir a ordem exigiria um passo manual
+de dois comandos (`kubectl apply job.yaml && kubectl wait ... && kubectl
+apply deployment.yaml`) — risco real de rodar fora de ordem, para um
+projeto que já se descreve como cluster de validação descartável, não
+como alvo de produção. `startupProbe` é o mecanismo que o próprio
+Kubernetes oferece exatamente para esse formato de problema (GA desde a
+1.20): nenhum recurso novo, nenhuma orquestração de ordem, e a falha
+continua correta — uma migration que realmente quebra ainda derruba o
+processo (`os.Exit(1)` a partir de `run()`), então o `Job` não teria
+comprado uma detecção de falha melhor, só uma complexidade a mais.
+
+`150 * periodSeconds(2s) = 300s` (5 minutos) é deliberadamente generoso —
+não medido contra nenhuma migration existente hoje (as sete atuais rodam
+em frações de segundo), é um teto para uma migration que ainda não foi
+escrita. Depois que o `startupProbe` sucede uma vez, ele para de rodar
+para sempre, e é aí que `readinessProbe`/`livenessProbe` assumem — o
+`initialDelaySeconds: 5` do liveness passa a contar a partir desse
+momento, não do início do container.
+
+**Trade-off aceito, e um limite real:** um `SIGTERM` recebido durante a
+migration não a interrompe — `migrateCtx` em `cmd/api/main.go` é derivado
+de `context.Background()`, não do `ctx` de sinal que `run()` recebe, então
+o processo só reage ao sinal depois que a migration terminar (sucesso,
+erro, ou seu próprio timeout de 30s). Isso já era assim antes desta
+mudança; o `startupProbe` só dá ao operador mais folga antes de decidir
+matar o pod, não muda o que acontece depois que decide. Não é escopo desta
+decisão corrigir — fica registrado para quem for mexer em
+`RunMigrations`/`openDatabase` depois.
+
+**Validado com o `k8s/rollout-test.sh` existente**, não só lido no
+manifest — ver o resultado real na issue/PR que introduziu esta decisão.

@@ -38,11 +38,19 @@ zero-downtime rather than merely fast.
 ## Startup
 
 `cmd/api` runs migrations **before** it starts listening (`DB_AUTO_MIGRATE`), so
-during a slow migration neither probe can connect. The liveness budget
-(`initialDelaySeconds` + `periodSeconds` × `failureThreshold`) is what the
-migration has to finish inside, or the pod is killed mid-migration and restarts
-into a loop. A migration that could exceed it needs a `startupProbe`, or
-`DB_AUTO_MIGRATE=false` plus a `cmd/migrate` Job.
+during a slow migration no probe can connect at all — connections are refused,
+not answered with a failing status. `startupProbe` (`/health`, `150 ×
+2s` = 5 minutes) owns that window; `readinessProbe`/`livenessProbe` only start
+running once it has succeeded, and their own `initialDelaySeconds` counts from
+that moment, not from container start. Don't shrink the migration budget by
+folding it back into liveness's `initialDelaySeconds` — that reintroduces the
+mid-migration kill this probe exists to prevent.
+
+**`DB_AUTO_MIGRATE=false` plus a separate `cmd/migrate` Job was considered and
+rejected** — see `docs/DECISIONS.md` § "`startupProbe` cobre a migration
+lenta". This repo's `k8s/` has no release tool (no Helm, no ArgoCD) to
+guarantee a Job completes before the Deployment it would gate; don't introduce
+one without discussing it first.
 
 ## Container constraints
 
