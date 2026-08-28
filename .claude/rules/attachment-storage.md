@@ -1,7 +1,7 @@
 ---
 paths:
   - 'internal/attachment/**'
-description: 'Upload/download safety invariants: detected content type, server-generated keys, bytes-before-metadata, pathguard'
+description: 'Upload/download/delete safety invariants: detected content type, server-generated keys, bytes-before-metadata (and its mirror on delete), pathguard'
 ---
 
 # Attachments
@@ -41,6 +41,30 @@ error, never the cleanup one.
 The orphan collector's `minAge` is not optional and must exceed the longest
 plausible gap between those two steps: inside that window a healthy in-flight
 upload is indistinguishable from an orphan.
+
+## Delete order
+
+The mirror of Write order, deliberately: `Service.Delete` removes the metadata
+row **first**, then the blob. A failure on the second step leaves an orphaned
+file — cheap, and `CollectOrphans` reclaims it. The reverse would leave a row
+pointing at a file that is already gone, the broken-reference shape Write order
+exists to avoid.
+
+The blob delete is **best-effort** — its failure is never returned to the
+caller. Once the row is gone, the attachment is already gone from the caller's
+perspective; reporting a failure at that point would be misleading, not
+accurate. See `docs/DECISIONS.md` § "Delete de anexo: síncrono, não só o
+coletor".
+
+Deleting an already-deleted key is `ErrNotFound`, not a silent success —
+matching `task.Service.DeleteTask`'s contract, not `user.Service.Logout`'s.
+Attachment ownership must stay checkable (another user's key is `ErrNotFound`,
+never success), which `Logout`'s "no ownership at all" idempotency model
+doesn't preserve.
+
+`DELETE /files/{key}` mirrors `GET /files/{key}`'s path shape for the same
+reason: nesting under `/tasks/{id}/attachments/{key}` invites the
+confused-deputy shape where the path's task and the key's real task disagree.
 
 ## Download
 

@@ -25,14 +25,18 @@ type fakeRepository struct {
 	findUserByIDUser User
 	findUserByIDErr  error
 
-	createSessionErr error
-	savedSession     Session
+	createSessionErr        error
+	savedSession            Session
+	createSessionCalledWith int // maxSessions passed to CreateSession
 
 	findSessionByHashSession Session
 	findSessionByHashErr     error
 
 	deleteSessionErr error
 	deletedTokenHash string
+
+	deleteSessionsForUserErr        error
+	deleteSessionsForUserCalledWith string
 
 	deleteExpiredSessionsErr        error
 	deleteExpiredSessionsCalledWith time.Time
@@ -52,9 +56,15 @@ func (f *fakeRepository) FindUserByID(_ context.Context, _ string) (User, error)
 	return f.findUserByIDUser, f.findUserByIDErr
 }
 
-func (f *fakeRepository) CreateSession(_ context.Context, s Session) error {
+func (f *fakeRepository) CreateSession(_ context.Context, s Session, maxSessions int) error {
 	f.savedSession = s
+	f.createSessionCalledWith = maxSessions
 	return f.createSessionErr
+}
+
+func (f *fakeRepository) DeleteSessionsForUser(_ context.Context, userID string) error {
+	f.deleteSessionsForUserCalledWith = userID
+	return f.deleteSessionsForUserErr
 }
 
 func (f *fakeRepository) FindSessionByTokenHash(_ context.Context, _ string) (Session, error) {
@@ -87,7 +97,7 @@ func mustHash(t *testing.T, password string) string {
 
 func TestRegister_Valid(t *testing.T) {
 	repo := &fakeRepository{}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	got, err := svc.Register(context.Background(), "user@example.com", "password123")
 	if err != nil {
@@ -112,7 +122,7 @@ func TestRegister_Valid(t *testing.T) {
 }
 
 func TestRegister_TrimsEmail(t *testing.T) {
-	svc := NewService(&fakeRepository{}, testSessionTTL)
+	svc := NewService(&fakeRepository{}, testSessionTTL, unlimitedSessions)
 
 	got, err := svc.Register(context.Background(), "  user@example.com  ", "password123")
 	if err != nil {
@@ -136,7 +146,7 @@ func TestRegister_InvalidEmail(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := NewService(&fakeRepository{}, testSessionTTL)
+			svc := NewService(&fakeRepository{}, testSessionTTL, unlimitedSessions)
 
 			_, err := svc.Register(context.Background(), tc.email, "password123")
 			if !errors.Is(err, ErrInvalidInput) {
@@ -157,7 +167,7 @@ func TestRegister_InvalidPassword(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := NewService(&fakeRepository{}, testSessionTTL)
+			svc := NewService(&fakeRepository{}, testSessionTTL, unlimitedSessions)
 
 			_, err := svc.Register(context.Background(), "user@example.com", tc.password)
 			if !errors.Is(err, ErrInvalidInput) {
@@ -174,7 +184,7 @@ func TestRegister_InvalidPassword(t *testing.T) {
 // accounts differing only in case.
 func TestRegister_NormalizesEmailCase(t *testing.T) {
 	repo := &fakeRepository{}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	got, err := svc.Register(context.Background(), "User@Example.COM", "password123")
 	if err != nil {
@@ -190,7 +200,7 @@ func TestRegister_NormalizesEmailCase(t *testing.T) {
 
 func TestRegister_DuplicateEmail(t *testing.T) {
 	repo := &fakeRepository{createUserErr: ErrAlreadyExists}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	_, err := svc.Register(context.Background(), "user@example.com", "password123")
 	if !errors.Is(err, ErrAlreadyExists) {
@@ -203,7 +213,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 func TestAuthenticate_Valid(t *testing.T) {
 	stored := User{ID: "u1", Email: "user@example.com", PasswordHash: mustHash(t, "password123")}
 	repo := &fakeRepository{findUserByEmailUser: stored}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	got, err := svc.Authenticate(context.Background(), "user@example.com", "password123")
 	if err != nil {
@@ -217,7 +227,7 @@ func TestAuthenticate_Valid(t *testing.T) {
 func TestAuthenticate_WrongPassword(t *testing.T) {
 	stored := User{ID: "u1", Email: "user@example.com", PasswordHash: mustHash(t, "password123")}
 	repo := &fakeRepository{findUserByEmailUser: stored}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	_, err := svc.Authenticate(context.Background(), "user@example.com", "wrong-password")
 	if !errors.Is(err, ErrInvalidCredentials) {
@@ -233,7 +243,7 @@ func TestAuthenticate_WrongPassword(t *testing.T) {
 // ErrInvalidCredentials either way.
 func TestAuthenticate_UnknownEmail(t *testing.T) {
 	repo := &fakeRepository{findUserByEmailErr: ErrNotFound}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	_, err := svc.Authenticate(context.Background(), "nobody@example.com", "password123")
 	if !errors.Is(err, ErrInvalidCredentials) {
@@ -247,7 +257,7 @@ func TestAuthenticate_UnknownEmail(t *testing.T) {
 // Register stored.
 func TestAuthenticate_NormalizesEmailCase(t *testing.T) {
 	repo := &fakeRepository{}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	if _, err := svc.Authenticate(context.Background(), "  User@Example.COM  ", "password123"); err != nil && !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("Authenticate() unexpected error: %v", err)
@@ -261,7 +271,7 @@ func TestAuthenticate_NormalizesEmailCase(t *testing.T) {
 
 func TestCreateSession_ReturnsTokenAndPersistsOnlyItsHash(t *testing.T) {
 	repo := &fakeRepository{}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	token, expiresAt, err := svc.CreateSession(context.Background(), "u1")
 	if err != nil {
@@ -288,7 +298,7 @@ func TestCreateSession_ReturnsTokenAndPersistsOnlyItsHash(t *testing.T) {
 func TestCreateSession_RepositoryError(t *testing.T) {
 	repoErr := errors.New("storage failure")
 	repo := &fakeRepository{createSessionErr: repoErr}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	_, _, err := svc.CreateSession(context.Background(), "u1")
 	if !errors.Is(err, repoErr) {
@@ -302,7 +312,7 @@ func TestValidateToken_Valid(t *testing.T) {
 	repo := &fakeRepository{
 		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
 	}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	userID, err := svc.ValidateToken(context.Background(), "sometoken")
 	if err != nil {
@@ -321,7 +331,7 @@ func TestValidateToken_Expired(t *testing.T) {
 			ExpiresAt: time.Now().Add(-time.Minute),
 		},
 	}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	_, err := svc.ValidateToken(context.Background(), "sometoken")
 	if !errors.Is(err, ErrNotFound) {
@@ -334,7 +344,7 @@ func TestValidateToken_Expired(t *testing.T) {
 
 func TestValidateToken_Unknown(t *testing.T) {
 	repo := &fakeRepository{findSessionByHashErr: ErrNotFound}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	_, err := svc.ValidateToken(context.Background(), "sometoken")
 	if !errors.Is(err, ErrNotFound) {
@@ -346,7 +356,7 @@ func TestValidateToken_Unknown(t *testing.T) {
 
 func TestLogout_DeletesSessionByHash(t *testing.T) {
 	repo := &fakeRepository{}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	if err := svc.Logout(context.Background(), "sometoken"); err != nil {
 		t.Fatalf("Logout() unexpected error: %v", err)
@@ -359,7 +369,7 @@ func TestLogout_DeletesSessionByHash(t *testing.T) {
 func TestLogout_RepositoryError(t *testing.T) {
 	repoErr := errors.New("storage failure")
 	repo := &fakeRepository{deleteSessionErr: repoErr}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	err := svc.Logout(context.Background(), "sometoken")
 	if !errors.Is(err, repoErr) {
@@ -367,11 +377,36 @@ func TestLogout_RepositoryError(t *testing.T) {
 	}
 }
 
+// --- LogoutAll ---
+
+func TestLogoutAll_DeletesEverySessionForUser(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	if err := svc.LogoutAll(context.Background(), "u1"); err != nil {
+		t.Fatalf("LogoutAll() unexpected error: %v", err)
+	}
+	if repo.deleteSessionsForUserCalledWith != "u1" {
+		t.Errorf("LogoutAll() called DeleteSessionsForUser with %q, want %q", repo.deleteSessionsForUserCalledWith, "u1")
+	}
+}
+
+func TestLogoutAll_RepositoryError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	repo := &fakeRepository{deleteSessionsForUserErr: repoErr}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.LogoutAll(context.Background(), "u1")
+	if !errors.Is(err, repoErr) {
+		t.Errorf("LogoutAll() repository error = %v, want %v", err, repoErr)
+	}
+}
+
 // --- GetUser ---
 
 func TestGetUser_Delegates(t *testing.T) {
 	repo := &fakeRepository{findUserByIDUser: User{ID: "u1", Email: "user@example.com"}}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	got, err := svc.GetUser(context.Background(), "u1")
 	if err != nil {
@@ -384,7 +419,7 @@ func TestGetUser_Delegates(t *testing.T) {
 
 func TestGetUser_NotFound(t *testing.T) {
 	repo := &fakeRepository{findUserByIDErr: ErrNotFound}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	_, err := svc.GetUser(context.Background(), "nonexistent")
 	if !errors.Is(err, ErrNotFound) {
@@ -396,7 +431,7 @@ func TestGetUser_NotFound(t *testing.T) {
 
 func TestPruneExpiredSessions_Delegates(t *testing.T) {
 	repo := &fakeRepository{}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	before := time.Now()
 	if err := svc.PruneExpiredSessions(context.Background()); err != nil {
@@ -413,7 +448,7 @@ func TestPruneExpiredSessions_Delegates(t *testing.T) {
 func TestPruneExpiredSessions_RepositoryError(t *testing.T) {
 	repoErr := errors.New("storage failure")
 	repo := &fakeRepository{deleteExpiredSessionsErr: repoErr}
-	svc := NewService(repo, testSessionTTL)
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
 
 	err := svc.PruneExpiredSessions(context.Background())
 	if !errors.Is(err, repoErr) {
@@ -427,7 +462,7 @@ func TestPruneExpiredSessions_RepositoryError(t *testing.T) {
 func TestRegister_RejectsAddressesTheOldCheckAccepted(t *testing.T) {
 	for _, email := range []string{"@", "a@", "@b", "@example.com", "user@", "user@@example.com"} {
 		t.Run(email, func(t *testing.T) {
-			svc := NewService(&fakeRepository{}, testSessionTTL)
+			svc := NewService(&fakeRepository{}, testSessionTTL, unlimitedSessions)
 
 			_, err := svc.Register(context.Background(), email, "password12345")
 			if !errors.Is(err, ErrInvalidInput) {
@@ -448,7 +483,7 @@ func TestRegister_AcceptsOrdinaryAddresses(t *testing.T) {
 		"user_name@sub.example.org",
 	} {
 		t.Run(email, func(t *testing.T) {
-			svc := NewService(&fakeRepository{}, testSessionTTL)
+			svc := NewService(&fakeRepository{}, testSessionTTL, unlimitedSessions)
 
 			if _, err := svc.Register(context.Background(), email, "password12345"); err != nil {
 				t.Errorf("Register(%q) unexpected error: %v", email, err)
@@ -462,7 +497,7 @@ func TestRegister_AcceptsOrdinaryAddresses(t *testing.T) {
 // attacker-controlled input back is a reflection primitive once it lands
 // in a log or a response body.
 func TestRegister_EmailErrorDoesNotEchoTheInput(t *testing.T) {
-	svc := NewService(&fakeRepository{}, testSessionTTL)
+	svc := NewService(&fakeRepository{}, testSessionTTL, unlimitedSessions)
 
 	const hostile = "<script>alert(1)</script>"
 

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -10,9 +11,9 @@ import (
 )
 
 // Logging returns a Middleware that records exactly one structured log
-// line per request: HTTP method, path, response status, duration, and the
+// line per request: HTTP method, path, response status, duration, the
 // request ID set by RequestID (empty if RequestID is not earlier in the
-// chain).
+// chain), and — when the request authenticated — the caller's user ID.
 //
 // The log level reflects the outcome — Info for 2xx/3xx, Warn for 4xx,
 // Error for 5xx — and an "error" field (the HTTP status text) is added
@@ -23,10 +24,48 @@ import (
 // Request and response bodies are never logged: they may carry task
 // titles/descriptions that a caller wouldn't expect to end up in server
 // logs, and logging them would add far more risk than diagnostic value.
+//
+// # Why user_id needs a pointer, not a second context.WithValue
+//
+// Ownership is the invariant this whole codebase is built around, so
+// "which user touched this request" belongs on the one log line every
+// request produces. The obstacle is ordering: authentication
+// (user.RequireAuth) is wired per-route, inside each domain's
+// RegisterRoutes — see cmd/api/main.go's newServer — so it runs *after*
+// Logging's own next.ServeHTTP call is already in flight, not before it.
+// By the time RequireAuth calls context.WithValue to add the user ID,
+// Logging is holding a *http.Request from earlier in the chain, and
+// context.WithValue returns a *new* context bound to a *new* Request —
+// visible only to whatever RequireAuth itself calls next, never to the
+// outer frame already waiting on next.ServeHTTP to return.
+//
+// A pointer sidesteps that: Logging stashes one, empty, in the context
+// before calling next. context.WithValue's *binding* can't be observed
+// from the outside after the fact, but the string the pointer targets
+// can still be written through it — which is exactly what
+// RecordUserIDForLog (auth_context.go) does from inside RequireAuth.
+// Safe without synchronization because a single request's middleware
+// chain runs sequentially on one goroutine; nothing here fans out.
+type userIDForLogKeyType struct{}
+
+var userIDForLogKey = userIDForLogKeyType{}
+
+// contextWithUserIDForLog returns a copy of ctx carrying a pointer to an
+// empty string, and that same pointer. See Logging's doc comment for why
+// a pointer, rather than a value read back later with context.Value, is
+// what this needs.
+func contextWithUserIDForLog(ctx context.Context) (context.Context, *string) {
+	userID := new(string)
+	return context.WithValue(ctx, userIDForLogKey, userID), userID
+}
+
 func Logging(logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+
+			ctx, userID := contextWithUserIDForLog(r.Context())
+			r = r.WithContext(ctx)
 
 			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 			next.ServeHTTP(rec, r)
@@ -38,6 +77,9 @@ func Logging(logger *slog.Logger) Middleware {
 				"status", rec.status,
 				"duration", time.Since(start).String(),
 				"request_id", requestID,
+			}
+			if *userID != "" {
+				attrs = append(attrs, "user_id", *userID)
 			}
 
 			level := slog.LevelInfo
@@ -71,6 +113,14 @@ func (rec *statusRecorder) WriteHeader(code int) {
 		rec.wroteHeader = true
 	}
 	rec.ResponseWriter.WriteHeader(code)
+}
+
+// HeaderWritten reports whether WriteHeader (directly, or implicitly via
+// the first Write — see Write below) has already run. Recovery uses this
+// to decide whether it may still write its own error response after a
+// panic, or whether the handler already committed one.
+func (rec *statusRecorder) HeaderWritten() bool {
+	return rec.wroteHeader
 }
 
 func (rec *statusRecorder) Write(b []byte) (int, error) {

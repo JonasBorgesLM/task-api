@@ -126,6 +126,61 @@ func (r *postgresRepository) FindByStorageKey(ctx context.Context, storageKey, u
 	return att, nil
 }
 
+// Delete removes the attachment with the given storageKey. The DELETE's
+// own WHERE clause joins through tasks (via USING, PostgreSQL's syntax
+// for a join inside a DELETE), the same way Create's INSERT ... SELECT
+// and the two FindBy* queries above reach ownership — one statement,
+// not a lookup followed by a delete, so there is no window between
+// deciding a row is deletable and removing it.
+func (r *postgresRepository) Delete(ctx context.Context, storageKey, userID string) error {
+	const query = `
+		DELETE FROM attachments a
+		USING tasks t
+		WHERE a.task_id = t.id
+		  AND a.storage_key = $1::uuid
+		  AND t.user_id = $2::uuid
+	`
+
+	result, err := r.db.ExecContext(ctx, query, storageKey, userID)
+	if err != nil {
+		return fmt.Errorf("postgres: delete attachment: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("postgres: delete attachment: %w", err)
+	}
+	if affected == 0 {
+		// Covers "no such key" and "a key belonging to someone else",
+		// same as FindByStorageKey — and "already deleted", since by
+		// definition nothing matches the WHERE clause after the row is
+		// gone.
+		return ErrNotFound
+	}
+
+	return nil
+}
+
+// TotalBytesForUser sums size_bytes across every attachment owned
+// through the user's tasks, in one aggregate query — the same join
+// shape FindByStorageKey and FindByTask use, without the trip through
+// Go to add up what the query itself can.
+func (r *postgresRepository) TotalBytesForUser(ctx context.Context, userID string) (int64, error) {
+	const query = `
+		SELECT COALESCE(SUM(a.size_bytes), 0)
+		FROM attachments a
+		JOIN tasks t ON t.id = a.task_id
+		WHERE t.user_id = $1::uuid
+	`
+
+	var total int64
+	if err := r.db.QueryRowContext(ctx, query, userID).Scan(&total); err != nil {
+		return 0, fmt.Errorf("postgres: total bytes for user: %w", err)
+	}
+
+	return total, nil
+}
+
 func (r *postgresRepository) FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error) {
 	// The ownership check is its own statement here, unlike in the two
 	// methods above, because this one has to tell "your task, no
