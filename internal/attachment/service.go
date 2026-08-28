@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -111,9 +112,21 @@ func (s *Service) Upload(ctx context.Context, userID, taskID, declaredFilename s
 	// back its own prefix. Sniffing needs the head of the stream and the
 	// store needs all of it, and this is what lets both have it without
 	// holding the whole upload in memory.
+	//
+	// A stream shorter than sniffLen is the normal case, not a failure:
+	// io.ReadFull reports io.EOF for an empty reader and
+	// io.ErrUnexpectedEOF for a short one, and both mean "that was all
+	// of it".
+	//
+	// errors.Is here is for uniformity with the rest of the package, not
+	// for safety: io.ReadFull returns both sentinels directly, and a
+	// Reader that wrapped io.EOF would be violating io.Reader's contract
+	// — io.Copy, downstream in every BlobStore, would reject it as a
+	// real error long before this check mattered. Unlike ErrTooLarge
+	// below, where the wrapping case is genuinely reachable.
 	head := make([]byte, sniffLen)
 	n, err := io.ReadFull(r, head)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return Attachment{}, fmt.Errorf("upload attachment: read: %w", err)
 	}
 	head = head[:n]
@@ -147,7 +160,13 @@ func (s *Service) Upload(ctx context.Context, userID, taskID, declaredFilename s
 	// nothing else, and is cleaned up below on the path we can see.
 	size, err := s.blobs.Put(ctx, storageKey, io.MultiReader(bytes.NewReader(head), r), s.maxBytes)
 	if err != nil {
-		if err == ErrTooLarge {
+		// errors.Is, not ==: BlobStore is an interface, and nothing in
+		// its contract says an implementation must return ErrTooLarge
+		// bare. Both current ones happen to, which is exactly what made
+		// == survive here — the day a store wraps it, an upload over the
+		// limit stops being a 400 and becomes a 500, with no test
+		// failing to say so.
+		if errors.Is(err, ErrTooLarge) {
 			return Attachment{}, fmt.Errorf("%w: attachment must be at most %d bytes", ErrInvalidInput, s.maxBytes)
 		}
 		return Attachment{}, fmt.Errorf("upload attachment: %w", err)

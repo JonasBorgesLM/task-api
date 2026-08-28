@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -130,6 +131,41 @@ func TestUpload_RejectsOversized(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("Upload() over the limit: error = %v, want ErrInvalidInput", err)
 	}
+}
+
+// TestUpload_RejectsOversized_ThroughAWrappingStore is the same assertion
+// against a BlobStore that returns ErrTooLarge wrapped rather than bare.
+//
+// Both stores this package ships return it bare, so the previous `==`
+// check passed for years while being wrong: nothing in BlobStore's
+// contract promises a bare sentinel, and the first implementation to add
+// context to its error would have turned every over-the-limit upload from
+// a 400 into a 500, silently, with the whole suite still green. This is
+// the test that would have failed.
+func TestUpload_RejectsOversized_ThroughAWrappingStore(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, &wrappingBlobStore{BlobStore: newTestStore(t)}, 10)
+
+	content := append(append([]byte{}, pngHeader...), bytes.Repeat([]byte("x"), 100)...)
+
+	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "big.png", bytes.NewReader(content))
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("Upload() over the limit through a wrapping store: error = %v, want ErrInvalidInput", err)
+	}
+}
+
+// wrappingBlobStore decorates a BlobStore so Put returns its error
+// wrapped instead of bare — the shape errors.Is handles and == does not.
+type wrappingBlobStore struct {
+	BlobStore
+}
+
+func (s *wrappingBlobStore) Put(ctx context.Context, key string, r io.Reader, maxBytes int64) (int64, error) {
+	n, err := s.BlobStore.Put(ctx, key, r, maxBytes)
+	if err != nil {
+		return n, fmt.Errorf("wrapping store: %w", err)
+	}
+	return n, nil
 }
 
 // TestUpload_OnSomeoneElsesTask_LeavesNoOrphanBlob covers the ordering

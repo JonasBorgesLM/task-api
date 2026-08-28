@@ -73,6 +73,14 @@ func (rec *statusRecorder) WriteHeader(code int) {
 	rec.ResponseWriter.WriteHeader(code)
 }
 
+// HeaderWritten reports whether WriteHeader (directly, or implicitly via
+// the first Write — see Write below) has already run. Recovery uses this
+// to decide whether it may still write its own error response after a
+// panic, or whether the handler already committed one.
+func (rec *statusRecorder) HeaderWritten() bool {
+	return rec.wroteHeader
+}
+
 func (rec *statusRecorder) Write(b []byte) (int, error) {
 	// http.ResponseWriter.Write implicitly sends a 200 status if
 	// WriteHeader hasn't been called yet — mirror that here so the
