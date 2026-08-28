@@ -394,6 +394,93 @@ func TestPostgres_UnreferencedKeys_ScopelessByDesign(t *testing.T) {
 	}
 }
 
+// --- Delete ---
+
+func TestPostgres_Delete_RemovesTheRow(t *testing.T) {
+	repo, db, owner, _, taskID := newPostgresTestRepo(t)
+	att := newPostgresAttachment(t, taskID)
+	if err := repo.Create(context.Background(), att, owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	if err := repo.Delete(context.Background(), att.StorageKey, owner); err != nil {
+		t.Fatalf("Delete() unexpected error: %v", err)
+	}
+
+	if _, err := repo.FindByStorageKey(context.Background(), att.StorageKey, owner); !errors.Is(err, ErrNotFound) {
+		t.Errorf("FindByStorageKey() after Delete() = %v, want ErrNotFound", err)
+	}
+
+	var count int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM attachments`).Scan(&count); err != nil {
+		t.Fatalf("count attachments: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("attachments table has %d rows after Delete, want 0", count)
+	}
+}
+
+// TestPostgres_Delete_OnSomeoneElsesTask_IsNotFound is the SQL half of
+// the ownership rule: the DELETE ... USING tasks join must match no rows
+// for a stranger, and the row must survive for the real owner.
+func TestPostgres_Delete_OnSomeoneElsesTask_IsNotFound(t *testing.T) {
+	repo, _, owner, stranger, taskID := newPostgresTestRepo(t)
+	att := newPostgresAttachment(t, taskID)
+	if err := repo.Create(context.Background(), att, owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	if err := repo.Delete(context.Background(), att.StorageKey, stranger); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() by a non-owner = %v, want ErrNotFound", err)
+	}
+
+	if _, err := repo.FindByStorageKey(context.Background(), att.StorageKey, owner); err != nil {
+		t.Errorf("FindByStorageKey() after a refused Delete() unexpected error: %v", err)
+	}
+}
+
+func TestPostgres_Delete_UnknownKey_IsNotFound(t *testing.T) {
+	repo, _, owner, _, _ := newPostgresTestRepo(t)
+
+	if err := repo.Delete(context.Background(), newUUID(t), owner); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPostgres_Delete_Twice_SecondCallIsNotFound(t *testing.T) {
+	repo, _, owner, _, taskID := newPostgresTestRepo(t)
+	att := newPostgresAttachment(t, taskID)
+	if err := repo.Create(context.Background(), att, owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+	if err := repo.Delete(context.Background(), att.StorageKey, owner); err != nil {
+		t.Fatalf("first Delete() unexpected error: %v", err)
+	}
+
+	if err := repo.Delete(context.Background(), att.StorageKey, owner); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second Delete() = %v, want ErrNotFound", err)
+	}
+}
+
+// TestPostgres_Delete_MalformedKey_IsAQueryError documents Repository's
+// own behavior when called directly with a key that isn't a syntactically
+// valid UUID — the same shape TestPostgres_FindByID_MalformedID pins in
+// internal/task. Whoever wires this into Service is responsible for
+// isValidID (see internal/task/service.go and, once #98 lands, this
+// package's own copy) running first — Repository does not, and should
+// not, guess at that on its own.
+func TestPostgres_Delete_MalformedKey_IsAQueryError(t *testing.T) {
+	repo, _, owner, _, _ := newPostgresTestRepo(t)
+
+	err := repo.Delete(context.Background(), "not-a-uuid", owner)
+	if err == nil {
+		t.Fatal("Delete() with a malformed key: expected an error, got nil")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Error("Delete() with a malformed key: got ErrNotFound, want a query/type error")
+	}
+}
+
 // --- TotalBytesForUser ---
 
 func TestPostgres_TotalBytesForUser_SumsOwnedAttachments(t *testing.T) {

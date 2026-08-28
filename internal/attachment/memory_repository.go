@@ -105,6 +105,51 @@ func (r *memoryRepository) FindByStorageKey(ctx context.Context, storageKey, use
 	return found, nil
 }
 
+// Delete removes the attachment with the given storageKey, scoped to
+// userID via the same ownership check FindByStorageKey uses. The two
+// share it — resolving the key to find what to delete is the same
+// question resolving it to find what to serve is.
+func (r *memoryRepository) Delete(ctx context.Context, storageKey, userID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var (
+		id    string
+		found bool
+	)
+	for existingID, existing := range r.store {
+		if existing.StorageKey == storageKey {
+			id, found = existingID, true
+			break
+		}
+	}
+	if !found {
+		return ErrNotFound
+	}
+
+	// The lock is held across this call, unlike Create's ownership check
+	// above it. Create's comment explains why that matters when the
+	// check can be slow: here the row is about to be removed based on
+	// what the check answers, so releasing the lock in between would let
+	// a concurrent write observe (or itself cause) a state this method
+	// never actually decided on. memoryRepository backs the unit suite,
+	// where ownsTask is fast and synchronous, so the trade is free.
+	owns, err := r.ownsTask(ctx, r.store[id].TaskID, userID)
+	if err != nil {
+		return err
+	}
+	if !owns {
+		return ErrNotFound
+	}
+
+	delete(r.store, id)
+	return nil
+}
+
 func (r *memoryRepository) FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error) {
 	owns, err := r.ownsTask(ctx, taskID, userID)
 	if err != nil {

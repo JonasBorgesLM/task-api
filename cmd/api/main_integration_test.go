@@ -391,10 +391,62 @@ func TestIntegration_DebugVars(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode /debug/vars body: %v", err)
 	}
-	for _, key := range []string{"cmdline", "memstats"} {
+	for _, key := range []string{"cmdline", "memstats", "version", "commit"} {
 		if _, ok := body[key]; !ok {
 			t.Errorf("/debug/vars response is missing expected key %q", key)
 		}
+	}
+}
+
+// TestIntegration_DebugVars_ReportsBuildInfo asserts the actual values
+// under version/commit, not just that the keys exist: a running pod's
+// only way to answer "which commit is this" is /debug/vars (the runtime
+// image excludes .git and strips build paths — see main.go's version/
+// commit doc comment), so this pins that expvar.Func reads the package
+// vars live rather than a value frozen at publish time.
+func TestIntegration_DebugVars_ReportsBuildInfo(t *testing.T) {
+	oldVersion, oldCommit := version, commit
+	version, commit = "v1.2.3-test", "deadbeef"
+	t.Cleanup(func() { version, commit = oldVersion, oldCommit })
+
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+	token := registerAndLogin(t, srv)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/debug/vars", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// memstats/cmdline are not strings (an object and an array,
+	// respectively), so the body as a whole has to decode into
+	// json.RawMessage — same as TestIntegration_DebugVars above — with
+	// version/commit unmarshaled individually.
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /debug/vars body: %v", err)
+	}
+
+	var gotVersion, gotCommit string
+	if err := json.Unmarshal(body["version"], &gotVersion); err != nil {
+		t.Fatalf("decode version field: %v", err)
+	}
+	if err := json.Unmarshal(body["commit"], &gotCommit); err != nil {
+		t.Fatalf("decode commit field: %v", err)
+	}
+
+	if gotVersion != "v1.2.3-test" {
+		t.Errorf("/debug/vars version = %q, want %q", gotVersion, "v1.2.3-test")
+	}
+	if gotCommit != "deadbeef" {
+		t.Errorf("/debug/vars commit = %q, want %q", gotCommit, "deadbeef")
 	}
 }
 
@@ -1434,4 +1486,86 @@ func TestIntegration_LogoutAll_InvalidatesEverySession(t *testing.T) {
 			t.Errorf("GET /auth/me (token %s) after logout-all: status = %d, want %d", name, resp.StatusCode, http.StatusUnauthorized)
 		}
 	}
+}
+
+// TestIntegration_AccessLog_IncludesUserIDForAuthenticatedRequest drives
+// a real authenticated request through the full middleware chain
+// newServer builds — Logging wraps the mux, RequireAuth is wired inside
+// task.Handler.RegisterRoutes, exactly as in production — and asserts the
+// resulting access-log line carries user_id.
+//
+// This is the integration counterpart of the unit-level tests in
+// internal/middleware/logging_test.go, which simulate RequireAuth by
+// calling RecordUserIDForLog directly. This test exercises the real
+// call site instead (internal/user/middleware.go's RequireAuth), so a
+// change that stopped calling it there — while leaving the mechanism in
+// middleware itself intact — would still be caught here even though it
+// would not be caught by the unit tests alone.
+func TestIntegration_AccessLog_IncludesUserIDForAuthenticatedRequest(t *testing.T) {
+	var logBuf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	srv := httptest.NewServer(newTestServer(t, testConfig(), logger).Handler)
+	defer srv.Close()
+	token := registerAndLogin(t, srv)
+
+	resp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/tasks", ""))
+	if err != nil {
+		t.Fatalf("GET /tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /tasks status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	entry := findLogLine(t, logBuf.String(), "GET", apiPrefix+"/tasks")
+	userID, ok := entry["user_id"].(string)
+	if !ok || userID == "" {
+		t.Errorf("access log line for GET /tasks has no user_id: %v", entry)
+	}
+}
+
+// TestIntegration_AccessLog_OmitsUserIDForUnauthenticatedRequest is the
+// control case: GET /health never passes through RequireAuth (it's on
+// the outer mux — see newServer), so its access-log line must carry no
+// user_id field at all, not an empty one.
+func TestIntegration_AccessLog_OmitsUserIDForUnauthenticatedRequest(t *testing.T) {
+	var logBuf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	srv := httptest.NewServer(newTestServer(t, testConfig(), logger).Handler)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+
+	entry := findLogLine(t, logBuf.String(), "GET", "/health")
+	if _, present := entry["user_id"]; present {
+		t.Errorf("access log line for GET /health has a user_id field: %v", entry["user_id"])
+	}
+}
+
+// findLogLine scans buf (one JSON object per line, as slog.JSONHandler
+// writes) for the first line matching method and path, and fails the
+// test if none matches.
+func findLogLine(t *testing.T, buf, method, path string) map[string]any {
+	t.Helper()
+
+	for _, line := range strings.Split(strings.TrimSpace(buf), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("log line is not valid JSON: %v\nline: %s", err, line)
+		}
+		if entry["method"] == method && entry["path"] == path {
+			return entry
+		}
+	}
+	t.Fatalf("no log line found for %s %s in:\n%s", method, path, buf)
+	return nil
 }

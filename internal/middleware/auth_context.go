@@ -44,3 +44,22 @@ func SessionTokenFromContext(ctx context.Context) (string, bool) {
 	token, ok := ctx.Value(sessionTokenKey).(string)
 	return token, ok
 }
+
+// RecordUserIDForLog records userID so the request's access-log line
+// (written by Logging — see logging.go) includes a user_id field.
+//
+// It is a no-op if Logging is not part of the chain in front of the
+// caller — e.g. a test that exercises RequireAuth directly, without
+// building the full middleware chain — so a caller never needs to check
+// whether logging is wired up before calling this.
+//
+// Call this with the request's *original* context (the one RequireAuth
+// received, before it builds the new one via ContextWithUserID) — that
+// is the context Logging actually stashed the carrier pointer in. See
+// Logging's doc comment for the full reasoning; user.RequireAuth is the
+// one call site today.
+func RecordUserIDForLog(ctx context.Context, userID string) {
+	if p, ok := ctx.Value(userIDForLogKey).(*string); ok {
+		*p = userID
+	}
+}

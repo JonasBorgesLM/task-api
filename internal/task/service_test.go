@@ -9,6 +9,14 @@ import (
 	"unicode/utf8"
 )
 
+// validTaskID is a syntactically valid UUID used wherever a test needs a
+// well-formed task ID for the fakeRepository to answer for. Service now
+// rejects a malformed ID before Repository is ever reached (see
+// TestGetTask_MalformedID_IsNotFound and its siblings below), so any
+// caller-supplied ID in these tests has to look like a real one — the
+// same reason isValidID exists in the first place.
+const validTaskID = "11111111-1111-1111-1111-111111111111"
+
 // fakeRepository is a test double for Repository.
 // Each field controls the behavior of the corresponding method.
 type fakeRepository struct {
@@ -22,7 +30,9 @@ type fakeRepository struct {
 	deleteErr    error
 
 	// Call recording.
+	findByIDCalled    bool
 	updateCalled      bool
+	deleteCalled      bool
 	savedTask         Task
 	updatedTask       Task
 	findAllCalledWith [3]any // [userID, limit, offset]
@@ -34,6 +44,7 @@ func (f *fakeRepository) Create(_ context.Context, task Task) error {
 }
 
 func (f *fakeRepository) FindByID(_ context.Context, _, _ string) (Task, error) {
+	f.findByIDCalled = true
 	return f.findByIDTask, f.findByIDErr
 }
 
@@ -49,6 +60,7 @@ func (f *fakeRepository) Update(_ context.Context, task Task) error {
 }
 
 func (f *fakeRepository) Delete(_ context.Context, _, _ string) error {
+	f.deleteCalled = true
 	return f.deleteErr
 }
 
@@ -269,7 +281,7 @@ func TestGetTask_Delegates(t *testing.T) {
 	task := newFakeTask(StatusPending)
 	svc := NewService(&fakeRepository{findByIDTask: task})
 
-	got, err := svc.GetTask(context.Background(), testUserID, "fake-id")
+	got, err := svc.GetTask(context.Background(), testUserID, validTaskID)
 	if err != nil {
 		t.Fatalf("GetTask() unexpected error: %v", err)
 	}
@@ -281,7 +293,7 @@ func TestGetTask_Delegates(t *testing.T) {
 func TestGetTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{findByIDErr: ErrNotFound})
 
-	_, err := svc.GetTask(context.Background(), testUserID, "nonexistent")
+	_, err := svc.GetTask(context.Background(), testUserID, validTaskID)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("GetTask() error = %v, want ErrNotFound", err)
 	}
@@ -337,7 +349,7 @@ func TestUpdateTask_ValidTitle(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "New title", "New description", "")
+	got, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, "New title", "New description", "")
 	if err != nil {
 		t.Fatalf("UpdateTask() unexpected error: %v", err)
 	}
@@ -368,7 +380,7 @@ func TestUpdateTask_EmptyPriority_KeepsCurrent(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "New title", "", "")
+	got, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, "New title", "", "")
 	if err != nil {
 		t.Fatalf("UpdateTask() unexpected error: %v", err)
 	}
@@ -383,7 +395,7 @@ func TestUpdateTask_ExplicitPriority_Changes(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "New title", "", "high")
+	got, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, "New title", "", "high")
 	if err != nil {
 		t.Fatalf("UpdateTask() unexpected error: %v", err)
 	}
@@ -396,7 +408,7 @@ func TestUpdateTask_InvalidPriority(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: newFakeTask(StatusPending)}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "Title", "", "urgent")
+	_, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, "Title", "", "urgent")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("UpdateTask() invalid priority error = %v, want ErrInvalidInput", err)
 	}
@@ -406,7 +418,7 @@ func TestUpdateTask_EmptyTitle(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "", "desc", "")
+	_, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, "", "desc", "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("UpdateTask() empty title error = %v, want ErrInvalidInput", err)
 	}
@@ -419,7 +431,7 @@ func TestUpdateTask_WhitespaceTitle(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "   ", "desc", "")
+	_, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, "   ", "desc", "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("UpdateTask() whitespace title error = %v, want ErrInvalidInput", err)
 	}
@@ -431,7 +443,7 @@ func TestUpdateTask_WhitespaceTitle(t *testing.T) {
 func TestUpdateTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{findByIDErr: ErrNotFound})
 
-	_, err := svc.UpdateTask(context.Background(), testUserID, "nonexistent", "Title", "", "")
+	_, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, "Title", "", "")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("UpdateTask() error = %v, want ErrNotFound", err)
 	}
@@ -445,7 +457,7 @@ func TestUpdateTask_RepositoryUpdateError(t *testing.T) {
 	}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "Title", "", "")
+	_, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, "Title", "", "")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("UpdateTask() repository error = %v, want %v", err, repoErr)
 	}
@@ -458,7 +470,7 @@ func TestUpdateTask_RepositoryConflictError(t *testing.T) {
 	}
 	svc := NewService(repo)
 
-	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "Title", "", "")
+	_, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, "Title", "", "")
 	if !errors.Is(err, ErrConflict) {
 		t.Errorf("UpdateTask() error = %v, want ErrConflict", err)
 	}
@@ -467,7 +479,7 @@ func TestUpdateTask_RepositoryConflictError(t *testing.T) {
 func TestUpdateTask_TitleTooLong(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", strings.Repeat("a", maxTitleLen+1), "desc", "")
+	_, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, strings.Repeat("a", maxTitleLen+1), "desc", "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("UpdateTask() overlong title error = %v, want ErrInvalidInput", err)
 	}
@@ -476,7 +488,7 @@ func TestUpdateTask_TitleTooLong(t *testing.T) {
 func TestUpdateTask_DescriptionTooLong(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	_, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "Title", strings.Repeat("a", maxDescriptionLen+1), "")
+	_, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, "Title", strings.Repeat("a", maxDescriptionLen+1), "")
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("UpdateTask() overlong description error = %v, want ErrInvalidInput", err)
 	}
@@ -486,7 +498,7 @@ func TestUpdateTask_TrimsTitleAndDescription(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: newFakeTask(StatusPending)}
 	svc := NewService(repo)
 
-	got, err := svc.UpdateTask(context.Background(), testUserID, "fake-id", "  Padded title  ", "  Padded description  ", "")
+	got, err := svc.UpdateTask(context.Background(), testUserID, validTaskID, "  Padded title  ", "  Padded description  ", "")
 	if err != nil {
 		t.Fatalf("UpdateTask() unexpected error: %v", err)
 	}
@@ -503,7 +515,7 @@ func TestUpdateTask_TrimsTitleAndDescription(t *testing.T) {
 func TestDeleteTask_Delegates(t *testing.T) {
 	svc := NewService(&fakeRepository{})
 
-	if err := svc.DeleteTask(context.Background(), testUserID, "fake-id"); err != nil {
+	if err := svc.DeleteTask(context.Background(), testUserID, validTaskID); err != nil {
 		t.Errorf("DeleteTask() unexpected error: %v", err)
 	}
 }
@@ -511,7 +523,7 @@ func TestDeleteTask_Delegates(t *testing.T) {
 func TestDeleteTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{deleteErr: ErrNotFound})
 
-	err := svc.DeleteTask(context.Background(), testUserID, "nonexistent")
+	err := svc.DeleteTask(context.Background(), testUserID, validTaskID)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("DeleteTask() error = %v, want ErrNotFound", err)
 	}
@@ -521,7 +533,7 @@ func TestDeleteTask_RepositoryError(t *testing.T) {
 	repoErr := errors.New("delete failure")
 	svc := NewService(&fakeRepository{deleteErr: repoErr})
 
-	err := svc.DeleteTask(context.Background(), testUserID, "fake-id")
+	err := svc.DeleteTask(context.Background(), testUserID, validTaskID)
 	if !errors.Is(err, repoErr) {
 		t.Errorf("DeleteTask() repository error = %v, want %v", err, repoErr)
 	}
@@ -534,7 +546,7 @@ func TestCompleteTask_PendingToDone(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.CompleteTask(context.Background(), testUserID, "fake-id")
+	got, err := svc.CompleteTask(context.Background(), testUserID, validTaskID)
 	if err != nil {
 		t.Fatalf("CompleteTask() unexpected error: %v", err)
 	}
@@ -554,7 +566,7 @@ func TestCompleteTask_AlreadyDone_Idempotent(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.CompleteTask(context.Background(), testUserID, "fake-id")
+	got, err := svc.CompleteTask(context.Background(), testUserID, validTaskID)
 	if err != nil {
 		t.Fatalf("CompleteTask() unexpected error: %v", err)
 	}
@@ -572,7 +584,7 @@ func TestCompleteTask_AlreadyDone_Idempotent(t *testing.T) {
 func TestCompleteTask_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{findByIDErr: ErrNotFound})
 
-	_, err := svc.CompleteTask(context.Background(), testUserID, "nonexistent")
+	_, err := svc.CompleteTask(context.Background(), testUserID, validTaskID)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("CompleteTask() error = %v, want ErrNotFound", err)
 	}
@@ -586,7 +598,7 @@ func TestCompleteTask_RepositoryUpdateError(t *testing.T) {
 	}
 	svc := NewService(repo)
 
-	_, err := svc.CompleteTask(context.Background(), testUserID, "fake-id")
+	_, err := svc.CompleteTask(context.Background(), testUserID, validTaskID)
 	if !errors.Is(err, repoErr) {
 		t.Errorf("CompleteTask() repository error = %v, want %v", err, repoErr)
 	}
@@ -599,7 +611,7 @@ func TestCompleteTask_RepositoryConflictError(t *testing.T) {
 	}
 	svc := NewService(repo)
 
-	_, err := svc.CompleteTask(context.Background(), testUserID, "fake-id")
+	_, err := svc.CompleteTask(context.Background(), testUserID, validTaskID)
 	if !errors.Is(err, ErrConflict) {
 		t.Errorf("CompleteTask() error = %v, want ErrConflict", err)
 	}
@@ -629,7 +641,7 @@ func TestTransitionStatus_LegalTransitions(t *testing.T) {
 			repo := &fakeRepository{findByIDTask: newFakeTask(tc.from)}
 			svc := NewService(repo)
 
-			got, err := svc.TransitionStatus(context.Background(), testUserID, "fake-id", tc.to)
+			got, err := svc.TransitionStatus(context.Background(), testUserID, validTaskID, tc.to)
 			if err != nil {
 				t.Fatalf("TransitionStatus(%s -> %s) unexpected error: %v", tc.from, tc.to, err)
 			}
@@ -659,7 +671,7 @@ func TestTransitionStatus_IllegalTransitions(t *testing.T) {
 			repo := &fakeRepository{findByIDTask: newFakeTask(tc.from)}
 			svc := NewService(repo)
 
-			_, err := svc.TransitionStatus(context.Background(), testUserID, "fake-id", tc.to)
+			_, err := svc.TransitionStatus(context.Background(), testUserID, validTaskID, tc.to)
 			if !errors.Is(err, ErrInvalidTransition) {
 				t.Errorf("TransitionStatus(%s -> %s) error = %v, want ErrInvalidTransition", tc.from, tc.to, err)
 			}
@@ -679,7 +691,7 @@ func TestTransitionStatus_SameStatus_Idempotent(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: original}
 	svc := NewService(repo)
 
-	got, err := svc.TransitionStatus(context.Background(), testUserID, "fake-id", StatusInProgress)
+	got, err := svc.TransitionStatus(context.Background(), testUserID, validTaskID, StatusInProgress)
 	if err != nil {
 		t.Fatalf("TransitionStatus() same-status unexpected error: %v", err)
 	}
@@ -695,7 +707,7 @@ func TestTransitionStatus_UnknownStatus(t *testing.T) {
 	repo := &fakeRepository{findByIDTask: newFakeTask(StatusPending)}
 	svc := NewService(repo)
 
-	_, err := svc.TransitionStatus(context.Background(), testUserID, "fake-id", Status("archived"))
+	_, err := svc.TransitionStatus(context.Background(), testUserID, validTaskID, Status("archived"))
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("TransitionStatus() unknown status error = %v, want ErrInvalidInput", err)
 	}
@@ -707,7 +719,7 @@ func TestTransitionStatus_UnknownStatus(t *testing.T) {
 func TestTransitionStatus_NotFound(t *testing.T) {
 	svc := NewService(&fakeRepository{findByIDErr: ErrNotFound})
 
-	_, err := svc.TransitionStatus(context.Background(), testUserID, "nonexistent", StatusDone)
+	_, err := svc.TransitionStatus(context.Background(), testUserID, validTaskID, StatusDone)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("TransitionStatus() error = %v, want ErrNotFound", err)
 	}
@@ -849,7 +861,7 @@ func TestUpdateTask_NormalizesToo(t *testing.T) {
 	}
 	svc := NewService(repo)
 
-	updated, err := svc.UpdateTask(context.Background(), "u1", "t1", "Buy\x00 milk", "desc", "")
+	updated, err := svc.UpdateTask(context.Background(), "u1", validTaskID, "Buy\x00 milk", "desc", "")
 	if err != nil {
 		t.Fatalf("UpdateTask() unexpected error: %v", err)
 	}
@@ -879,5 +891,139 @@ func TestCreateTask_LeavesBidirectionalFormatCharacters(t *testing.T) {
 	}
 	if task.Title != title {
 		t.Errorf("Title = %q, want %q — Cf characters are deliberately out of scope", task.Title, title)
+	}
+}
+
+// --- Malformed task IDs ---
+//
+// These pin the fix for a real, previously-shipped inconsistency: an ID
+// that is not a syntactically valid UUID reached postgresRepository's
+// ::uuid cast, which rejected it as a query error surfacing as 500 —
+// while memoryRepository answered the identical input with ErrNotFound
+// (404). isValidID closes that gap by rejecting the shape before either
+// Repository is ever consulted, so both agree by construction rather
+// than by coincidence. See TestPostgres_FindByID_MalformedID for what
+// Repository still does when called directly, bypassing Service.
+
+// malformedTaskIDs is the shared table every test below runs against.
+// Each case is a different way of not being a UUID: empty, wrong
+// length, wrong grouping, and a well-formed length with an
+// out-of-alphabet character — the kind of thing a client-side typo
+// actually produces, not an adversarial input.
+var malformedTaskIDs = []struct {
+	name string
+	id   string
+}{
+	{"empty", ""},
+	{"not_uuid_shaped_at_all", "not-a-uuid"},
+	{"too_short", "11111111-1111-1111-1111-11111111"},
+	{"too_long", "11111111-1111-1111-1111-1111111111111"},
+	{"missing_hyphens", "11111111111111111111111111111111"},
+	{"wrong_grouping", "111111111-111-1111-1111-111111111111"},
+	{"non_hex_character", "1111111g-1111-1111-1111-111111111111"},
+	{"sql_injection_attempt", "'; DROP TABLE tasks; --"},
+}
+
+func TestGetTask_MalformedID_IsNotFound(t *testing.T) {
+	for _, tc := range malformedTaskIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &fakeRepository{}
+			svc := NewService(repo)
+
+			_, err := svc.GetTask(context.Background(), testUserID, tc.id)
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("GetTask(%q) error = %v, want ErrNotFound", tc.id, err)
+			}
+			if repo.findByIDCalled {
+				t.Errorf("GetTask(%q) reached Repository.FindByID; isValidID should have rejected it first", tc.id)
+			}
+		})
+	}
+}
+
+func TestUpdateTask_MalformedID_IsNotFound(t *testing.T) {
+	for _, tc := range malformedTaskIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &fakeRepository{}
+			svc := NewService(repo)
+
+			_, err := svc.UpdateTask(context.Background(), testUserID, tc.id, "Title", "", "")
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("UpdateTask(%q) error = %v, want ErrNotFound", tc.id, err)
+			}
+			if repo.findByIDCalled || repo.updateCalled {
+				t.Errorf("UpdateTask(%q) reached Repository; isValidID should have rejected it first", tc.id)
+			}
+		})
+	}
+}
+
+func TestDeleteTask_MalformedID_IsNotFound(t *testing.T) {
+	for _, tc := range malformedTaskIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &fakeRepository{}
+			svc := NewService(repo)
+
+			err := svc.DeleteTask(context.Background(), testUserID, tc.id)
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("DeleteTask(%q) error = %v, want ErrNotFound", tc.id, err)
+			}
+			if repo.deleteCalled {
+				t.Errorf("DeleteTask(%q) reached Repository.Delete; isValidID should have rejected it first", tc.id)
+			}
+		})
+	}
+}
+
+func TestTransitionStatus_MalformedID_IsNotFound(t *testing.T) {
+	for _, tc := range malformedTaskIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &fakeRepository{}
+			svc := NewService(repo)
+
+			_, err := svc.TransitionStatus(context.Background(), testUserID, tc.id, StatusDone)
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("TransitionStatus(%q) error = %v, want ErrNotFound", tc.id, err)
+			}
+			if repo.findByIDCalled {
+				t.Errorf("TransitionStatus(%q) reached Repository.FindByID; isValidID should have rejected it first", tc.id)
+			}
+		})
+	}
+}
+
+// TestCompleteTask_MalformedID_IsNotFound covers CompleteTask
+// specifically, even though it is a thin wrapper around
+// TransitionStatus: PATCH /tasks/{id}/done is the older, still-documented
+// route, and a wrapper that stopped delegating correctly would otherwise
+// go unnoticed here.
+func TestCompleteTask_MalformedID_IsNotFound(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	_, err := svc.CompleteTask(context.Background(), testUserID, "not-a-uuid")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("CompleteTask() error = %v, want ErrNotFound", err)
+	}
+	if repo.findByIDCalled {
+		t.Error("CompleteTask() reached Repository.FindByID; isValidID should have rejected it first")
+	}
+}
+
+// TestGetTask_WellFormedID_StillReachesRepository is the control case
+// for every test above: a syntactically valid UUID that simply isn't
+// stored anywhere must still reach Repository and get ErrNotFound from
+// it, not from isValidID. Without this, the tests above could pass for
+// the wrong reason — isValidID rejecting everything, valid IDs included.
+func TestGetTask_WellFormedID_StillReachesRepository(t *testing.T) {
+	repo := &fakeRepository{findByIDErr: ErrNotFound}
+	svc := NewService(repo)
+
+	_, err := svc.GetTask(context.Background(), testUserID, validTaskID)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetTask() error = %v, want ErrNotFound", err)
+	}
+	if !repo.findByIDCalled {
+		t.Error("GetTask() with a well-formed ID did not reach Repository.FindByID")
 	}
 }

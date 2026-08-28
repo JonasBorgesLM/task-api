@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -94,6 +96,34 @@ func newID() (string, error) {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]), nil
 }
 
+// idPattern matches the shape newID generates and the shape PostgreSQL's
+// ::uuid cast accepts — 8-4-4-4-12 hex, case-insensitive. Duplicated from
+// task.Service's identical pattern rather than shared, the same call this
+// package already makes for newID: the two domain packages don't import
+// each other (see CLAUDE.md), and a one-line regexp isn't worth a shared
+// package for.
+var idPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// isValidID reports whether id is shaped like a UUID — a taskID or a
+// storageKey, both of which are UUIDs by construction (see
+// Attachment.StorageKey's doc comment).
+//
+// Checked before Repository sees either, for the same reason
+// task.Service checks it: without this, a malformed value reached
+// postgresRepository's `::uuid` cast, which rejected it as a query error
+// (500, logged as unexpected) rather than the routine 404 a client-side
+// typo deserves — and memoryRepository disagreed with that outcome to
+// begin with, answering the same input with ErrNotFound. A malformed
+// taskID maps to ErrTaskNotFound (matching Create's own contract for a
+// task that doesn't exist or isn't the caller's — see Repository's doc
+// comment); a malformed storageKey maps to ErrNotFound, matching an
+// unknown key. Neither gets a distinct "malformed" error: that would
+// leak that a well-formed ID exists, the same reasoning
+// task.Service.isValidID documents.
+func isValidID(id string) bool {
+	return idPattern.MatchString(id)
+}
+
 // Upload stores r as a new attachment on taskID, which must belong to
 // userID.
 //
@@ -127,6 +157,15 @@ func newID() (string, error) {
 // uploads racing each other past the quota — the same category of
 // accepted, bounded overshoot.
 func (s *Service) Upload(ctx context.Context, userID, taskID, declaredFilename string, r io.Reader) (Attachment, error) {
+	// Shape-checked before the quota lookup, for the same reason
+	// Download/ListByTask check it first: a malformed taskID has no
+	// business reaching Repository at all, and TotalBytesForUser is a
+	// real query — no reason to pay for it against an id that was never
+	// going to resolve to anything.
+	if !isValidID(taskID) {
+		return Attachment{}, ErrTaskNotFound
+	}
+
 	total, err := s.repo.TotalBytesForUser(ctx, userID)
 	if err != nil {
 		return Attachment{}, fmt.Errorf("upload attachment: %w", err)
@@ -145,9 +184,21 @@ func (s *Service) Upload(ctx context.Context, userID, taskID, declaredFilename s
 	// back its own prefix. Sniffing needs the head of the stream and the
 	// store needs all of it, and this is what lets both have it without
 	// holding the whole upload in memory.
+	//
+	// A stream shorter than sniffLen is the normal case, not a failure:
+	// io.ReadFull reports io.EOF for an empty reader and
+	// io.ErrUnexpectedEOF for a short one, and both mean "that was all
+	// of it".
+	//
+	// errors.Is here is for uniformity with the rest of the package, not
+	// for safety: io.ReadFull returns both sentinels directly, and a
+	// Reader that wrapped io.EOF would be violating io.Reader's contract
+	// — io.Copy, downstream in every BlobStore, would reject it as a
+	// real error long before this check mattered. Unlike ErrTooLarge
+	// below, where the wrapping case is genuinely reachable.
 	head := make([]byte, sniffLen)
 	n, err := io.ReadFull(r, head)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return Attachment{}, fmt.Errorf("upload attachment: read: %w", err)
 	}
 	head = head[:n]
@@ -181,7 +232,13 @@ func (s *Service) Upload(ctx context.Context, userID, taskID, declaredFilename s
 	// nothing else, and is cleaned up below on the path we can see.
 	size, err := s.blobs.Put(ctx, storageKey, io.MultiReader(bytes.NewReader(head), r), s.maxBytes)
 	if err != nil {
-		if err == ErrTooLarge {
+		// errors.Is, not ==: BlobStore is an interface, and nothing in
+		// its contract says an implementation must return ErrTooLarge
+		// bare. Both current ones happen to, which is exactly what made
+		// == survive here — the day a store wraps it, an upload over the
+		// limit stops being a 400 and becomes a 500, with no test
+		// failing to say so.
+		if errors.Is(err, ErrTooLarge) {
 			return Attachment{}, fmt.Errorf("%w: attachment must be at most %d bytes", ErrInvalidInput, s.maxBytes)
 		}
 		return Attachment{}, fmt.Errorf("upload attachment: %w", err)
@@ -216,6 +273,10 @@ func (s *Service) Upload(ctx context.Context, userID, taskID, declaredFilename s
 // so a key that leads to somebody else's task is reported as if it led
 // nowhere. See Repository's doc comment.
 func (s *Service) Download(ctx context.Context, userID, storageKey string) (Attachment, io.ReadSeekCloser, error) {
+	if !isValidID(storageKey) {
+		return Attachment{}, nil, ErrNotFound
+	}
+
 	att, err := s.repo.FindByStorageKey(ctx, storageKey, userID)
 	if err != nil {
 		return Attachment{}, nil, fmt.Errorf("download attachment: %w", err)
@@ -233,9 +294,51 @@ func (s *Service) Download(ctx context.Context, userID, storageKey string) (Atta
 	return att, blob, nil
 }
 
+// Delete removes the attachment identified by storageKey, scoped to
+// userID — the same ownership rule Download enforces: a key leading to
+// somebody else's task is reported exactly like a key that names
+// nothing, ErrNotFound either way.
+//
+// # Order: metadata row first, then the blob — deliberately the mirror
+// of Upload
+//
+// Upload writes bytes before the row, because the reverse leaves a row
+// pointing at a file that was never written — a download that 500s
+// forever. Delete inverts that for the same reason inverted: removing
+// the row first means a failure on the step that follows (deleting the
+// blob) leaves an orphaned file, which costs disk and nothing else — the
+// row-first alternative would instead leave a row pointing at a file
+// that is already gone, exactly the broken-reference shape Upload's
+// ordering exists to avoid in the first place. See docs/DECISIONS.md §
+// "Delete de anexo: síncrono, não só o coletor" for the fuller
+// reasoning, including why this doesn't just leave the blob for
+// CollectOrphans (#46) to find on its own schedule.
+//
+// # The blob delete is best-effort
+//
+// Once the row is gone, the attachment is already gone from the
+// caller's perspective — Download and ListByTask stop seeing it. A
+// failure removing the underlying blob doesn't change that, so it is
+// not reported to the caller as a failed delete; it leaves an orphan
+// that CollectOrphans reclaims on its own schedule, the same safety net
+// Upload's cleanup relies on for the failure it can't fully undo either.
+func (s *Service) Delete(ctx context.Context, userID, storageKey string) error {
+	if err := s.repo.Delete(ctx, storageKey, userID); err != nil {
+		return fmt.Errorf("delete attachment: %w", err)
+	}
+
+	_ = s.blobs.Delete(ctx, storageKey)
+
+	return nil
+}
+
 // ListByTask returns every attachment on taskID, which must belong to
 // userID.
 func (s *Service) ListByTask(ctx context.Context, userID, taskID string) ([]Attachment, error) {
+	if !isValidID(taskID) {
+		return nil, ErrTaskNotFound
+	}
+
 	attachments, err := s.repo.FindByTask(ctx, taskID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list attachments: %w", err)

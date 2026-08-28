@@ -12,6 +12,9 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
 - Anexos em tasks: upload, download, dois backends de storage
   intercambiáveis (filesystem local ou S3-compatível via `minio-go`),
   coletor de blobs órfãos.
+- `DELETE /v1/files/{key}` — remove um anexo individual. Metadado e blob
+  saem na mesma requisição, não só o metadado com o blob deixado para o
+  coletor de órfãos (ver `docs/DECISIONS.md`).
 - Quota de armazenamento de anexos por usuário
   (`ATTACHMENT_MAX_BYTES_PER_USER`, 500 MiB por padrão). Checada antes do
   upload; um usuário já no limite recebe `400` sem que o arquivo seja

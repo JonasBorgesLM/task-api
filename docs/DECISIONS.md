@@ -445,3 +445,171 @@ composto `(user_id, created_at)`, pela mesma razão de
 `user_id` **e** ordena por `created_at` juntos; o índice simples que já
 existia (`idx_sessions_user_id`, de `0006_add_sessions_indexes`) não serve
 os dois ao mesmo tempo.
+
+---
+
+## Delete de anexo: síncrono, não só o coletor
+
+`DELETE /v1/files/{key}` remove a linha de metadado e o blob **na mesma
+requisição** — não apenas a linha, deixando o blob para
+`Service.CollectOrphans` (#46) encontrar no próximo ciclo.
+
+**Os dois caminhos considerados:**
+
+1. **Síncrono** (escolhido): `Service.Delete` remove a linha via
+   `Repository.Delete`, depois chama `BlobStore.Delete` na mesma
+   requisição, best-effort.
+2. **Só o coletor**: `Service.Delete` só remove a linha; o blob vira
+   candidato a órfão e some quando `CollectOrphans` rodar — hoje até
+   `ATTACHMENT_ORPHAN_MIN_AGE` (1h de default) depois.
+
+**Por quê o síncrono:** um `DELETE` que só *agenda* a remoção por até uma
+hora não corresponde ao que o endpoint promete a quem o chama. O coletor
+existe para cobrir o rastro de **falhas** — um upload que gravou o blob e
+morreu antes da linha, um delete cujo passo de blob falhou — não para ser
+o caminho normal de uma operação que o próprio `Service` já tem acesso
+completo a executar de ponta a ponta. É a mesma distinção que já existe no
+próprio código: `CollectOrphans`' doc comment explica que o *cascade* de
+task (`ON DELETE CASCADE` no SQL) não pode limpar blobs porque nada no
+caminho do SQL alcança o filesystem — mas `Service.Delete` não tem essa
+restrição arquitetural: ele já segura tanto `Repository` quanto
+`BlobStore`, exatamente como `Upload` segura os dois.
+
+**Ordem dentro do síncrono — metadado primeiro, blob depois — é o espelho
+deliberado de `Upload`:** `Upload` grava bytes antes da linha porque a
+ordem inversa deixaria uma linha apontando para um arquivo que nunca foi
+escrito — um download que 500 pra sempre, sem indicar por quê. `Delete`
+inverte isso pela mesma razão invertida: remover a linha primeiro faz uma
+falha no passo seguinte (apagar o blob) deixar **um arquivo órfão**, que
+custa disco e nada mais — a alternativa (blob primeiro) deixaria, no
+mesmo cenário de falha, uma linha apontando para um arquivo que já não
+existe, exatamente a forma de referência quebrada que a ordem de `Upload`
+existe para evitar.
+
+**A falha no delete do blob é best-effort, não propagada ao chamador:**
+uma vez que a linha foi removida, o anexo já está fora do alcance do
+chamador (`Download`/`ListByTask` já não o veem) — reportar a requisição
+como falha nesse ponto seria enganoso, o cliente pediu "remova isto" e o
+efeito observável já aconteceu. A falha vira um blob órfão, que
+`CollectOrphans` recolhe no próprio ciclo — o mesmo mecanismo de segurança
+que já protege o lado inverso da falha em `Upload`.
+
+**Idempotência — o que "coerente com `BlobStore.Delete` e `Logout`" da
+issue original significa aqui, e o que não significa:** os dois
+`BlobStore` já são idempotentes por conta própria ("deleting a key that
+is not there is not an error" — `fsBlobStore` e `s3BlobStore`), e isso é
+aproveitado sem código extra: se o blob já tiver sido removido antes por
+qualquer motivo, a chamada best-effort dentro de `Service.Delete` não
+falha por isso. Isso **não** significa que o endpoint HTTP inteiro seja
+idempotente no sentido de `user.Service.Logout` (sucesso silencioso
+sempre, mesmo para um token que nunca existiu) — essa comparação não se
+aplica aqui porque `Logout` não tem verificação de dono formal, enquanto
+`attachment` tem uma invariante mais forte para preservar: **um anexo de
+outro usuário é `ErrNotFound`, nunca sucesso** (a própria issue exige
+isso). Deletar a mesma chave duas vezes segue o mesmo contrato que
+`task.Service.DeleteTask` já estabelece neste projeto: primeira chamada
+sucesso (`204`), segunda chamada `ErrNotFound` (`404`) — porque a linha já
+não existe. Isso ainda é "idempotente" no sentido REST formal (o estado
+final do servidor é o mesmo depois de qualquer número de chamadas), só
+que o código HTTP muda entre a primeira e as seguintes — o mesmo padrão
+já usado em toda parte deste projeto para "delete de um recurso
+identificado por dono".
+
+**Rota — `DELETE /v1/files/{key}`, não `/v1/tasks/{id}/attachments/{key}`
+como a issue original propunha:** o comentário já existente em
+`Handler.RegisterRoutes` explica por que `GET /files/{key}` não é
+aninhado sob `/tasks/{id}` — evita o *confused-deputy shape* em que o
+`{id}` do path e a task real por trás da `{key}` podem discordar, e um
+dos dois é acreditado por engano. A mesma razão vale, sem alteração, para
+o delete: a issue propôs o path aninhado sem levar essa decisão em conta,
+e a decisão já registrada prevalece.
+
+**Trade-off aceito:** a requisição `DELETE` fica um pouco mais lenta (um
+segundo I/O, contra o `BlobStore`, além do `UPDATE`/`DELETE` no banco), e
+ganha um segundo ponto de falha na latência — mas nunca na correção: uma
+falha nesse segundo ponto nunca faz a requisição inteira falhar.
+
+---
+
+## `startupProbe` cobre a migration lenta; Job separado foi rejeitado
+
+`k8s/40-api.yaml` ganhou um `startupProbe` em `/health`, à frente de
+`readinessProbe`/`livenessProbe`. `cmd/api` aplica migrations pendentes
+dentro de `openDatabase` — **antes** de `ListenAndServe` — então até isso
+terminar o processo não escuta em porta nenhuma; sem esse probe, o
+orçamento de liveness sozinho (`initialDelaySeconds: 5` + `periodSeconds:
+10` × `failureThreshold: 3` ≈ 35s) era o teto real para qualquer migration,
+e uma que passasse disso derrubava o pod no meio da migration — o
+seguinte reiniciava no mesmo ponto, crash loop.
+
+**Alternativa considerada:** `DB_AUTO_MIGRATE=false` no `Deployment`, com
+um `Job` separado de `cmd/migrate` rodando antes dele.
+
+**Por que `startupProbe` em vez do `Job`:** `k8s/` deste projeto é
+deliberadamente `kubectl apply -f k8s/` puro — sem Helm, sem ArgoCD, sem
+qualquer ferramenta que garanta ordem entre recursos. Sem um hook de
+release, nada impede o novo `ReplicaSet` do `Deployment` de começar a
+subir antes de o `Job` terminar; garantir a ordem exigiria um passo manual
+de dois comandos (`kubectl apply job.yaml && kubectl wait ... && kubectl
+apply deployment.yaml`) — risco real de rodar fora de ordem, para um
+projeto que já se descreve como cluster de validação descartável, não
+como alvo de produção. `startupProbe` é o mecanismo que o próprio
+Kubernetes oferece exatamente para esse formato de problema (GA desde a
+1.20): nenhum recurso novo, nenhuma orquestração de ordem, e a falha
+continua correta — uma migration que realmente quebra ainda derruba o
+processo (`os.Exit(1)` a partir de `run()`), então o `Job` não teria
+comprado uma detecção de falha melhor, só uma complexidade a mais.
+
+`150 * periodSeconds(2s) = 300s` (5 minutos) é deliberadamente generoso —
+não medido contra nenhuma migration existente hoje (as sete atuais rodam
+em frações de segundo), é um teto para uma migration que ainda não foi
+escrita. Depois que o `startupProbe` sucede uma vez, ele para de rodar
+para sempre, e é aí que `readinessProbe`/`livenessProbe` assumem — o
+`initialDelaySeconds: 5` do liveness passa a contar a partir desse
+momento, não do início do container.
+
+**Trade-off aceito, e um limite real:** um `SIGTERM` recebido durante a
+migration não a interrompe — `migrateCtx` em `cmd/api/main.go` é derivado
+de `context.Background()`, não do `ctx` de sinal que `run()` recebe, então
+o processo só reage ao sinal depois que a migration terminar (sucesso,
+erro, ou seu próprio timeout de 30s). Isso já era assim antes desta
+mudança; o `startupProbe` só dá ao operador mais folga antes de decidir
+matar o pod, não muda o que acontece depois que decide. Não é escopo desta
+decisão corrigir — fica registrado para quem for mexer em
+`RunMigrations`/`openDatabase` depois.
+
+**Validado com o `k8s/rollout-test.sh` existente**, não só lido no
+manifest — ver o resultado real na issue/PR que introduziu esta decisão.
+
+---
+
+## Bundle de CA na imagem `scratch`: copiado do builder, não instalado
+
+A imagem final (`FROM scratch`) passou a incluir
+`/etc/ssl/certs/ca-certificates.crt`, copiado do estágio `builder`
+(`golang:1.26.6-alpine`, que já traz `ca-certificates` instalado — é o
+mesmo arquivo que o próprio `go mod download` usa para falar HTTPS com o
+proxy de módulos).
+
+**Por quê:** sem ele, toda verificação de certificado de saída falhava com
+`x509: certificate signed by unknown authority` — confirmado rodando o
+binário real dentro do container contra `s3.amazonaws.com` com
+`ATTACHMENT_S3_USE_SSL=true`: sem o bundle, a falha é de certificado; com
+o bundle, o handshake TLS completa e o erro que volta é da AWS
+autenticando a credencial (a prova de que a rede/TLS funcionou). O mesmo
+buraco existia para `DATABASE_URL` com `sslmode=verify-full`, documentado
+como limitação conhecida desde a criação do Dockerfile — nunca corrigido
+porque nada até agora exercitava esse caminho.
+
+**Alternativa rejeitada:** não suportar TLS de saída e documentar a
+limitação, como o comentário original fazia. Rejeitada porque a Fase 11
+(integração do crier + SigNoz) depende de falar HTTPS com um endpoint
+OTLP externo, e o próprio exportador do crier recusa enviar credencial
+sobre `http://` sem `AllowInsecureCredential` — sem o bundle, a única
+saída seria aceitar essa opção insegura por padrão, o que é pior.
+
+**Trade-off aceito:** ~179 KB a mais na imagem, e um segundo lugar (o
+`Dockerfile`) que precisa saber que o builder tem esse arquivo no caminho
+esperado. Nenhum pacote novo, nenhuma dependência de rede em tempo de
+build além da que `go mod download` já faz — o arquivo já estava lá, só
+não estava sendo copiado.
