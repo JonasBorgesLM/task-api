@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,6 +39,52 @@ import (
 	// solely on its own package's Repository interface.
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+// version and commit identify the running build. Both default to
+// placeholders for a build that skips -ldflags entirely — `go run
+// ./cmd/api` on a developer machine, or `go build` invoked directly
+// without going through `make build` or Dockerfile's own build step —
+// so neither is ever empty in a log line or in /debug/vars.
+//
+// Set at link time via -ldflags "-X main.version=... -X main.commit=...";
+// see Dockerfile's builder stage and Makefile's build target for what
+// feeds them (a git describe/tag and the commit SHA respectively). This
+// is what lets a running pod be correlated back to the exact commit it
+// was built from — see docs/ARCHITECTURE.md's Observability section for
+// why that was worth adding: `-trimpath` (Dockerfile) strips local build
+// paths, and the runtime image excludes .git entirely (.dockerignore), so
+// nothing else in the binary or the image can answer "which commit is
+// this" after the fact.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
+// buildInfoOnce guards publishBuildInfoOnce — see its doc comment.
+var buildInfoOnce sync.Once
+
+// publishBuildInfoOnce registers version and commit as expvar.Func
+// entries — reading the package-level vars of the same name directly,
+// not parameters of the same name, which would shadow them and freeze
+// whatever they held on the first call forever after (a version bump
+// mid-process is not a real scenario outside a test, but
+// TestIntegration_DebugVars_ReportsBuildInfo overwrites the package vars
+// for exactly the length of one test to assert /debug/vars reflects a
+// live read rather than a snapshot, and a shadowed closure fails that
+// silently instead of on the next call — it just keeps reporting the
+// first process's values).
+//
+// Published exactly once per process: expvar.Publish panics on a
+// duplicate name, which every test in this package that builds more
+// than one *http.Server — newServer is called freely across
+// TestNewServer_*/TestIntegration_* — would otherwise trigger on the
+// second call within the same test binary.
+func publishBuildInfoOnce() {
+	buildInfoOnce.Do(func() {
+		expvar.Publish("version", expvar.Func(func() any { return version }))
+		expvar.Publish("commit", expvar.Func(func() any { return commit }))
+	})
+}
 
 func main() {
 	// ctx is canceled the moment SIGINT or SIGTERM is received; run() uses
@@ -67,6 +114,7 @@ func run(ctx context.Context, out io.Writer) error {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	logger.Info("build info", "version", version, "commit", commit)
 
 	srv, closeDB, err := newServer(ctx, cfg, logger)
 	if err != nil {
@@ -247,6 +295,26 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 		ratelimit.WithKeyFunc(userIDKey),
 	)
 
+	// closeLimiters releases the three Limiters' underlying store.
+	//
+	// At moat v0.2.0 (the pinned version), ratelimit.MemoryStore runs no
+	// background goroutine of its own — buckets are reclaimed lazily,
+	// amortized over calls to Take — so today Close only drops the
+	// store's internal map. It is still called on every path that built
+	// these Limiters, including the error path below (buildBlobStore
+	// failing) that used to call only closeDB() and skip them: "close
+	// what you opened" is worth keeping as an invariant on its own
+	// terms, independent of what the current dependency version happens
+	// to need it for, and it is what protects this code if a future
+	// moat release reintroduces one — moat's own doc/DESIGN.md §10 records
+	// that a janitor goroutine was the original plan for MemoryStore
+	// before the amortized-eviction design replaced it.
+	closeLimiters := func() {
+		globalLimiter.Close()
+		authLimiter.Close()
+		userLimiter.Close()
+	}
+
 	// authenticated is what every non-public route is wrapped in:
 	// authenticate first, then charge the request to that user's bucket.
 	// The nesting order is load-bearing — userLimiter's key function
@@ -274,6 +342,13 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	// probe has no credentials to offer; expvar has no such constraint,
 	// since the humans and scrapers who read it can carry a token.
 	mux.Handle("GET /debug/vars", authenticated(expvar.Handler()))
+
+	// Published once per process, not read back anywhere in this file:
+	// expvar.Publish panics if called twice with the same name, which
+	// only matters here because tests build a server per test case (see
+	// TestNewServer_* across this package) — a guarded, idempotent
+	// publish is what keeps newServer callable more than once per binary.
+	publishBuildInfoOnce()
 
 	userHandler.RegisterRoutes(v1, authenticated, authLimiter.Middleware)
 	taskHandler.RegisterRoutes(v1, authenticated)
@@ -303,6 +378,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 	if attachmentsEnabled(cfg) {
 		blobs, closeStore, err := buildBlobStore(ctx, cfg)
 		if err != nil {
+			closeLimiters()
 			closeDB()
 			return nil, nil, fmt.Errorf("open attachment storage: %w", err)
 		}
@@ -421,15 +497,13 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*ht
 		IdleTimeout:  cfg.IdleTimeout,
 	}
 
-	// Each Limiter owns the in-process store it created, and Close stops
-	// the goroutine that expires idle buckets in it. Closing the database
-	// alone would leave three of those running for the lifetime of the
-	// process — harmless in main(), a leak across a test suite that
-	// builds a server per test.
+	// Each Limiter owns the in-process store it created (see
+	// closeLimiters above), and closeBlobs/closeDB release the other two
+	// resources newServer may have opened. Order does not matter between
+	// them — none depends on another being open — but all three must run
+	// once the HTTP server has stopped serving requests, never before.
 	closeAll := func() error {
-		globalLimiter.Close()
-		authLimiter.Close()
-		userLimiter.Close()
+		closeLimiters()
 		if err := closeBlobs(); err != nil {
 			return err
 		}

@@ -368,3 +368,36 @@ decisão corrigir — fica registrado para quem for mexer em
 
 **Validado com o `k8s/rollout-test.sh` existente**, não só lido no
 manifest — ver o resultado real na issue/PR que introduziu esta decisão.
+
+---
+
+## Bundle de CA na imagem `scratch`: copiado do builder, não instalado
+
+A imagem final (`FROM scratch`) passou a incluir
+`/etc/ssl/certs/ca-certificates.crt`, copiado do estágio `builder`
+(`golang:1.26.6-alpine`, que já traz `ca-certificates` instalado — é o
+mesmo arquivo que o próprio `go mod download` usa para falar HTTPS com o
+proxy de módulos).
+
+**Por quê:** sem ele, toda verificação de certificado de saída falhava com
+`x509: certificate signed by unknown authority` — confirmado rodando o
+binário real dentro do container contra `s3.amazonaws.com` com
+`ATTACHMENT_S3_USE_SSL=true`: sem o bundle, a falha é de certificado; com
+o bundle, o handshake TLS completa e o erro que volta é da AWS
+autenticando a credencial (a prova de que a rede/TLS funcionou). O mesmo
+buraco existia para `DATABASE_URL` com `sslmode=verify-full`, documentado
+como limitação conhecida desde a criação do Dockerfile — nunca corrigido
+porque nada até agora exercitava esse caminho.
+
+**Alternativa rejeitada:** não suportar TLS de saída e documentar a
+limitação, como o comentário original fazia. Rejeitada porque a Fase 11
+(integração do crier + SigNoz) depende de falar HTTPS com um endpoint
+OTLP externo, e o próprio exportador do crier recusa enviar credencial
+sobre `http://` sem `AllowInsecureCredential` — sem o bundle, a única
+saída seria aceitar essa opção insegura por padrão, o que é pior.
+
+**Trade-off aceito:** ~179 KB a mais na imagem, e um segundo lugar (o
+`Dockerfile`) que precisa saber que o builder tem esse arquivo no caminho
+esperado. Nenhum pacote novo, nenhuma dependência de rede em tempo de
+build além da que `go mod download` já faz — o arquivo já estava lá, só
+não estava sendo copiado.

@@ -57,9 +57,10 @@ one without discussing it first.
 - `readOnlyRootFilesystem: true` — the filesystem attachment backend
   (`ATTACHMENT_STORAGE_DIR`) cannot work here without a writable volume. These
   manifests use the S3 backend for that reason.
-- The image is `FROM scratch` with `USER 65532:65532` and no CA bundle. TLS to
-  an external endpoint (`ATTACHMENT_S3_USE_SSL=true`, `sslmode=verify-full`)
-  needs certificates copied into the image first.
+- The image is `FROM scratch` with `USER 65532:65532`. It carries a CA bundle
+  (`/etc/ssl/certs/ca-certificates.crt`), so TLS to an external endpoint
+  (`ATTACHMENT_S3_USE_SSL=true`, `sslmode=verify-full`) verifies correctly —
+  see `docs/DECISIONS.md` § "Bundle de CA na imagem scratch".
 
 ## Prove it, don't read it
 
