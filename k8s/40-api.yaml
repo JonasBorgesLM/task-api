@@ -82,6 +82,36 @@ spec:
             - secretRef:
                 name: task-api-secrets
 
+          # cmd/api applies pending migrations (DB_AUTO_MIGRATE, default
+          # true) before it starts listening at all — openDatabase runs
+          # before ListenAndServe. Until that finishes, the process
+          # answers no probe: connections are refused, not 5xx'd. Without
+          # this probe, readiness/liveness would have to be sized for the
+          # worst-case migration on their own — and once startupProbe
+          # succeeds once, it stops running entirely and readiness/
+          # liveness's own initialDelaySeconds starts counting from that
+          # moment, not from container start. See docs/DECISIONS.md §
+          # "startupProbe cobre a migration lenta" for why this was
+          # chosen over the alternative (DB_AUTO_MIGRATE=false plus a
+          # separate cmd/migrate Job): this repo's k8s/ has no release
+          # tool to guarantee a Job completes before the Deployment it
+          # gates, and startupProbe is the mechanism Kubernetes itself
+          # ships for exactly this shape of problem.
+          #
+          # 150 * 2s = 300s (5 minutes) is deliberately generous, not
+          # measured against any migration this project has today (all
+          # seven apply in well under a second) — it is a ceiling for a
+          # migration nobody has written yet, sized to fail loudly on a
+          # migration that is actually stuck rather than to be a number
+          # anyone tunes routinely. Raise it if a real migration needs
+          # more; there is nothing else here to keep in sync with it.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 2
+            failureThreshold: 150
+
           # Readiness gates traffic. maxUnavailable: 0 is enforced
           # against *this* — Kubernetes waits for the new pod to pass it
           # before removing the old one, so a probe that lies about being
@@ -104,6 +134,10 @@ spec:
           # /health/ready would mean a database blip restarts every pod —
           # turning a recoverable outage into a crash loop that removes
           # the API too.
+          #
+          # initialDelaySeconds here only has to cover the gap between
+          # startupProbe succeeding and the process being fully settled —
+          # not the migration itself, which startupProbe already owns.
           livenessProbe:
             httpGet:
               path: /health
@@ -112,10 +146,10 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
 
-          # Neither probe is rate limited: the health routes sit outside
-          # the global limiter on purpose (see cmd/api's newServer), so a
-          # burst of client traffic cannot be read here as an unhealthy
-          # pod and get it killed.
+          # None of the three probes above is rate limited: /health and
+          # /health/ready sit outside the global limiter on purpose (see
+          # cmd/api's newServer), so a burst of client traffic cannot be
+          # read here as an unhealthy pod and get it killed.
 
           resources:
             requests:

@@ -2,6 +2,7 @@ package user
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -76,8 +77,11 @@ func (r *memoryRepository) FindUserByID(ctx context.Context, id string) (User, e
 	return u, nil
 }
 
-// CreateSession persists a new session.
-func (r *memoryRepository) CreateSession(ctx context.Context, s Session) error {
+// CreateSession persists a new session and evicts s.UserID's oldest
+// sessions past maxSessions, all under one write lock — see Repository's
+// doc comment on CreateSession for why that matters for two logins
+// racing each other.
+func (r *memoryRepository) CreateSession(ctx context.Context, s Session, maxSessions int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -86,6 +90,38 @@ func (r *memoryRepository) CreateSession(ctx context.Context, s Session) error {
 	defer r.mu.Unlock()
 
 	r.sessions[s.TokenHash] = s
+
+	var mine []Session
+	for _, sess := range r.sessions {
+		if sess.UserID == s.UserID {
+			mine = append(mine, sess)
+		}
+	}
+	if len(mine) <= maxSessions {
+		return nil
+	}
+
+	sort.Slice(mine, func(i, j int) bool { return mine[i].CreatedAt.Before(mine[j].CreatedAt) })
+	for _, victim := range mine[:len(mine)-maxSessions] {
+		delete(r.sessions, victim.TokenHash)
+	}
+	return nil
+}
+
+// DeleteSessionsForUser removes every session belonging to userID.
+func (r *memoryRepository) DeleteSessionsForUser(ctx context.Context, userID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for hash, s := range r.sessions {
+		if s.UserID == userID {
+			delete(r.sessions, hash)
+		}
+	}
 	return nil
 }
 

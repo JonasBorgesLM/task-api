@@ -254,6 +254,41 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /v1/auth/logout-all:
+    post:
+      tags: [Auth]
+      operationId: logoutAll
+      summary: Invalidate every session belonging to the caller
+      description: >
+        Deletes every session for the authenticated account — including
+        the one that authenticated this very request. Meant for a caller
+        who suspects a token of theirs has leaked: one call guarantees
+        every live session is gone, the active one included, rather than
+        needing to know which token to target individually.
+
+
+        This is the deliberate counterpart to the per-account session cap
+        (see `docs/DECISIONS.md` § "Limite de sessões: teto com evicção
+        da mais antiga"): the cap evicts a user's oldest session
+        automatically once a new login exceeds it, but that is a passive
+        mechanism that only helps if the account keeps logging in
+        normally elsewhere. A caller who wants every session gone *right
+        now* — including a suspected leak — uses this endpoint instead.
+      responses:
+        '204':
+          description: Every session for the account deleted. No response body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /v1/auth/me:
     get:
       tags: [Auth]
@@ -832,6 +867,16 @@ paths:
         `Content-Length`.
 
 
+        The caller's total across every attachment they own —
+        `ATTACHMENT_MAX_BYTES_PER_USER`, 500 MiB by default — is checked
+        *before* the upload streams in, using the total the caller
+        already had. A caller already at or over the quota is refused
+        without a single byte being read; one accepted upload can push
+        the total up to `ATTACHMENT_MAX_BYTES` past the quota (see
+        `docs/DECISIONS.md` § "Quota de anexos" for why that overshoot is
+        accepted).
+
+
         These routes exist only when `ATTACHMENT_STORAGE_DIR` is
         configured; otherwise every one of them returns 404.
       requestBody:
@@ -858,8 +903,10 @@ paths:
         '400':
           description: >
             The body was not multipart, carried no `file` part, exceeded
-            the size limit, or held a content type outside the
-            allow-list.
+            the size limit, held a content type outside the allow-list,
+            or the caller is already at their per-account storage quota
+            (`ATTACHMENT_MAX_BYTES_PER_USER`) — the message never
+            reveals another account's usage, only the caller's own.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -867,8 +914,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-              example:
-                error: 'invalid input: content type "application/octet-stream" is not accepted'
+              examples:
+                unsupportedType:
+                  summary: Content type outside the allow-list
+                  value:
+                    error: 'invalid input: content type "application/octet-stream" is not accepted'
+                quotaExceeded:
+                  summary: Caller already at their per-account quota
+                  value:
+                    error: 'invalid input: attachment quota exceeded (524288000/524288000 bytes used)'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -977,9 +1031,65 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           description: >
-            No attachment with this key for this user — covering both a
-            key that names nothing and one belonging to somebody else —
-            or attachments are disabled.
+            No attachment with this key for this user — covering a key
+            that names nothing, one belonging to somebody else, a
+            malformed (not syntactically UUID) key, or attachments being
+            disabled entirely. All four are answered identically, the
+            same way an unknown or foreign task id is (see the `id` path
+            parameter on `/v1/tasks/{id}`).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: attachment not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+    delete:
+      tags: [Attachments]
+      operationId: deleteAttachment
+      summary: Delete an attachment
+      description: >
+        Removes both the metadata row and the underlying file, in the
+        same request — not deferred to the orphan collector's own
+        schedule. See docs/DECISIONS.md § "Delete de anexo: síncrono, não
+        só o coletor" for the full reasoning, including why a second
+        delete of the same key returns 404 rather than a silent 204.
+
+
+        Ownership follows the same rule as download: a key belonging to
+        another user's task is answered exactly like a key that names
+        nothing. No request body.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: The attachment's `storage_key`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Attachment deleted successfully. No response body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >
+            No attachment with this key for this user — covering a key
+            that names nothing, one belonging to somebody else, or one
+            already deleted (by this call or an earlier one) — or
+            attachments are disabled.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -1135,23 +1245,19 @@ components:
         Server-generated task identifier (a UUIDv4 as produced by
         CreateTask), scoped to the authenticated caller.
 
-        A well-formed but unknown id and a well-formed id belonging to a
-        *different* user both result in 404, identically — the API never
-        reveals whether a task ID exists if the caller doesn't own it.
-
-        A **malformed** id (not a syntactically valid UUID) is a separate
-        case and currently yields **500**, not 404: the API performs no
-        UUID validation of its own, so the value reaches PostgreSQL, whose
-        `::uuid` cast rejects it as a query error rather than as "no rows"
-        (`internal/task/postgres_repository.go`;
-        `TestPostgres_FindByID_MalformedID` pins this behavior down). Note
-        this is backend-dependent — the in-memory store, used when
-        DATABASE_URL is unset, returns 404 for the same input. This is a
-        known rough edge rather than an intended contract: malformed
-        client input should be a 4xx, and the two backends should agree.
-        It is documented here because this document describes what the
-        implementation does, not what it ought to do; see the project
-        README/ARCHITECTURE for the tracked follow-up.
+        A well-formed but unknown id, a well-formed id belonging to a
+        *different* user, and a **malformed** id (not a syntactically
+        valid UUID) all result in 404, identically. `Service.isValidID`
+        rejects a malformed shape before either storage backend is
+        consulted (`internal/task/service.go`), which is what makes the
+        in-memory and PostgreSQL-backed stores agree — PostgreSQL's own
+        `::uuid` cast would otherwise reject the value as a query error
+        (500) rather than as "no rows", a divergence
+        `TestPostgres_FindByID_MalformedID` still documents for a caller
+        that reaches `Repository` directly, bypassing `Service`. The API
+        never reveals, through the status code alone, which of the three
+        cases applies — that is what keeps a non-owner from learning
+        whether a given task ID exists.
       schema:
         type: string
       example: f47ac10b-58cc-4372-a567-0e02b2c3d479

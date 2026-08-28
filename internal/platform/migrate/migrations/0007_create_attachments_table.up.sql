@@ -35,9 +35,13 @@
 --     component, so a longer value could not have been a real filename
 --     on the uploader's machine either.
 --
---   - content_type is what the upload declared, bounded by the same
---     255 as the filename. It is stored so the download can echo it, not
---     trusted as a statement of fact about the bytes.
+--   - content_type is what internal/attachment.Service.Upload detected
+--     from the bytes themselves (http.DetectContentType), never what the
+--     client declared in its own Content-Type header — that header is
+--     never consulted at all. Bounded by the same 255 as the filename.
+--     Stored so a download can echo back the type the server actually
+--     determined, which is what makes the upload allow-list meaningful
+--     rather than decorative.
 --
 --   - size_bytes is BIGINT: INTEGER caps at 2 GiB, which is a limit the
 --     column has no business imposing. The CHECK exists because a

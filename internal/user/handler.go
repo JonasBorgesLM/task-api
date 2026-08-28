@@ -22,6 +22,7 @@ type userService interface {
 	Authenticate(ctx context.Context, email, password string) (User, error)
 	CreateSession(ctx context.Context, userID string) (token string, expiresAt time.Time, err error)
 	Logout(ctx context.Context, token string) error
+	LogoutAll(ctx context.Context, userID string) error
 	GetUser(ctx context.Context, id string) (User, error)
 }
 
@@ -46,6 +47,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth, rateLimit midd
 	mux.Handle("POST /auth/register", rateLimit(http.HandlerFunc(h.register)))
 	mux.Handle("POST /auth/login", rateLimit(http.HandlerFunc(h.login)))
 	mux.Handle("POST /auth/logout", requireAuth(http.HandlerFunc(h.logout)))
+	mux.Handle("POST /auth/logout-all", requireAuth(http.HandlerFunc(h.logoutAll)))
 	mux.Handle("GET /auth/me", requireAuth(http.HandlerFunc(h.me)))
 }
 
@@ -124,6 +126,23 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	token, _ := middleware.SessionTokenFromContext(r.Context())
 
 	if err := h.svc.Logout(r.Context(), token); err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// logoutAll handles POST /auth/logout-all — deletes every session
+// belonging to the authenticated caller, including the one that
+// authenticated this very request. Meant for a user who suspects a
+// token of theirs has leaked and wants every live session gone at once,
+// rather than needing to know which one to target — see
+// user.Service.LogoutAll's doc comment.
+func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	if err := h.svc.LogoutAll(r.Context(), userID); err != nil {
 		h.handleServiceError(w, r, err)
 		return
 	}
