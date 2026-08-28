@@ -86,7 +86,7 @@ func TestPostgres_ServerLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	srv, closeDB, err := newServer(ctx, cfg, discardLogger())
+	srv, closeDB, err := newServer(ctx, cfg, discardLogger(), nil)
 	if err != nil {
 		t.Fatalf("newServer() unexpected error: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestPostgres_ReadinessReportsUnavailable_WhenDatabaseUnreachable(t *testing
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	srv, closeDB, err := newServer(ctx, cfg, discardLogger())
+	srv, closeDB, err := newServer(ctx, cfg, discardLogger(), nil)
 	if err != nil {
 		t.Fatalf("newServer() unexpected error: %v", err)
 	}

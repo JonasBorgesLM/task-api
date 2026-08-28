@@ -37,6 +37,11 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   vulnerabilidade acionável for encontrada.
 - Deploy validado sem downtime em Kubernetes (rolling update, probes,
   drain configurável via `HTTP_PRE_SHUTDOWN_DELAY`).
+- Espelhamento opcional de logs para um coletor OTLP/HTTP (SigNoz, um
+  OTel Collector, etc.), via `CRIER_OTLP_ENDPOINT` — desligado por
+  padrão, e nunca substitui o log em stdout. `GET /debug/vars` ganha
+  `crier_buffer_depth` e `crier_records_dropped` quando habilitado.
+  Detalhes em `docs/DECISIONS.md`.
 
 ### Alterado
 - **BREAKING:** todas as rotas passam a exigir o prefixo `/v1`. Um

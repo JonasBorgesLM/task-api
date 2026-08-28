@@ -299,9 +299,251 @@ honesto: o processo sabe que está desligando, e a espera é parte de como
 ele desliga.
 
 **Restrição a manter:** o `terminationGracePeriodSeconds` do orquestrador
-precisa cobrir este atraso **mais** o `HTTP_SHUTDOWN_TIMEOUT`. Hoje
-5 + 10 < 30. Aumentar qualquer um dos dois sem aumentar o grace period é
-como isso volta a quebrar, em silêncio.
+precisa cobrir este atraso **mais** o `HTTP_SHUTDOWN_TIMEOUT` **mais**,
+desde a integração do crier (Fase 11), o orçamento de drain do crier
+que roda depois (`crierShutdownTimeout`, `cmd/api/crier.go`) — `closeAll`
+roda os dois em sequência, nunca em paralelo. Hoje 5 + 10 + 5 = 20 < 30.
+Aumentar qualquer um dos três sem aumentar o grace period é como isso
+volta a quebrar, em silêncio. Ver a seção "Fase 11.7" abaixo para a
+medição real desse orçamento sob carga, não só a aritmética.
+
+---
+
+## Fase 11: crier embutido, stdout mantido em paralelo
+
+`cmd/api/crier.go` integra a biblioteca `crier` (`core.New()` + o
+exportador `exporters/otlp`) como um segundo destino de log, opt-in via
+`CRIER_OTLP_ENDPOINT`. Sem essa variável, `buildCrier` retorna `nil` e
+nada muda — mesmo padrão de "desligável por configuração" já usado para
+`ATTACHMENT_S3_*`.
+
+**stdout nunca é substituído, só espelhado.** `crierTeeHandler`
+(`cmd/api/crier.go`) envolve o `slog.Handler` que já escreve em stdout;
+`Handle()` sempre chama o handler original primeiro, e o resultado que
+`Handle()` devolve é o dele — o espelhamento para o crier é best-effort e
+nunca pode afetar o caminho principal.
+
+**Por quê manter os dois:** o buffer do crier é em memória, de uma
+instância só, reiniciada a cada rollout. stdout já é capturado pelo
+runtime do container e sobrevive a qualquer coisa que aconteça com o
+crier — inclusive ele nunca ter sido configurado. O README do crier é
+explícito: entrega é *at-least-once*, e perda no shutdown é possível e
+sempre contada (`DrainSummary`), nunca silenciosa.
+
+**Trade-off aceito:** manter os dois sinks custa uma linha de log
+duplicada por request quando o crier está ligado — armazenamento e
+egress dobrados para o volume de acesso. Aceito porque a alternativa
+(substituir stdout) reintroduz exatamente o ponto único de falha que o
+parágrafo acima descreve.
+
+### Um "tee" de `slog.Handler`, não uma chamada por call site
+
+A alternativa considerada foi adicionar `crier.Log(...)` em cada um dos
+~20 call sites de log do projeto (cmd/api e os três Handlers de domínio).
+Rejeitada: exigiria mudar toda linha de log existente e criaria dois
+caminhos para divergir. Em vez disso, `crierTeeHandler` embrulha o
+`slog.Handler` uma única vez, em `run()` — todo `logger.Error/Info/Warn`
+já existente passa a alcançar o crier automaticamente, `request_id`
+incluído (é só mais um atributo que a linha de log já carregava).
+
+### Um achado real, não só leitura de documentação: atributos precisam de conversão
+
+Verificado por experimento, não por ler o código do crier: um atributo
+`slog` de tipo `error` (o que `"error", err` produz — `error` não é um
+`slog.Kind` nativo) chega ao `Limits` do crier como tipo não suportado, e
+é **silenciosamente substituído** por um marcador `"…[unsupported value
+type]"` antes da exportação — descartando exatamente o campo que uma
+pessoa abre o log para ler. `crierAttrValue` (`cmd/api/crier.go`) resolve
+isso: converte qualquer atributo fora da lista seguros do crier (string,
+bool, os inteiros, float, `time.Duration`, `time.Time`) para sua
+representação em texto (`slog.Value.String()`, que corretamente chama
+`.Error()`/`.String()` do valor por baixo) antes de entregar ao crier.
+`TestCrierTeeHandler_PreservesWrappedOutput_AndMirrorsToCrier` e
+`TestCrierAttrValue` (`cmd/api/crier_test.go`) travam essa propriedade —
+cada um foi verificado falhando de propósito (a conversão removida
+temporariamente) antes de mergear.
+
+### Custo de dependência (issue 11.3)
+
+`go get` real, grafo conferido (não suposto): `CRIER_OTLP_ENDPOINT`
+configurado adiciona exatamente **4 módulos** —
+`github.com/JonasBorgesLM/crier/core`,
+`github.com/JonasBorgesLM/crier/exporters/otlp`,
+`go.opentelemetry.io/proto/slim/otlp` (a variante *slim*, que existe
+precisamente para não trazer a árvore de dependência do coletor/gRPC
+completo) e `google.golang.org/protobuf`. `moat` já era dependência
+direta, sem bump de versão. Todos Go puro — confirmado, não só assumido,
+pelo próprio build estático (`FROM scratch`, `CGO_ENABLED=0`) continuar
+funcionando com eles no grafo. `govulncheck` limpo com as quatro
+dependências novas presentes.
+
+**Trade-off aceito:** o exportador é OTLP/HTTP apenas (porta **4318**,
+path `/v1/logs` — não há transporte gRPC nem porta 4317, ao contrário do
+esboço original desta fase). Se um backend de observabilidade futuro só
+falar gRPC, essa decisão precisa ser revisitada — não é o caso do SigNoz,
+que traz coletor OTLP/HTTP embutido.
+
+### Nome de serviço e versão
+
+`Options.ServiceName` é a constante `"task-api"` (`crierServiceName`).
+`Options.ServiceVersion` fica vazio por ora — o mecanismo de
+versão/commit do binário (`version`/`commit` em `cmd/api/main.go`) ainda
+não existe nesta branch (issue #83/#84, PR separado). Preenchê-lo é
+consequência de uma linha só assim que aquele PR mergear; não vale
+duplicar aqui o mecanismo de detecção de versão só para adiantar este
+campo opcional.
+
+### `crierShutdownTimeout`: provisório, não a aritmética final
+
+`crier.Shutdown` roda dentro de `closeAll`, **antes** de `closeDB` e
+**depois** de `closeBlobs` — na mesma ordem já estabelecida para os
+outros recursos. O timeout usado (`crierShutdownTimeout`, 5s) é uma
+constante própria, deliberadamente **não** reaproveitando
+`cfg.ShutdownTimeout`: `closeAll` roda *depois* de `srv.Shutdown` já ter
+gasto até `cfg.ShutdownTimeout` do seu próprio orçamento, e empilhar um
+segundo orçamento completo em cima estufaria o tempo total de shutdown
+silenciosamente para além do que `terminationGracePeriodSeconds` no
+manifest do Kubernetes contabiliza.
+
+**Isto é provisório.** 5s foi escolhido pelo mesmo raciocínio do timeout
+de ping do banco (`openDatabase`), não por medição contra um SigNoz real
+— não existe um ainda (issue 11.5, bloqueada em decisão de
+infraestrutura). A issue 11.7 revisita essa aritmética depois de existir
+um deploy real para rodar `k8s/rollout-test.sh` contra ele, igual ao que
+já foi feito para `HTTP_PRE_SHUTDOWN_DELAY` — ver a seção "Drain antes do
+shutdown" acima.
+
+### `/health/ready` não é acoplado ao crier (issue 11.8)
+
+`core.Crier.Health()` existe e reporta liveness/readiness do próprio
+pipeline do crier — e **deliberadamente não é consultado por**
+`GET /health/ready`. Profundidade do buffer e contadores de perda por
+motivo são publicados em `/debug/vars`
+(`crier_buffer_depth`, `crier_records_dropped`) em vez disso.
+
+**Por quê:** `/health/ready` existe para a dependência de que a API
+*precisa* para servir — o banco (ver `k8s/40-api.yaml`). Um backend de
+log inacessível não impede a API de atender ninguém; acoplar os dois
+faria um SigNoz fora do ar tirar réplicas saudáveis de serviço, a mesma
+inversão de prioridade já rejeitada para liveness não checar dependência.
+`core.Health.Live()` do próprio crier documenta esse raciocínio para o
+pipeline dele mesmo — este projeto aplica o mesmo princípio uma camada
+acima, à sua própria composição do crier como dependência opcional.
+
+**Como o expvar permanece correto entre testes.** `expvar.Publish` só
+pode ser chamado uma vez por nome — mas `buildCrier` roda uma vez por
+`*testing.T` na suíte deste pacote, não uma vez por processo como em
+`main()`. `publishCrierExpvarOnce` (guardado por `sync.Once`) resolve
+isso publicando os `expvar.Func` uma única vez, fechando sobre variáveis
+de pacote (`currentCrierInstance`/`currentCrierMetrics`, ponteiros
+atômicos) que cada chamada de `buildCrier` reaponta — o mesmo padrão já
+estabelecido no projeto de "fechar sobre a variável de pacote, nunca
+sobre um parâmetro capturado", aplicado aqui pela primeira vez a um
+recurso construído mais de uma vez por processo de teste.
+
+---
+
+## Validação real da issue 11.6: dois registros confirmados no ClickHouse do SigNoz
+
+`CRIER_OTLP_ENDPOINT` verificado entregando de verdade, não apenas "o
+exportador não retornou erro" — cada prova consultou diretamente o
+`signoz_logs.logs_v2` do ClickHouse por `request_id`, não a UI (que
+exigiria resolver o fluxo de login da versão do SigNoz instalada, tempo
+melhor gasto verificando o dado em si):
+
+1. **`run()` local → SigNoz real**, sem Kubernetes envolvido: binário
+   compilado desta branch, `CRIER_OTLP_ENDPOINT=http://localhost:4318`,
+   uma requisição a `/health`, `SIGTERM` gracioso. Log
+   `"crier drain completed", "summary":"drain complete in 1ms, no
+   records lost"`. `SELECT ... FROM signoz_logs.logs_v2 WHERE
+   attributes_string['request_id'] = '<o id do log>'` — **uma linha**,
+   `method`/`path`/`duration`/`request_id` todos intactos.
+2. **Deploy real via os manifests deste repositório**, dentro de um
+   cluster kind: `kubectl apply -f k8s/` com o `CRIER_OTLP_ENDPOINT` já
+   registrado no `ConfigMap` (`k8s/30-config.yaml`), `signoz-ingester-1`
+   conectado à rede `kind`, requisição real contra o `Service`, e então
+   `kubectl rollout restart deploy/task-api` — a mesma operação que
+   `k8s/rollout-test.sh` (issue 11.7) vai medir. O `request_id` da
+   requisição feita **antes** do restart apareceu no ClickHouse **depois**
+   do pod antigo ter sido substituído — prova de que o drain do crier no
+   `closeAll` (ver a seção "Fase 11" acima) de fato roda antes do processo
+   sair, não só em teoria. `resources_string['service.name'] = 'task-api'`
+   confirmado em 87 registros contados no total, batendo com
+   `crierServiceName` (`cmd/api/crier.go`).
+
+Recursos de teste (cluster(s) kind descartáveis, imagem
+`task-api:crier-e2e-test`) removidos depois; o stack do SigNoz continua
+rodando na máquina para a issue 11.7 reaproveitar.
+
+---
+
+## Issue 11.7: shutdown sob carga real, drain do crier reconciliado com o SigNoz
+
+`k8s/rollout-test.sh` estendido para, quando encontra um SigNoz rodando
+(`SIGNOZ_UP=true`, mesma detecção da seção acima), reconciliar o que o
+crier reportou ter perdido no drain contra o que de fato chegou ao
+ClickHouse — não só medir requisições HTTP perdidas, que já era o que o
+script fazia.
+
+**Dois pods, não um.** Uma primeira versão só capturava o drain do pod
+que o rollout substitui, deixando os últimos segundos de carga contra o
+pod *novo* — que segue rodando até o script terminar — de fora de
+qualquer contabilidade. Corrigido fazendo o script também desligar esse
+pod final graciosamente (`kubectl delete pod`, o mesmo caminho de
+shutdown de um rollout ou de `kind delete cluster` com Kubernetes real,
+diferente de um `kind delete cluster` puro — que mata os containers sem
+dar chance de shutdown gracioso nenhum) antes de consultar o ClickHouse.
+
+**A divergência apareceu, foi investigada, e a causa raiz não é bug do
+task-api.** Com os dois pods desligados graciosamente e ambos reportando
+`"crier drain completed"` (zero perda), o ClickHouse ainda assim mostrou
+menos registros do que os enviados logo em seguida — 148 de 159 numa
+medição. A causa: `Export()` do exportador OTLP retornar sucesso
+significa apenas que o **receptor OTLP do SigNoz aceitou o lote** (ver o
+doc comment de `exporters/otlp.Exporter.Export`), não que o registro já
+está indexado no ClickHouse — o próprio SigNoz faz seu processamento e
+inserção de forma assíncrona, num ciclo que o crier não enxerga nem
+controla. Confirmado eliminando a divergência com uma espera adicional
+*depois* dos dois drains — 15s, medido, não suposto — e reproduzindo o
+resultado limpo (sent = received, 0 perdas) em duas execuções
+consecutivas com durações de carga diferentes (166/166 com 20s de carga,
+207/207 com 25s).
+
+**O que isso não prova, e é importante dizer:** que o crier nunca perde
+nada. Prova que, nas condições testadas (rede local, sem pressão de
+buffer, sem circuito aberto), o caminho feliz é exato. `DrainSummary`
+continua sendo o mecanismo que conta perda real quando ela acontece — a
+reconciliação aqui é o que verifica, por execução repetida, que esse
+mecanismo bate com a realidade quando diz que não perdeu nada.
+
+**Aritmética do grace period revista** (issue explicitamente pede isto
+junto): com o drain do crier agora parte do `closeAll`,
+`terminationGracePeriodSeconds` precisa cobrir `HTTP_PRE_SHUTDOWN_DELAY`
+(5s) + `HTTP_SHUTDOWN_TIMEOUT` (10s) + `crierShutdownTimeout` (5s) = 20s,
+contra os 30s configurados — folga de 1.5x, contra 3x antes da Fase 11.
+Comentários atualizados em `k8s/40-api.yaml` e `k8s/30-config.yaml` no
+mesmo commit desta seção. Nenhuma das execuções acima chegou perto do
+orçamento de 20s — o shutdown gracioso, com o SigNoz local e saudável,
+levou uma fração de segundo, não o pior caso.
+
+**Um achado à parte, investigado e não confirmado como bug — registrado
+para não se perder.** Numa das primeiras tentativas de criar o cluster
+do zero com o crier já configurado, o pod de `task-api` foi
+`OOMKilled` (limite de 256Mi) nos primeiros segundos, antes de qualquer
+carga real. Comparação direta de RSS local (com e sem
+`CRIER_OTLP_ENDPOINT` configurado) mostrou diferença de menos de 1 MiB —
+não sustenta um vazamento de memória do crier. Repetindo a mesma sequência
+(cluster novo, manifests com o crier já configurado, aplicados a frio)
+mais de uma vez depois, o mesmo pod subiu com o padrão de restart já
+conhecido e documentado deste projeto (`Error`, exit 1 — Postgres ainda
+não pronto no instante em que `task-api` tenta migrar, corrigido
+sozinho pela política de restart do Kubernetes em segundos) — **sem**
+`OOMKilled`, com ou sem o crier configurado. Não foi possível reproduzir
+o OOM sob condições controladas; o mais provável é uma picada
+transitória de memória no host durante criação/remoção rápida e repetida
+de clusters kind nesta máquina de desenvolvimento, não algo que o código
+do crier introduziu. Registrado em vez de descartado, para que uma
+reaparição futura tenha este parágrafo como ponto de partida.
 
 ---
 
@@ -324,6 +566,29 @@ sentido como número autônomo quando o SigNoz divide a máquina com o
 Docker do cluster de validação; o que importa agora é a máquina como um
 todo ter memória suficiente para os dois (o Compose oficial documenta os
 próprios requisitos de recurso).
+
+**Instalação reproduzível.** O `deploy/docker` legado do repositório do
+SigNoz está deprecado desde a v0.130.0, substituído pela CLI **Foundry**:
+
+```bash
+curl -fsSL https://signoz.io/foundry.sh | bash   # instala foundryctl
+cat > casting.yaml <<'YAML'
+apiVersion: v1alpha1
+kind: Installation
+metadata:
+  name: signoz
+spec:
+  deployment:
+    flavor: compose
+    mode: docker
+YAML
+foundryctl cast -f casting.yaml   # gera o compose e sobe os containers
+```
+
+Com o nome de projeto padrão ("signoz"), o container que recebe OTLP é
+`signoz-ingester-1`, publicado em `0.0.0.0:4317-4318` no host e também
+acessível por nome dentro da rede Docker `signoz-network` que o Compose
+cria.
 
 ### A pergunta que não podia ser assumida: como um pod alcança um serviço no host
 

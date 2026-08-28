@@ -338,6 +338,22 @@ type Config struct {
 	AuthRateLimitPerSec float64
 	UserRateLimitBurst  int
 	UserRateLimitPerSec float64
+
+	// CrierOTLPEndpoint is the OTLP/HTTP collector logs are mirrored to,
+	// in addition to (never instead of) the stdout JSON log — see
+	// docs/DECISIONS.md's Fase 11 section for why both exist. Empty (the
+	// zero value) disables it entirely: cmd/api never constructs a
+	// crier.Crier, and nothing about logging changes. Unlike
+	// AttachmentS3Endpoint, this carries a full URL with scheme
+	// (e.g. "https://collector.example.com:4318") — that is the shape
+	// crier/exporters/otlp.Config.Endpoint requires, and there is no
+	// separate UseSSL field to keep in sync with it.
+	//
+	// Credential, headers and compression are not configurable yet —
+	// there is nothing to point them at until a collector is actually
+	// provisioned. Adding them here before that would be exactly the
+	// speculative config CLAUDE.md warns against.
+	CrierOTLPEndpoint string
 }
 
 // Load reads configuration from environment variables and applies defaults
@@ -439,6 +455,8 @@ func Load() (Config, error) {
 	if cfg.HSTSMaxAge, err = parseNonNegativeDuration("HSTS_MAX_AGE", defaultHSTSMaxAge); err != nil {
 		return Config{}, err
 	}
+
+	cfg.CrierOTLPEndpoint = strings.TrimSpace(os.Getenv("CRIER_OTLP_ENDPOINT"))
 
 	cfg.AttachmentStorageDir = strings.TrimSpace(os.Getenv("ATTACHMENT_STORAGE_DIR"))
 

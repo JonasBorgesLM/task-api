@@ -1127,6 +1127,12 @@ paths:
         an open-ended JSON object whose keys depend on what the runtime
         and the process publish, so it is intentionally not modelled as a
         fixed schema here.
+
+        When `CRIER_OTLP_ENDPOINT` is configured, two additional keys
+        appear: `crier_buffer_depth` (records buffered and not yet
+        exported) and `crier_records_dropped` (a JSON object counting
+        records lost, by reason). Both report zero/empty when crier is
+        not configured — see docs/DECISIONS.md's Fase 11 section.
       responses:
         '200':
           description: Current runtime statistics.

@@ -44,17 +44,24 @@ spec:
       # Must cover the whole termination sequence: the drain delay the
       # process waits before it stops accepting connections
       # (HTTP_PRE_SHUTDOWN_DELAY, 5s) *plus* the graceful shutdown budget
-      # that follows it (HTTP_SHUTDOWN_TIMEOUT, 10s), plus room for the
-      # request in flight that is using it. 5 + 10 < 30.
+      # that follows it (HTTP_SHUTDOWN_TIMEOUT, 10s) *plus*, since the
+      # Fase 11 crier integration, the crier drain budget that runs
+      # after that (crierShutdownTimeout in cmd/api/crier.go, 5s) —
+      # closeAll runs both HTTP shutdown and crier shutdown in sequence,
+      # never in parallel. 5 + 10 + 5 = 20 < 30.
       #
       # If this were shorter, Kubernetes would SIGKILL the process while
       # it was still draining, and the requests it was mid-way through
-      # answering would be dropped — the exact failure a graceful
-      # shutdown exists to prevent, reintroduced by a number in a YAML
-      # file. 30s leaves 3x the budget.
+      # answering — or the log records still buffered in crier — would
+      # be dropped: the exact failure a graceful shutdown exists to
+      # prevent, reintroduced by a number in a YAML file. 30s leaves
+      # 1.5x the worst-case budget — down from 3x before the crier
+      # drain joined the sequence; see docs/DECISIONS.md's Fase 11.7
+      # section for the load-tested measurement this margin was checked
+      # against, not just this arithmetic.
       #
-      # Raising HTTP_SHUTDOWN_TIMEOUT without raising this is the way
-      # this silently breaks.
+      # Raising HTTP_SHUTDOWN_TIMEOUT or crierShutdownTimeout without
+      # raising this is the way this silently breaks.
       terminationGracePeriodSeconds: 30
 
       containers:

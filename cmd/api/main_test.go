@@ -337,7 +337,7 @@ func TestReadinessEndpoint_UnreachableDB_ReturnsServiceUnavailable(t *testing.T)
 func newTestHandler(t *testing.T, cfg config.Config) http.Handler {
 	t.Helper()
 
-	srv, closeDB, err := newServer(t.Context(), cfg, discardLogger())
+	srv, closeDB, err := newServer(t.Context(), cfg, discardLogger(), nil)
 	if err != nil {
 		t.Fatalf("newServer() error = %v", err)
 	}
