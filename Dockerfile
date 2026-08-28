@@ -20,15 +20,30 @@ RUN go mod download
 
 COPY . .
 
+# VERSION/COMMIT identify the build this image contains. Neither can be
+# derived from inside this stage: .dockerignore excludes .git from the
+# build context entirely (deliberately — see that file's own comment),
+# so `git describe`/`git rev-parse` have nothing to read here. The
+# Makefile's docker-build target is what supplies real values, reading
+# the host's git history before the build starts; a bare `docker build`
+# with neither ARG set falls back to the same "dev"/"unknown" defaults
+# main.go itself uses for a build with no -ldflags at all — see that
+# file's version/commit doc comment for why they're never empty.
+ARG VERSION=dev
+ARG COMMIT=unknown
+
 # CGO_ENABLED=0 removes the libc dependency, producing a fully static
 # binary — this is what makes it possible to run on the empty `scratch`
 # base below instead of needing glibc/musl in the final image.
 # -trimpath strips local build-machine file paths from the binary.
 # -ldflags="-s -w" strips the symbol table and DWARF debug info: this is
 # a release artifact, not something meant to be attached to with delve.
+# The two -X flags are what let a running container answer "which
+# commit is this" via GET /debug/vars — nothing else in the image can,
+# once -trimpath and the missing .git have done their job.
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
-      -ldflags="-s -w" \
+      -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
       -o /out/task-api \
       ./cmd/api
 

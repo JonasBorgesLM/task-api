@@ -235,7 +235,7 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `GET` | `/v1/files/{key}` | required | Download an attachment by its `storage_key` |
 | `GET` | `/health` | — | Liveness — always `200` while the process runs |
 | `GET` | `/health/ready` | — | Readiness — `200` if the database is reachable, `503` if not |
-| `GET` | `/debug/vars` | required | Runtime stats (`expvar`) — authenticated, unlike the health routes |
+| `GET` | `/debug/vars` | required | Runtime stats (`expvar`) plus `version`/`commit` for the running build — authenticated, unlike the health routes |
 
 Errors always use the same envelope, `{"error": "description of the problem"}`. Common codes: `400` invalid input, `401` missing/invalid session token, `503` a dependency (the database) is unavailable — the token is fine, retry, `404` unknown or not-yours task ID, `409` optimistic-concurrency conflict or illegal status transition (re-fetch and retry), `429` a rate limit was exceeded (wait and retry; `/health` and `/health/ready` are the only routes never rate limited), `500` unexpected failure (details logged server-side, never in the response).
 
