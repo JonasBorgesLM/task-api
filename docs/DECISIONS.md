@@ -1113,3 +1113,27 @@ resolvida depois de ver a execução real no pipeline (contagem de
 iterações, tempo, resultado). Aplique o mesmo padrão em qualquer issue
 que envolva CI, deploy, ou qualquer configuração que se pretende validar:
 não feche por ter editado o arquivo certo, feche por ter visto rodar.
+
+---
+
+## Frontend: Vite (SPA), monorepo em `web/`, mesma linha de versão do repo
+
+Quatro decisões de arquitetura para o frontend (Fase 13, `docs/changes/web-frontend/plan.md` `CI-1`), registradas antes de qualquer código para que a implementação não fique escolhendo essas coisas ad hoc conforme avança.
+
+### Vite, não Next.js
+
+O frontend é uma SPA pura (Vite + React + TypeScript), sem SSR e sem rotas de servidor. Isso não é uma omissão — é a confirmação de uma decisão já registrada em `docs/ARCHITECTURE.md` § Future Improvements, "BFF (Backend-for-Frontend) layer": esse item já dizia que um BFF só se justifica quando existir mais de um serviço downstream para agregar, ou quando um cliente web e um cliente mobile precisarem de formatos de payload genuinamente diferentes. Nenhuma das duas condições existe hoje — há um único recurso central (`task-api`) e um único cliente (este frontend). Next.js (ou qualquer framework com SSR/rotas de API embutidas) resolveria um problema que este projeto não tem, ao custo de um servidor Node adicional para operar, testar e fazer deploy. Se um BFF real se justificar no futuro, é uma camada nova e explícita — não uma razão para escolher um framework diferente agora.
+
+### Monorepo com CI filtrado por caminho
+
+`web/` vive dentro deste mesmo repositório, não em um repositório separado. A alternativa (multi-repo) exigiria coordenar duas releases, dois `CHANGELOG.md`, e — o problema real — versionar a compatibilidade entre o contrato do backend e o que o frontend espera dele através de dois históricos de commit diferentes, quando `docs/openapi.yaml` já é a fonte única da verdade para os dois lados dentro de um único commit.
+
+O custo do monorepo é acoplar os dois gates de CI se não houver cuidado: um PR que só toca `web/` não deveria disparar o gate Go (`gofmt`, `staticcheck`, `govulncheck`, testes com PostgreSQL), e vice-versa. `CI-2` do plano resolve isso com `paths-ignore`/`paths` nos dois workflows (`.github/workflows/ci.yml` ganha `paths-ignore: ['web/**']`; `.github/workflows/web-ci.yml`, novo, roda só em `web/**`) — e exige verificação por **execução real** nos dois sentidos antes de considerar o item pronto, não leitura do YAML, porque a Fase 7 já teve um caso real de filtro de workflow que parecia certo lido e não funcionava rodando (ver § "Princípio geral de validação" acima).
+
+### Versionamento compartilhado com o repo
+
+`web/` não tem sua própria tag/release — ele segue a mesma linha `vX.Y.Z` do repositório como um todo (a mesma que `CHANGELOG.md` já versiona). Um release do projeto que inclui mudança de frontend ganha uma entrada no mesmo `CHANGELOG.md`, não um arquivo separado. Isso é consistente com o monorepo: não faz sentido dizer que "o backend está na v1.2.0 mas o frontend está na v1.0.3" quando os dois são publicados, testados e versionados juntos a partir do mesmo commit.
+
+### Cookie httpOnly, nunca `localStorage`
+
+O frontend nunca guarda a credencial de sessão em `localStorage`/`sessionStorage`. A sessão vive exclusivamente no cookie `HttpOnly` que o backend já emite em `POST /auth/login` (ver § "Autenticação: modo duplo (cookie httpOnly + Bearer)" acima) — o próprio motivo de o backend ter adotado esse modo de autenticação já era fechar a superfície de roubo de token via XSS que `localStorage` deixa aberta; seria autocontraditório o frontend reabrir essa mesma superfície guardando o token CSRF, ou qualquer outra coisa sensível, num storage que qualquer script no mesmo documento consegue ler. O token CSRF (obtido de `GET /v1/auth/csrf-token`) vive só em memória — uma variável JS que desaparece a cada reload, exigindo uma nova busca — nunca persistido.
