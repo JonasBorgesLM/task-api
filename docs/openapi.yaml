@@ -11,8 +11,18 @@ info:
     optional description, a status (`pending`, `in_progress`, `done`, or
     `cancelled`, following the transition rules below), and a priority
     (`low`, `medium`, or `high`), and may carry file attachments.
-    Authentication is opaque bearer session tokens, issued by
-    POST /v1/auth/login.
+    Authentication is opaque session tokens (not a JWT), issued by
+    POST /v1/auth/login. A client sends the token back either as
+    `Authorization: Bearer <token>` or lets the browser carry it
+    automatically via the HttpOnly session cookie that same login
+    response also sets — see the `bearerAuth` and `cookieAuth` security
+    schemes below. Any state-changing request (POST/PUT/PATCH/DELETE)
+    that does not carry `Authorization` must additionally pass CSRF
+    verification, including POST /auth/login and POST /auth/register
+    themselves — see GET /v1/auth/csrf-token and the `403` response
+    documented on every mutating route below. A request carrying
+    `Authorization: Bearer` is exempt from CSRF entirely, whether or not
+    a session cookie happens to also be present.
 
 
     **Versioning.** The contract lives under `/v1`. The health probes
@@ -49,7 +59,7 @@ info:
     would disable it behind the TLS-terminating proxy it exists for.
     `HSTS_MAX_AGE=0` is the opt-out. See docs/ARCHITECTURE.md's
     "Operational Behavior".
-  version: "2.2.0"
+  version: "2.3.0"
   license:
     name: MIT
     url: https://github.com/JonasBorgesLM/task-api/blob/main/LICENSE
@@ -78,6 +88,7 @@ tags:
 
 security:
   - bearerAuth: []
+  - cookieAuth: []
 
 paths:
   /v1/auth/register:
@@ -142,6 +153,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: email already registered
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '500':
@@ -216,6 +229,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: invalid email or password
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '500':
@@ -287,6 +302,8 @@ paths:
               $ref: '#/components/headers/XRequestID'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '500':
@@ -322,6 +339,8 @@ paths:
               $ref: '#/components/headers/XRequestID'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '500':
@@ -444,6 +463,8 @@ paths:
                     error: "invalid input: title must not be empty"
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '409':
           description: >
             A task with the server-generated id already exists.
@@ -662,6 +683,8 @@ paths:
                     error: "invalid input: title must not be empty"
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -700,6 +723,8 @@ paths:
               $ref: '#/components/headers/XRequestID'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '429':
@@ -762,6 +787,8 @@ paths:
                 error: 'invalid input: unknown status "archived"'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -842,6 +869,8 @@ paths:
                 updated_at: "2026-08-08T12:05:00Z"
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -965,6 +994,8 @@ paths:
                     error: 'invalid input: attachment quota exceeded (524288000/524288000 bytes used)'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: >
             No such task for this user — or attachments are disabled. As
@@ -1124,6 +1155,8 @@ paths:
               $ref: '#/components/headers/XRequestID'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           description: >
             No attachment with this key for this user — covering a key
@@ -1275,6 +1308,36 @@ components:
         has no independently verifiable structure; the server looks it up
         by its hash on every request). Send as `Authorization: Bearer
         <token>`.
+
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session_token
+      description: >
+        The same opaque session token `bearerAuth` carries, delivered
+        instead as an HttpOnly cookie — never readable by JavaScript —
+        set by POST /auth/login (see its `200` response) and cleared by
+        POST /auth/logout and POST /auth/logout-all. Meant for a browser
+        client that lets the browser attach the cookie automatically
+        rather than storing the token itself.
+
+
+        A request authenticated this way that also changes state (POST,
+        PUT, PATCH, DELETE) must additionally carry a valid CSRF token
+        in the `X-CSRF-Token` header — obtained from
+        GET /v1/auth/csrf-token — or it is rejected with `403` (see
+        `#/components/responses/Forbidden`, referenced on every
+        mutating route). A request carrying `Authorization: Bearer`
+        skips this requirement entirely, regardless of whether a
+        session cookie is also present — see docs/DECISIONS.md §
+        "Autenticação: modo duplo (cookie httpOnly + Bearer)" for the
+        full rationale, including why this also covers
+        POST /auth/login and POST /auth/register.
+
+
+        `Secure` is dropped only when `COOKIE_INSECURE=true`, a
+        local-development-only setting for plain `http://localhost` —
+        see README.md's configuration table. Never set in production.
 
   parameters:
     TaskID:
@@ -1695,6 +1758,40 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             error: invalid or expired session token
+
+    Forbidden:
+      description: >
+        CSRF verification failed on a state-changing request that did
+        not carry `Authorization: Bearer` (see the `cookieAuth` security
+        scheme and docs/DECISIONS.md § "Autenticação: modo duplo").
+        Concretely, one of: the request has no `X-CSRF-Token` header;
+        the token doesn't match the CSRF cookie; the CSRF cookie itself
+        is missing, expired, or was never issued (call
+        GET /v1/auth/csrf-token first); or the `Origin`/`Referer` header
+        doesn't identify an allowed origin. The response is deliberately
+        identical for all of these — distinguishing them would hand an
+        attacker a progress indicator for a forged request.
+
+
+        **Unlike every other error response in this API, the body here
+        is NOT the `{"error": "..."}` envelope.** It is the plain text
+        `Forbidden`, with `Content-Type: text/plain`, written by
+        `moat/csrf`'s default rejection handler — a known,
+        intentional-for-now inconsistency; see docs/ARCHITECTURE.md §
+        Future Improvements.
+
+
+        A request carrying `Authorization: Bearer` never sees this
+        response — it is exempt from CSRF entirely, whatever cookies it
+        happens to also carry.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: "Forbidden\n"
 
     TooManyRequests:
       description: >
