@@ -73,28 +73,47 @@ cliente `curl`/serviço documentado no README muda de comportamento;
 
 ### CI-2 — Config: CSRF_SECRET e COOKIE_INSECURE
 
+**Desvio do plano original, encontrado ao implementar (registrado, não
+escondido):** o plano original validava `CSRF_SECRET` (ausente/curto)
+dentro de `Load()`, igual a qualquer outro campo obrigatório. Implementado
+e revertido nesta mesma sessão: `cmd/migrate` e `cmd/seed` chamam o
+**mesmo** `config.Load()` e nunca tocam CSRF — validar ali teria feito uma
+migration ou um seed recusar rodar por um secret que não lhes diz respeito
+(o mesmo problema, em espírito, que a issue #107 já corrigiu do lado
+oposto: uma checagem forte no lugar errado). Corrigido para o mesmo padrão
+que `DATABASE_URL` já usa: `Load()` só lê o valor cru, sem validar
+formato/tamanho — `moat/csrf.New` é a autoridade sobre o que é um secret
+válido, e é onde `cmd/api` (CI-5) de fato aplica a exigência, no
+`newServer`, ao construir o `Protector`.
+
 - **Arquivos:**
-  - `internal/config/config.go` — campo `CSRFSecret string` (obrigatório,
-    sem default, validado com `len(bytes) >= 32` — mesma constante que
-    `csrf.MinSecretLen` documenta, duplicada como `.claude/rules` já
-    aceita para não acoplar `config` a `moat/csrf`); campo
-    `CookieInsecure bool` (`parseBool`, default `false`).
-  - `internal/config/config_test.go` — casos válido/ausente/curto demais
-    para `CSRFSecret`; default/true para `CookieInsecure`.
-  - `.env.example` — `CSRF_SECRET` (sem valor, comentário explicando que é
-    gerado com `moat/csrf.GenerateSecret` ou equivalente, nunca commitado)
+  - `internal/config/config.go` — campo `CSRFSecret string` (lido cru de
+    `CSRF_SECRET`, sem validação de formato/tamanho — mesmo tratamento que
+    `DatabaseURL` já recebe, pela mesma razão); campo `CookieInsecure bool`
+    (`parseBool`, default `false`).
+  - `internal/config/config_test.go` — leitura crua (vazio por padrão,
+    inclusive um valor deliberadamente curto que `Load` não rejeita);
+    default/true/inválido para `CookieInsecure`.
+  - `.env.example` — `CSRF_SECRET` (sem valor, comentário explicando que
+    precisa de ≥32 bytes, gerado com `openssl rand -base64 32` ou
+    `moat/csrf.GenerateSecret`, nunca commitado, e que só `cmd/api` o usa)
     e `COOKIE_INSECURE=false`.
   - `README.md` — tabela de configuração ganha as duas linhas.
-- **Faz:** as duas variáveis passam a existir, com falha no `Load` quando
-  `CSRF_SECRET` está ausente ou é curto demais.
-- **Não faz:** não constrói o `csrf.Protector` em si (isso é `cmd/api`,
-  composition root — CI-5).
+- **Faz:** as duas variáveis passam a existir. `CookieInsecure` já falha em
+  `Load` se não for um bool válido (`parseBool` já faz isso). `CSRFSecret`
+  não falha em `Load` — é responsabilidade de CI-5.
+- **Não faz:** não valida tamanho/presença de `CSRF_SECRET`, e não
+  constrói o `csrf.Protector` em si — isso é `cmd/api`, composition root,
+  CI-5.
 - **Testes:** `internal/config/config_test.go` —
-  `TestLoad_CSRFSecret_Missing_ReturnsError`,
-  `TestLoad_CSRFSecret_TooShort_ReturnsError`,
-  `TestLoad_CSRFSecret_Valid`, `TestLoad_CookieInsecure_DefaultsFalse`,
-  `TestLoad_CookieInsecure_True`.
-- **Verificação:** `make test`.
+  `TestLoad_CSRFSecret_Unset_IsEmpty`, `TestLoad_CSRFSecret_ReadsRawValue`
+  (prova deliberadamente que um valor curto passa por `Load` sem erro),
+  `TestLoad_CookieInsecure_DefaultsFalse`, `TestLoad_CookieInsecure_True`,
+  `TestLoad_InvalidCookieInsecure_NotABool`.
+- **Verificação:** `make test` — ✅ rodado, os 56 testes existentes do
+  pacote continuam passando (a razão de ser desta correção: a versão
+  original teria quebrado boa parte deles, já que nenhum define
+  `CSRF_SECRET` hoje).
 - **Depende de:** _nada_.
 
 ### CI-3 — Middleware de sessão resolve cookie ou header, com precedência compartilhada
@@ -149,10 +168,13 @@ cliente `curl`/serviço documentado no README muda de comportamento;
 - **Arquivos:**
   - `cmd/api/main.go` (`newServer`) — constrói `csrf.Protector` via
     `csrf.New(secret.New([]byte(cfg.CSRFSecret)), opts...)`, com
-    `csrf.WithInsecureCookie()` só quando `cfg.CookieInsecure`. Falha de
-    `csrf.New` (secret curto) já foi prevenida em CI-2, mas o erro ainda
-    precisa ser tratado (mesma forma que outros erros de construção em
-    `newServer`).
+    `csrf.WithInsecureCookie()` só quando `cfg.CookieInsecure`. Ao
+    contrário do que CI-2 previa originalmente, `CSRF_SECRET` ausente ou
+    curto **não** é prevenido antes daqui — `csrf.New` é quem rejeita
+    (`ErrSecretTooShort`, que uma string vazia também aciona), e é aqui
+    que o erro precisa ser tratado e propagado (mesma forma que outros
+    erros de construção em `newServer` — falha no startup do processo,
+    nunca em request-time, só que neste `CI` em vez de em `config.Load`).
   - `internal/user/handler.go` — novo método `csrfToken`, público (sem
     `requireAuth`), que devolve `{"csrf_token": "<valor>"}` — o valor vem
     de `csrf.Token(r)` **depois** que a requisição passou pelo
@@ -171,7 +193,9 @@ cliente `curl`/serviço documentado no README muda de comportamento;
   `TestCSRFToken_Handler_ReturnsToken` (contra um fake que simula o
   middleware já ter rodado, ou teste de integração completo — preferir o
   de integração dado que a garantia real depende da cadeia inteira, ver
-  CI-6).
+  CI-6). `cmd/api` — `TestNewServer_RejectsMissingCSRFSecret`,
+  `TestNewServer_RejectsShortCSRFSecret` (mesmo padrão de
+  `TestNewServer_RejectsDangerousTrustedProxies`, já existente).
 - **Verificação:** `make test`.
 - **Depende de:** CI-2.
 
