@@ -24,6 +24,88 @@ a este modelo de auth** — não implementar `csrf` do moat aqui.
 `localStorage`, ele fica exposto a roubo via XSS. Isso é decisão do
 projeto de frontend quando existir, não deste backend.
 
+**Esse frontend passou a existir (Fase 13) — ver a seção seguinte,
+"Autenticação: modo duplo (cookie httpOnly + Bearer)", para a decisão
+tomada. O raciocínio acima continua valendo integralmente para o caminho
+Bearer; nada aqui foi revertido.**
+
+---
+
+## Autenticação: modo duplo (cookie httpOnly + Bearer), CSRF condicionado à origem da credencial
+
+A API passa a aceitar **duas** formas de credencial na mesma sessão, em vez
+de só `Authorization: Bearer`:
+
+- **Cookie `httpOnly`** — caminho do navegador (Fase 13, frontend em
+  `web/`). Imune a roubo por XSS, ao contrário do `localStorage` que a
+  seção anterior já apontava como o risco real de um frontend futuro.
+- **`Authorization: Bearer`** — caminho de script/serviço, inalterado. Todo
+  exemplo de `curl` do README continua funcionando exatamente como hoje.
+
+**A regra que faz isso ser seguro, e não reabrir o que a decisão anterior
+fechou:** a verificação de CSRF (`moat/csrf`) se aplica exatamente quando
+uma requisição mutadora **não** carrega `Authorization` — o que cobre tanto
+sessão autenticada por cookie quanto `POST /auth/login`/`register` sem
+sessão nenhuma ainda (ver abaixo). Uma requisição com `Authorization`
+nunca passa por CSRF, sob nenhuma circunstância.
+
+**Por que a checagem não depende de resolver a sessão primeiro.** Uma
+primeira formulação cogitada aqui fazia o gate de CSRF depender de saber,
+depois da autenticação, se a credencial resolvida veio do cookie —
+mas isso amarraria um middleware global a rodar só depois de
+`RequireAuth`, que é por rota, não global. A pergunta real é mais simples
+e não precisa de sessão nenhuma resolvida: **`Authorization` está
+presente ou não?** Presente → caminho Bearer, nunca CSRF. Ausente →
+requisição de navegador, sempre CSRF em método mutador. É a mesma função
+que decide qual credencial validar (`credentialSource`) que decide se o
+CSRF se aplica — uma decisão, dois usos, sem depender de ordem entre
+middlewares.
+
+**Por que `login`/`register` também são protegidos, e não só rotas já
+autenticadas.** A formulação original cobria só sessão já autenticada por
+cookie — mas isso deixa aberto "login CSRF": forçar o navegador da vítima
+a logar numa conta que o atacante controla, fazendo a vítima gravar dados
+sem saber numa conta alheia. Diferente do CSRF clássico (não rouba a
+sessão da vítima), mas é uma variante real, e não vale a mesma proteção
+que o resto da API já tem só porque a rota é pública. `login`/`register`
+passam a exigir o mesmo token CSRF que qualquer outra escrita de
+navegador exige.
+
+**Como o frontend obtém o token.** `GET /v1/auth/csrf-token`, endpoint
+público (sem sessão), devolve `{"csrf_token": "..."}`. O frontend guarda
+o valor em memória — nunca em `localStorage`/`sessionStorage`, pela mesma
+razão que o token de sessão em si nunca vai lá. `Protector.Rotate` roda
+dentro de `login`, logo após autenticar: o token emitido antes do login
+deixa de valer depois dele, fechando a janela de fixação que a própria
+biblioteca documenta.
+
+**`Secure` do cookie de sessão em desenvolvimento.** `COOKIE_INSECURE`
+(default `false`) relaxa `Secure` — e só `Secure` — para permitir
+`http://localhost` em dev; nunca usar em produção. Aplica-se igualmente ao
+cookie de sessão e ao cookie do `moat/csrf`, um único interruptor para o
+mesmo problema, não dois.
+
+**Por que não migrar tudo para cookie.** Seria quebra de contrato
+(`v2.0.0`): invalidaria os walkthroughs de `curl` do README e todo uso
+backend-to-backend documentado. O modo duplo é aditivo — `v1.2.0`.
+
+**Nota histórica:** as issues de CSRF fechadas na Fase 4 foram encerradas
+com "descontinuada — CSRF não se aplica a este modelo de auth". Aquilo
+estava correto *dado* header-only, o único modo que existia então. Esta
+seção não as reabre nem as contradiz — a premissa que as fechou (só
+Bearer) deixou de ser a premissa inteira, e CSRF passa a se aplicar
+exatamente à parte nova.
+
+**Trade-off aceito:** uma segunda superfície de configuração sensível
+(`CSRF_SECRET`, com o mesmo cuidado de nunca aparecer em log que
+`AttachmentS3SecretKey` já tem) e uma segunda checagem em toda escrita de
+navegador. Aceito porque a alternativa — cookie sem CSRF — é exatamente a
+vulnerabilidade que a decisão original evitou desde o início.
+
+Detalhes de implementação (nomes de variável, ordem de middleware,
+esquema de resposta) em `docs/openapi.yaml` e nas issues #112–#118 e
+#130.
+
 ---
 
 ## Storage de anexos: duas fronteiras, ordem de escrita é escolha
