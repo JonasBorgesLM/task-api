@@ -707,3 +707,65 @@ func TestLoad_InvalidAttachmentMaxBytesPerUser_Zero(t *testing.T) {
 		t.Fatal("Load() expected error for ATTACHMENT_MAX_BYTES_PER_USER=0, got nil")
 	}
 }
+
+// --- CSRF_SECRET / COOKIE_INSECURE ---
+
+// TestLoad_CSRFSecret_Unset_IsEmpty pins the deliberate absence of a
+// default and of any validation here — see the comment on CSRFSecret's
+// assignment in Load. cmd/migrate and cmd/seed load this same Config and
+// never touch CSRF; failing Load over an empty or short secret would
+// refuse to run either of them for a reason unrelated to what they do.
+// cmd/api enforces the real requirement (moat/csrf.MinSecretLen) itself,
+// where it builds the Protector.
+func TestLoad_CSRFSecret_Unset_IsEmpty(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.CSRFSecret != "" {
+		t.Errorf("Load() CSRFSecret = %q, want empty", cfg.CSRFSecret)
+	}
+}
+
+func TestLoad_CSRFSecret_ReadsRawValue(t *testing.T) {
+	t.Setenv("CSRF_SECRET", "short") // deliberately under MinSecretLen — Load doesn't reject it, see above
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.CSRFSecret != "short" {
+		t.Errorf("Load() CSRFSecret = %q, want %q", cfg.CSRFSecret, "short")
+	}
+}
+
+func TestLoad_CookieInsecure_DefaultsFalse(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.CookieInsecure {
+		t.Error("Load() CookieInsecure = true, want false (must never default on — it drops Secure from every cookie)")
+	}
+}
+
+func TestLoad_CookieInsecure_True(t *testing.T) {
+	t.Setenv("COOKIE_INSECURE", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if !cfg.CookieInsecure {
+		t.Error("Load() CookieInsecure = false, want true")
+	}
+}
+
+func TestLoad_InvalidCookieInsecure_NotABool(t *testing.T) {
+	t.Setenv("COOKIE_INSECURE", "not-a-bool")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for COOKIE_INSECURE=not-a-bool, got nil")
+	}
+}
