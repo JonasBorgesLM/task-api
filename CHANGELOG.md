@@ -59,6 +59,11 @@ raciocínio de cada decisão).
 - Um `taskID`/`storageKey` malformado agora responde `404` contra o
   backend PostgreSQL, igual ao backend em memória — antes chegava ao
   cast `::uuid` do banco e virava `500`, logado como falha inesperada.
+- `attachment.Service.Delete` fechava a última lacuna dessa mesma
+  classe de bug: era o único dos quatro métodos do pacote que não
+  chamava `isValidID` antes de operar, então um `storage_key`
+  malformado em `DELETE /v1/files/{key}` ainda alcançava o cast
+  `::uuid` do banco (issue #107).
 - `middleware.Recovery` não escreve mais uma segunda resposta HTTP
   quando o handler já tinha começado a responder antes do panic — evita
   corpo duplicado/inválido e o aviso "superfluous response.WriteHeader"
@@ -71,12 +76,6 @@ raciocínio de cada decisão).
   credenciais no próprio texto de erro — agora está travada por dois
   testes de regressão, não só por leitura de código. Ver
   `docs/DECISIONS.md`.
-
-### Dívidas técnicas conhecidas, não bloqueantes
-- `Service.Delete` de anexos não valida o formato do `storage_key`
-  antes de operar, diferente de `Upload`/`Download`/`ListByTask` — um
-  `storage_key` malformado ainda chega ao cast `::uuid` do banco em vez
-  de responder `404` direto (issue #107).
 
 ### Migração necessária
 1. Se `DATABASE_URL` aponta para PostgreSQL, a migration `0008` (índice
