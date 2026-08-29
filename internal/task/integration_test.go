@@ -69,8 +69,13 @@ func newIntegrationServer(t *testing.T) (*httptest.Server, string) {
 	// composed in cmd/api (see newServer) rather than here.
 	noopRateLimit := func(next http.Handler) http.Handler { return next }
 
+	// Also a pass-through: these tests don't exercise CSRF (the real
+	// gate is composed in cmd/api's newServer), and GET /auth/csrf-token
+	// isn't called by anything here.
+	noopCSRF := func(next http.Handler) http.Handler { return next }
+
 	mux := http.NewServeMux()
-	userHandler.RegisterRoutes(mux, requireAuth, noopRateLimit)
+	userHandler.RegisterRoutes(mux, requireAuth, noopRateLimit, noopCSRF)
 	taskHandler.RegisterRoutes(mux, requireAuth)
 
 	srv := httptest.NewServer(mux)

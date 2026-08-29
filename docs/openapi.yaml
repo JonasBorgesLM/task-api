@@ -221,6 +221,46 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /v1/auth/csrf-token:
+    get:
+      tags: [Auth]
+      operationId: getCsrfToken
+      summary: Obtain a CSRF token
+      security: []
+      description: >
+        Returns the CSRF token this client must send back in the
+        X-CSRF-Token header on every state-changing request (POST, PUT,
+        PATCH, DELETE) that does not carry Authorization: Bearer — this
+        includes POST /auth/login and POST /auth/register, not only
+        already-authenticated routes. See docs/DECISIONS.md §
+        "Autenticação: modo duplo (cookie httpOnly + Bearer)" for why: a
+        request without Authorization is assumed to come from a browser,
+        and a browser's cookie-carried session is exactly what CSRF
+        protects.
+
+
+        Public — a caller has no session the first time it needs this
+        token. Calling it also sets (or refreshes) the underlying CSRF
+        cookie, which is HttpOnly and never readable by JavaScript; only
+        this endpoint's response body ever exposes the token value
+        itself.
+      responses:
+        '200':
+          description: A CSRF token was issued.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CsrfTokenResponse'
+              example:
+                csrf_token: 3f9c2b1a7e6d4c8b0f1a2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /v1/auth/logout:
     post:
       tags: [Auth]
@@ -1378,6 +1418,21 @@ components:
         - token
         - expires_at
         - user
+
+    CsrfTokenResponse:
+      type: object
+      description: Body returned by GET /auth/csrf-token.
+      properties:
+        csrf_token:
+          type: string
+          description: >
+            Send back in the X-CSRF-Token header on every state-changing
+            request that does not carry Authorization: Bearer — see
+            GET /auth/csrf-token's own description for exactly when that
+            applies.
+          example: 3f9c2b1a7e6d4c8b0f1a2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b
+      required:
+        - csrf_token
 
     Status:
       type: string

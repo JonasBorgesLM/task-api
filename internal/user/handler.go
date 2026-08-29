@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/JonasBorgesLM/moat/csrf"
+
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 )
 
@@ -47,9 +49,23 @@ func NewHandler(svc userService, logger *slog.Logger, cookieInsecure bool) *Hand
 // authenticated caller, enforced by wrapping those two handlers with
 // requireAuth instead — the same per-route-wrapping approach
 // task.Handler.RegisterRoutes uses for every one of its routes.
-func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth, rateLimit middleware.Middleware) {
+//
+// GET /auth/csrf-token is public — a caller has no session the first
+// time it needs this token (see docs/DECISIONS.md § "Autenticação: modo
+// duplo (cookie httpOnly + Bearer)": it is required on POST
+// /auth/login and /auth/register too, not just on already-authenticated
+// routes) — but it must still pass through csrfMiddleware
+// (csrf.Protector.Middleware from cmd/api's newServer) so that
+// csrf.Token has something to read: a safe method never needs a token
+// itself, but it is what mints/refreshes the cookie the token comes
+// from. Wrapping only this one route here is interim — the global CSRF
+// gate (see docs/changes/dual-auth-mode/plan.md's CI-6) already covers
+// every safe method for the same reason, and folding this route into
+// that global wiring will make wrapping it here redundant, not wrong.
+func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth, rateLimit, csrfMiddleware middleware.Middleware) {
 	mux.Handle("POST /auth/register", rateLimit(http.HandlerFunc(h.register)))
 	mux.Handle("POST /auth/login", rateLimit(http.HandlerFunc(h.login)))
+	mux.Handle("GET /auth/csrf-token", csrfMiddleware(http.HandlerFunc(h.csrfToken)))
 	mux.Handle("POST /auth/logout", requireAuth(http.HandlerFunc(h.logout)))
 	mux.Handle("POST /auth/logout-all", requireAuth(http.HandlerFunc(h.logoutAll)))
 	mux.Handle("GET /auth/me", requireAuth(http.HandlerFunc(h.me)))
@@ -214,6 +230,42 @@ func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
 
 	clearSessionCookie(w, h.cookieInsecure)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// csrfTokenResponse is the body returned by GET /auth/csrf-token.
+type csrfTokenResponse struct {
+	CSRFToken string `json:"csrf_token"`
+}
+
+// csrfToken handles GET /auth/csrf-token — see RegisterRoutes' doc
+// comment for why it is public.
+//
+// The token comes from csrf.Token(r), which only finds one if this
+// request already passed through csrf.Protector.Middleware — that
+// wiring is RegisterRoutes' csrfMiddleware parameter, supplied by
+// cmd/api's newServer, not anything this method constructs itself. A
+// false ok here is therefore a wiring bug, not a client error — this
+// route somehow bypassed the middleware that is supposed to cover every
+// request — so it is logged and reported as 500, the same treatment
+// handleServiceError's default branch gives any other unexpected
+// failure. Returning an empty token instead would turn a wiring mistake
+// into every subsequent write failing CSRF with no clue why — exactly
+// what csrf.Token's own doc comment warns a bare-string signature would
+// invite.
+func (h *Handler) csrfToken(w http.ResponseWriter, r *http.Request) {
+	token, ok := csrf.Token(r)
+	if !ok {
+		requestID, _ := middleware.RequestIDFromContext(r.Context())
+		h.logger.Error("csrf token requested but csrf.Protector.Middleware never ran for this request",
+			"request_id", requestID,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+		h.writeError(w, r, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	h.writeJSON(w, r, http.StatusOK, csrfTokenResponse{CSRFToken: token})
 }
 
 // me handles GET /auth/me — returns the authenticated caller's own User.

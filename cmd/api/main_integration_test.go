@@ -64,6 +64,17 @@ func testConfig() config.Config {
 		// use. The tests that exercise the cap itself set their own
 		// tight value.
 		AuthMaxSessionsPerUser: 1000,
+
+		// Another zero-value trap, new with CI-5: csrf.New rejects
+		// anything shorter than its own MinSecretLen (32 bytes), so a
+		// bare config.Config{} would make every test in this file fail
+		// in newServer before reaching whatever it actually means to
+		// test. The tests that exercise this rejection themselves
+		// (TestNewServer_RejectsMissingCSRFSecret,
+		// TestNewServer_RejectsShortCSRFSecret) start from this same
+		// testConfig() and then deliberately override the field back
+		// down.
+		CSRFSecret: "test-only-csrf-secret-not-for-production-use-000000",
 	}
 }
 
@@ -936,6 +947,46 @@ func TestNewServer_RejectsDangerousTrustedProxies(t *testing.T) {
 		}
 		_ = srv
 		t.Fatal("newServer() error = nil, want a refusal to trust the default route")
+	}
+}
+
+// TestNewServer_RejectsMissingCSRFSecret and
+// TestNewServer_RejectsShortCSRFSecret pin CI-5's design: config.Load
+// deliberately does not validate CSRF_SECRET (see the comment on
+// Config.CSRFSecret's assignment there), so csrf.New — called here, in
+// newServer — is the actual, only place an empty or too-short value is
+// caught, at startup, never at request time.
+func TestNewServer_RejectsMissingCSRFSecret(t *testing.T) {
+	cfg := testConfig()
+	cfg.CSRFSecret = ""
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, closeAll, err := newServer(ctx, cfg, discardLogger(), nil)
+	if err == nil {
+		if closeAll != nil {
+			closeAll()
+		}
+		_ = srv
+		t.Fatal("newServer() error = nil, want a refusal to start without CSRF_SECRET")
+	}
+}
+
+func TestNewServer_RejectsShortCSRFSecret(t *testing.T) {
+	cfg := testConfig()
+	cfg.CSRFSecret = "too-short"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, closeAll, err := newServer(ctx, cfg, discardLogger(), nil)
+	if err == nil {
+		if closeAll != nil {
+			closeAll()
+		}
+		_ = srv
+		t.Fatal("newServer() error = nil, want a refusal to start with a CSRF_SECRET under moat/csrf.MinSecretLen")
 	}
 }
 

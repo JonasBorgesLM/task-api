@@ -101,3 +101,9 @@ type: Opaque
 stringData:
   ATTACHMENT_S3_ACCESS_KEY: "task_api"
   ATTACHMENT_S3_SECRET_KEY: "task_api_secret"
+  # Signs the CSRF token for cookie-authenticated writes (see
+  # docs/DECISIONS.md § "Autenticação: modo duplo") — csrf.New refuses
+  # anything under 32 bytes, and this cluster is single-replica anyway,
+  # so there is no cross-instance-agreement requirement it needs to
+  # satisfy beyond that.
+  CSRF_SECRET: "task-api-k8s-disposable-cluster-csrf-secret-000000"
