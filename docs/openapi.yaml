@@ -1160,9 +1160,10 @@ paths:
         '404':
           description: >
             No attachment with this key for this user — covering a key
-            that names nothing, one belonging to somebody else, or one
-            already deleted (by this call or an earlier one) — or
-            attachments are disabled.
+            that names nothing, one belonging to somebody else, a
+            malformed (not syntactically UUID) key, or one already
+            deleted (by this call or an earlier one) — or attachments
+            are disabled.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'

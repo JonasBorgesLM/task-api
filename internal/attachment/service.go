@@ -323,6 +323,10 @@ func (s *Service) Download(ctx context.Context, userID, storageKey string) (Atta
 // that CollectOrphans reclaims on its own schedule, the same safety net
 // Upload's cleanup relies on for the failure it can't fully undo either.
 func (s *Service) Delete(ctx context.Context, userID, storageKey string) error {
+	if !isValidID(storageKey) {
+		return ErrNotFound
+	}
+
 	if err := s.repo.Delete(ctx, storageKey, userID); err != nil {
 		return fmt.Errorf("delete attachment: %w", err)
 	}
