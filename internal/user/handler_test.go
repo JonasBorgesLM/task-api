@@ -121,8 +121,15 @@ func newHandlerWithFake(svc *fakeService) *Handler {
 // exposed, for the tests that specifically exercise its effect on the
 // session cookie's Secure attribute.
 func newHandlerWithFakeCookieMode(svc *fakeService, cookieInsecure bool) *Handler {
+	return newHandlerWithFakeAttachments(svc, cookieInsecure, false)
+}
+
+// newHandlerWithFakeAttachments is newHandlerWithFakeCookieMode with
+// attachmentsEnabled exposed, for the tests that specifically exercise
+// its effect on GET /auth/me's response.
+func newHandlerWithFakeAttachments(svc *fakeService, cookieInsecure, attachmentsEnabled bool) *Handler {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewHandler(svc, logger, cookieInsecure, testCSRFProtector)
+	return NewHandler(svc, logger, cookieInsecure, testCSRFProtector, attachmentsEnabled)
 }
 
 func do(handler http.HandlerFunc, method, target, body string) *httptest.ResponseRecorder {
@@ -441,6 +448,41 @@ func TestMe_Handler_UsesUserIDFromContext(t *testing.T) {
 	decodeBody(t, w, &got)
 	if got.ID != "u1" {
 		t.Errorf("me body ID = %q, want %q", got.ID, "u1")
+	}
+}
+
+// TestMe_Handler_IncludesAttachmentsEnabled proves attachments_enabled on
+// GET /auth/me reflects whatever NewHandler was constructed with — a
+// deployment-wide fact (see cmd/api's attachmentsEnabled(cfg)), not
+// anything about the specific User returned, which is why both cases
+// below reuse the same fakeService.
+func TestMe_Handler_IncludesAttachmentsEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{name: "enabled", want: true},
+		{name: "disabled", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &fakeService{
+				getUserFn: func(id string) (User, error) { return User{ID: id, Email: "user@example.com"}, nil },
+			}
+			h := newHandlerWithFakeAttachments(svc, false, tt.want)
+
+			req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+			req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+			w := httptest.NewRecorder()
+			h.me(w, req)
+
+			var got meResponse
+			decodeBody(t, w, &got)
+			if got.AttachmentsEnabled != tt.want {
+				t.Errorf("me body attachments_enabled = %v, want %v", got.AttachmentsEnabled, tt.want)
+			}
+		})
 	}
 }
 

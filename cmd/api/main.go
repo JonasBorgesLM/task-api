@@ -311,7 +311,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	}
 
 	taskHandler := task.NewHandler(taskSvc, logger)
-	userHandler := user.NewHandler(userSvc, logger, cfg.CookieInsecure, csrfProtector)
+	userHandler := user.NewHandler(userSvc, logger, cfg.CookieInsecure, csrfProtector, attachmentsEnabled(cfg))
 	requireAuth := user.RequireAuth(userSvc, logger)
 
 	// Three rate-limit tiers, each answering a threat the others cannot.
