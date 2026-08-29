@@ -1,6 +1,10 @@
 package middleware
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/JonasBorgesLM/moat/csrf"
+)
 
 // corsAllowedHeaders and corsAllowedMethods are sent on every preflight
 // response CORS answers. Authorization is listed because bearer tokens
@@ -8,9 +12,15 @@ import "net/http"
 // preflight check rejects the actual request before this API ever sees
 // it. X-Request-Id is listed so a browser client may set it explicitly to
 // correlate its own logs with the server's (see RequestID), the same way
-// a server-to-server caller already can.
+// a server-to-server caller already can. csrf.DefaultHeaderName
+// (X-CSRF-Token) is listed for the same reason Authorization is — a
+// cookie-authenticated browser client sends the CSRF token that way (see
+// CSRF in csrf.go and docs/DECISIONS.md § "Autenticação: modo duplo"),
+// and an unlisted header fails preflight before the real request is ever
+// sent.
+var corsAllowedHeaders = "Authorization, Content-Type, X-Request-Id, " + csrf.DefaultHeaderName
+
 const (
-	corsAllowedHeaders = "Authorization, Content-Type, X-Request-Id"
 	corsAllowedMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 	corsMaxAge         = "600"
 )

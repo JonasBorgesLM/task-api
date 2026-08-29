@@ -24,16 +24,25 @@ import (
 // well past it.
 const testCSRFSecret = "test-only-csrf-secret-not-for-production-use-000000"
 
-// newTestCSRFProtector returns a real *csrf.Protector for tests, with
-// WithInsecureCookie so it works in a plain httptest request (no TLS).
-func newTestCSRFProtector(t *testing.T) *csrf.Protector {
-	t.Helper()
+// testCSRFProtector is built once and shared by every test in this file
+// that needs a real *csrf.Protector — Protector is safe for concurrent
+// use and is meant to be created once and shared (see its own doc
+// comment), and testCSRFSecret is a fixed, always-valid constant, so
+// there is nothing here a per-call, per-test construction would ever
+// catch that this package-level one doesn't just as well. WithInsecureCookie
+// so it works in a plain httptest request (no TLS).
+//
+// user.Handler.login calls Protector.Rotate unconditionally on success
+// (see login's doc comment), so every Handler built by
+// newHandlerWithFake/newHandlerWithFakeCookieMode needs a non-nil one —
+// not only the tests that exercise CSRF directly.
+var testCSRFProtector = func() *csrf.Protector {
 	p, err := csrf.New(secret.New([]byte(testCSRFSecret)), csrf.WithInsecureCookie())
 	if err != nil {
-		t.Fatalf("csrf.New() unexpected error: %v", err)
+		panic("csrf.New() with a fixed, valid test secret failed: " + err.Error())
 	}
 	return p
-}
+}()
 
 // fakeService is a test double for userService (Handler) and
 // sessionValidator (RequireAuth) — one fake implements both, since
@@ -113,7 +122,7 @@ func newHandlerWithFake(svc *fakeService) *Handler {
 // session cookie's Secure attribute.
 func newHandlerWithFakeCookieMode(svc *fakeService, cookieInsecure bool) *Handler {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewHandler(svc, logger, cookieInsecure)
+	return NewHandler(svc, logger, cookieInsecure, testCSRFProtector)
 }
 
 func do(handler http.HandlerFunc, method, target, body string) *httptest.ResponseRecorder {
@@ -438,13 +447,13 @@ func TestMe_Handler_UsesUserIDFromContext(t *testing.T) {
 // --- GET /auth/csrf-token ---
 
 // TestCSRFToken_Handler_ReturnsToken drives the request through a real
-// csrf.Protector.Middleware first, the same way cmd/api's newServer will
-// (see CI-6 of docs/changes/dual-auth-mode/plan.md) — csrf.Token only
+// csrf.Protector.Middleware first, the same way cmd/api's newServer does
+// via middleware.CSRF (internal/middleware/csrf.go) — csrf.Token only
 // finds a value once that has happened, so testing h.csrfToken in
 // isolation would prove nothing about the actual guarantee.
 func TestCSRFToken_Handler_ReturnsToken(t *testing.T) {
 	h := newHandlerWithFake(&fakeService{})
-	protector := newTestCSRFProtector(t)
+	protector := testCSRFProtector
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/csrf-token", nil)
 	w := httptest.NewRecorder()
@@ -503,11 +512,17 @@ func TestRegisterRoutes_PublicAndProtectedRoutes(t *testing.T) {
 	// limiting, and the limiter that guards these routes in production is
 	// composed in cmd/api (see newServer) rather than here.
 	noopRateLimit := func(next http.Handler) http.Handler { return next }
-	// A real Protector, not a pass-through: "csrf-token is public" below
-	// asserts on the actual response body, which only exists once a
-	// request has gone through csrf.Protector.Middleware for real.
-	csrfProtector := newTestCSRFProtector(t)
-	h.RegisterRoutes(mux, RequireAuth(svc, slog.New(slog.NewTextHandler(io.Discard, nil))), noopRateLimit, csrfProtector.Middleware)
+	// No CSRF middleware wrapping mux here, deliberately: since CI-6, the
+	// CSRF gate is a global concern composed once in cmd/api's newServer
+	// (see internal/middleware/csrf.go), not something RegisterRoutes
+	// wires per route anymore — mixing it into this test would make a
+	// requireAuth-wiring failure and a CSRF-gate failure indistinguishable
+	// from each other. GET /auth/csrf-token's own behavior (not gated by
+	// requireAuth, 500 when no Protector.Middleware ran) is covered by
+	// TestCSRFToken_Handler_ReturnsToken and
+	// TestCSRFToken_Handler_MiddlewareNotWired_Returns500 instead, so it
+	// has no row in the table below.
+	h.RegisterRoutes(mux, RequireAuth(svc, slog.New(slog.NewTextHandler(io.Discard, nil))), noopRateLimit)
 
 	cases := []struct {
 		name   string
@@ -519,7 +534,6 @@ func TestRegisterRoutes_PublicAndProtectedRoutes(t *testing.T) {
 	}{
 		{"register is public", http.MethodPost, "/auth/register", `{"email":"a@example.com","password":"password123"}`, "", http.StatusCreated},
 		{"login is public", http.MethodPost, "/auth/login", `{"email":"a@example.com","password":"password123"}`, "", http.StatusOK},
-		{"csrf-token is public", http.MethodGet, "/auth/csrf-token", "", "", http.StatusOK},
 		{"logout without token is rejected", http.MethodPost, "/auth/logout", "", "", http.StatusUnauthorized},
 		{"logout with valid token succeeds", http.MethodPost, "/auth/logout", "", "valid-token", http.StatusNoContent},
 		{"me without token is rejected", http.MethodGet, "/auth/me", "", "", http.StatusUnauthorized},
