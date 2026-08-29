@@ -52,6 +52,14 @@ data:
   # serves — see docs/DECISIONS.md. Set to 0 to omit it entirely.
   HSTS_MAX_AGE: "8760h"
 
+  # No Ingress/TLS termination in front of this disposable cluster (see
+  # k8s/rollout-test.sh — it talks to the Service directly) — without
+  # this, the session and CSRF cookies would both carry Secure, and no
+  # client validating against this cluster over plain HTTP would ever be
+  # able to send either back. Never set true against a real deployment
+  # that does terminate TLS somewhere in front of it.
+  COOKIE_INSECURE: "true"
+
   # Mirrors every log record to SigNoz, alongside stdout — see
   # docs/DECISIONS.md's Fase 11 sections for the full validation this
   # was verified against (real ClickHouse query, not just "the exporter

@@ -133,6 +133,13 @@ services:
       # least 32 bytes. Throwaway value, same spirit as
       # ATTACHMENT_S3_SECRET_KEY above; never reuse it anywhere real.
       CSRF_SECRET: task-api-docker-compose-dev-csrf-secret-0000000
+      # This stack serves plain http://localhost:8080, never TLS — the
+      # session cookie and the CSRF cookie would both carry Secure
+      # otherwise, which curl (correctly, matching real browser behavior)
+      # never sends back over plain HTTP, silently breaking the cookie
+      # half of every walkthrough in README.md. Never set true against a
+      # real deployment.
+      COOKIE_INSECURE: "true"
     ports:
       - "8080:8080"
     depends_on:

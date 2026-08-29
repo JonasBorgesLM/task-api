@@ -33,14 +33,19 @@ type Handler struct {
 	svc            userService
 	logger         *slog.Logger
 	cookieInsecure bool
+	csrfProtector  *csrf.Protector
 }
 
 // NewHandler returns a new Handler with the given userService and logger.
 // cookieInsecure mirrors config.Config.CookieInsecure — see its doc
 // comment for why the session cookie ever drops Secure at all (only for
 // http://localhost in local development; never in production).
-func NewHandler(svc userService, logger *slog.Logger, cookieInsecure bool) *Handler {
-	return &Handler{svc: svc, logger: logger, cookieInsecure: cookieInsecure}
+// csrfProtector is the same *csrf.Protector cmd/api's newServer builds
+// and wires into the global CSRF gate (internal/middleware/csrf.go) —
+// login uses it to rotate the CSRF cookie on every successful
+// authentication (see login's doc comment).
+func NewHandler(svc userService, logger *slog.Logger, cookieInsecure bool, csrfProtector *csrf.Protector) *Handler {
+	return &Handler{svc: svc, logger: logger, cookieInsecure: cookieInsecure, csrfProtector: csrfProtector}
 }
 
 // RegisterRoutes registers every /auth/* route on mux. Register and Login
@@ -50,22 +55,23 @@ func NewHandler(svc userService, logger *slog.Logger, cookieInsecure bool) *Hand
 // requireAuth instead — the same per-route-wrapping approach
 // task.Handler.RegisterRoutes uses for every one of its routes.
 //
-// GET /auth/csrf-token is public — a caller has no session the first
-// time it needs this token (see docs/DECISIONS.md § "Autenticação: modo
-// duplo (cookie httpOnly + Bearer)": it is required on POST
-// /auth/login and /auth/register too, not just on already-authenticated
-// routes) — but it must still pass through csrfMiddleware
-// (csrf.Protector.Middleware from cmd/api's newServer) so that
-// csrf.Token has something to read: a safe method never needs a token
-// itself, but it is what mints/refreshes the cookie the token comes
-// from. Wrapping only this one route here is interim — the global CSRF
-// gate (see docs/changes/dual-auth-mode/plan.md's CI-6) already covers
-// every safe method for the same reason, and folding this route into
-// that global wiring will make wrapping it here redundant, not wrong.
-func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth, rateLimit, csrfMiddleware middleware.Middleware) {
+// GET /auth/csrf-token is public and otherwise unwrapped here — a caller
+// has no session the first time it needs this token (see
+// docs/DECISIONS.md § "Autenticação: modo duplo (cookie httpOnly +
+// Bearer)": it is required on POST /auth/login and /auth/register too,
+// not just on already-authenticated routes). It still needs to pass
+// through csrf.Protector.Middleware for csrf.Token to have anything to
+// read, but that is cmd/api's job now: middleware.CSRF is mounted on the
+// global chain in newServer (see internal/middleware/csrf.go), covering
+// every safe method — including this route — before routing ever
+// happens. An earlier version of this method wrapped this one route with
+// its own csrfMiddleware parameter; that became redundant once the
+// global gate existed and was removed rather than left as a second,
+// needless pass through the same Protector.
+func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth, rateLimit middleware.Middleware) {
 	mux.Handle("POST /auth/register", rateLimit(http.HandlerFunc(h.register)))
 	mux.Handle("POST /auth/login", rateLimit(http.HandlerFunc(h.login)))
-	mux.Handle("GET /auth/csrf-token", csrfMiddleware(http.HandlerFunc(h.csrfToken)))
+	mux.Handle("GET /auth/csrf-token", http.HandlerFunc(h.csrfToken))
 	mux.Handle("POST /auth/logout", requireAuth(http.HandlerFunc(h.logout)))
 	mux.Handle("POST /auth/logout-all", requireAuth(http.HandlerFunc(h.logoutAll)))
 	mux.Handle("GET /auth/me", requireAuth(http.HandlerFunc(h.me)))
@@ -126,6 +132,25 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return
+	}
+
+	// Rotate replaces the CSRF cookie's value, so a token computed
+	// against whatever value it held before this login (e.g. one an
+	// attacker planted, the fixation csrf.Protector.Rotate's own doc
+	// comment describes) no longer matches after it. Must run here,
+	// before anything is written to w — Rotate itself detects and
+	// reports a late call rather than silently doing nothing, but
+	// nothing later in this handler should ever trigger that. Best
+	// effort: a failure here would mean the outstanding CSRF fixation
+	// window isn't closed for this login, not that the login itself
+	// failed, so it is logged rather than turned into a 500 — the
+	// session cookie login is actually here to issue is unaffected.
+	if _, err := h.csrfProtector.Rotate(w, r); err != nil {
+		requestID, _ := middleware.RequestIDFromContext(r.Context())
+		h.logger.Error("csrf cookie rotation failed on login",
+			"error", err,
+			"request_id", requestID,
+		)
 	}
 
 	token, expiresAt, err := h.svc.CreateSession(r.Context(), u.ID)

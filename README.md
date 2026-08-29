@@ -248,11 +248,23 @@ Errors always use the same envelope, `{"error": "description of the problem"}`. 
 
 **Quick walkthrough:**
 
+`register` and `login` are the two routes that can never carry
+`Authorization` — there is no session yet — so, since the dual-auth-mode
+CSRF gate applies to any state-changing request without it (see
+`docs/DECISIONS.md` § "Autenticação: modo duplo"), both need a CSRF token
+first. Every route below that *does* carry `Authorization: Bearer` is
+unaffected and needs none of this — that path is exactly what stays
+`curl`-friendly.
+
 ```bash
-curl -s -X POST localhost:8080/v1/auth/register -H 'Content-Type: application/json' \
+CSRF_TOKEN=$(curl -s -c cookies.txt localhost:8080/v1/auth/csrf-token | jq -r .csrf_token)
+
+curl -s -b cookies.txt -X POST localhost:8080/v1/auth/register -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $CSRF_TOKEN" -H 'Origin: http://localhost:8080' \
   -d '{"email":"alice@example.com","password":"correct horse battery staple"}'
 
-TOKEN=$(curl -s -X POST localhost:8080/v1/auth/login -H 'Content-Type: application/json' \
+TOKEN=$(curl -s -b cookies.txt -X POST localhost:8080/v1/auth/login -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $CSRF_TOKEN" -H 'Origin: http://localhost:8080' \
   -d '{"email":"alice@example.com","password":"correct horse battery staple"}' | jq -r .token)
 
 ID=$(curl -s -X POST localhost:8080/v1/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \

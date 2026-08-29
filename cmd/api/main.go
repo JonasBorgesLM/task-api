@@ -275,24 +275,44 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	taskSvc := task.NewService(taskRepo)
 	userSvc := user.NewService(userRepo, cfg.AuthSessionTTL, cfg.AuthMaxSessionsPerUser)
 
-	taskHandler := task.NewHandler(taskSvc, logger)
-	userHandler := user.NewHandler(userSvc, logger, cfg.CookieInsecure)
-	requireAuth := user.RequireAuth(userSvc, logger)
-
 	// csrfProtector is built here, in the composition root, the same
 	// reason ratelimit/secureheaders are (see CLAUDE.md § "Composition
 	// root"). CSRF_SECRET is intentionally not validated in
 	// config.Load — see the comment on Config.CSRFSecret and on its
 	// assignment in Load — so an empty or short value surfaces here, at
-	// startup, as csrf.New's own error, never at request time.
+	// startup, as csrf.New's own error, never at request time. Built
+	// before userHandler because userHandler.login needs it (Rotate on
+	// every successful login — see middleware.CSRF and login's own doc
+	// comment) and before requireAuth/rate-limit wiring below because
+	// nothing there depends on it — construction order here follows use,
+	// not a required sequence.
 	var csrfOpts []csrf.Option
 	if cfg.CookieInsecure {
 		csrfOpts = append(csrfOpts, csrf.WithInsecureCookie())
+	}
+	// Without this, the Origin check falls back to comparing against
+	// this process's own Host — which a frontend served from a genuinely
+	// separate origin (the entire point of CORS_ALLOWED_ORIGINS existing)
+	// can never match, since the browser's Origin header names the
+	// frontend's origin, not this API's. Trusting exactly the origins
+	// CORS already trusts, and no more, keeps the two lists from being
+	// able to disagree — see docs/DECISIONS.md § "Autenticação: modo
+	// duplo". Left unset (falling back to the Host-based default) when
+	// CORS is disabled: WithTrustedOrigins refuses an empty list rather
+	// than treating it as "keep the default" (see its own doc comment),
+	// and an empty cfg.CORSAllowedOrigins already means same-origin/no
+	// browser frontend, where the default is correct.
+	if len(cfg.CORSAllowedOrigins) > 0 {
+		csrfOpts = append(csrfOpts, csrf.WithTrustedOrigins(cfg.CORSAllowedOrigins...))
 	}
 	csrfProtector, err := csrf.New(secret.New([]byte(cfg.CSRFSecret)), csrfOpts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build csrf protector: %w", err)
 	}
+
+	taskHandler := task.NewHandler(taskSvc, logger)
+	userHandler := user.NewHandler(userSvc, logger, cfg.CookieInsecure, csrfProtector)
+	requireAuth := user.RequireAuth(userSvc, logger)
 
 	// Three rate-limit tiers, each answering a threat the others cannot.
 	// All are token buckets over a bounded in-process store: a fixed
@@ -385,7 +405,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// publish is what keeps newServer callable more than once per binary.
 	publishBuildInfoOnce()
 
-	userHandler.RegisterRoutes(v1, authenticated, authLimiter.Middleware, csrfProtector.Middleware)
+	userHandler.RegisterRoutes(v1, authenticated, authLimiter.Middleware)
 	taskHandler.RegisterRoutes(v1, authenticated)
 
 	// The liveness and readiness probes deliberately sit outside the
@@ -520,6 +540,17 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 			secureheaders.WithHSTS(cfg.HSTSMaxAge, false, false),
 		),
 		middleware.CORS(cfg.CORSAllowedOrigins),
+		// After CORS (both are "browser request" concerns, and CORS
+		// already resolved whatever it needs to about Origin) and before
+		// Recovery, so a panic in a handler this wraps doesn't skip the
+		// CSRF cookie the safe-method path is responsible for minting.
+		// See middleware.CSRF and docs/DECISIONS.md § "Autenticação:
+		// modo duplo (cookie httpOnly + Bearer)" for the gate itself —
+		// this applies to every route reachable through root, health
+		// probes included, the same way secureheaders and CORS already
+		// do; only the rate limiter below is deliberately scoped to skip
+		// them.
+		middleware.CSRF(csrfProtector),
 		middleware.Recovery(logger),
 	)(root)
 
