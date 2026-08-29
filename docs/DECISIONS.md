@@ -717,20 +717,6 @@ garantia que não vem de código próprio.
 
 ---
 
-## Princípio geral de validação
-
-Decisões e correções neste projeto são verificadas pela execução real, não
-pela leitura da própria intenção da mudança. Exemplo já ocorrido: uma
-correção de CI foi dada como concluída porque o alvo de fuzz passava
-localmente e a edição parecia certa — mas o workflow nunca chegou a
-executá-lo, por uma âncora de YAML que não bateu. Só foi considerada
-resolvida depois de ver a execução real no pipeline (contagem de
-iterações, tempo, resultado). Aplique o mesmo padrão em qualquer issue
-que envolva CI, deploy, ou qualquer configuração que se pretende validar:
-não feche por ter editado o arquivo certo, feche por ter visto rodar.
-
----
-
 ## Quota de anexos: por usuário, em bytes, checada antes do upload
 
 `ATTACHMENT_MAX_BYTES_PER_USER` (default 500 MiB) limita o total de bytes
@@ -1025,3 +1011,17 @@ saída seria aceitar essa opção insegura por padrão, o que é pior.
 esperado. Nenhum pacote novo, nenhuma dependência de rede em tempo de
 build além da que `go mod download` já faz — o arquivo já estava lá, só
 não estava sendo copiado.
+
+---
+
+## Princípio geral de validação
+
+Decisões e correções neste projeto são verificadas pela execução real, não
+pela leitura da própria intenção da mudança. Exemplo já ocorrido: uma
+correção de CI foi dada como concluída porque o alvo de fuzz passava
+localmente e a edição parecia certa — mas o workflow nunca chegou a
+executá-lo, por uma âncora de YAML que não bateu. Só foi considerada
+resolvida depois de ver a execução real no pipeline (contagem de
+iterações, tempo, resultado). Aplique o mesmo padrão em qualquer issue
+que envolva CI, deploy, ou qualquer configuração que se pretende validar:
+não feche por ter editado o arquivo certo, feche por ter visto rodar.
