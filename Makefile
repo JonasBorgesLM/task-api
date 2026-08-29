@@ -2,7 +2,8 @@
         test test-race test-integration test-integration-race coverage coverage-full fuzz \
         fmt fmt-check vet lint vulncheck tidy-check check \
         docker-build docker-up docker-down db-up storage-up \
-        migrate-up migrate-down seed seed-reset db-reset
+        migrate-up migrate-down seed seed-reset db-reset \
+        changelog-section
 
 .DEFAULT_GOAL := help
 
@@ -197,3 +198,36 @@ seed-reset: ## Empty users/sessions/tasks, then reseed with SEED_USERS/SEED_TASK
 
 db-reset: ## Wipe ALL data (users, sessions, tasks) without reseeding
 	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/seed -reset -users=0
+
+##@ Release
+
+changelog-section: ## Print one version's section from CHANGELOG.md (e.g. make changelog-section VERSION=1.1.0)
+	@# CHANGELOG.md holds every release, newest section first, each
+	@# headed `## [x.y.z] — ...`. Once a second entry existed alongside
+	@# [1.0.0], `gh release create --notes-file CHANGELOG.md` stopped
+	@# being correct — it publishes the whole file, every version's notes
+	@# concatenated, as this one release's notes. This target is the fix:
+	@# it prints just the one section asked for, header included, stopping
+	@# at the next `## [` line or end of file, with the `---` divider that
+	@# separates it from the next section (and any blank lines around it)
+	@# trimmed off the end — buffered in an array rather than printed as
+	@# each line is read, since that trailing divider isn't known to be
+	@# trailing until the line *after* it (the next section's own `## [`,
+	@# or EOF) is reached. Reuses the VERSION variable already defined
+	@# above (for build stamping) — pass it explicitly here since a
+	@# release's version is rarely the same as HEAD's `git describe`.
+	@test -n "$(VERSION)" || { echo "usage: make changelog-section VERSION=1.1.0" >&2; exit 1; }
+	@awk -v ver="$(VERSION)" ' \
+		BEGIN { target = "## [" ver "]"; found = 0; n = 0 } \
+		/^## \[/ { \
+			if (found) exit; \
+			if (index($$0, target) == 1) { found = 1; buf[++n] = $$0; next } \
+			next \
+		} \
+		found { buf[++n] = $$0 } \
+		END { \
+			if (!found) { print "changelog-section: no \"" target "\" heading in CHANGELOG.md" > "/dev/stderr"; exit 1 } \
+			while (n > 0 && (buf[n] == "" || buf[n] == "---")) { n-- } \
+			for (i = 1; i <= n; i++) { print buf[i] } \
+		} \
+	' CHANGELOG.md
