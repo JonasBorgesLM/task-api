@@ -62,6 +62,8 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `AUTH_SESSION_TTL` | How long a `POST /v1/auth/login` token stays valid | `24h` |
 | `AUTH_MAX_SESSIONS_PER_USER` | How many of a user's sessions stay alive at once. A login past the cap evicts that user's oldest session rather than being refused — see `docs/DECISIONS.md` | `10` |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call this API. Unset ⇒ CORS disabled | *(unset)* |
+| `CSRF_SECRET` | Signs the CSRF token for cookie-authenticated writes — see `docs/DECISIONS.md` § "Autenticação: modo duplo". Only `cmd/api` needs it; must be ≥32 bytes and identical across every instance | *(none — required for `cmd/api` to build its CSRF protector; `cmd/migrate`/`cmd/seed` ignore it)* |
+| `COOKIE_INSECURE` | Drops `Secure` from the session and CSRF cookies, for `http://localhost` in dev. Never set in production | `false` |
 | `HSTS_MAX_AGE` | `Strict-Transport-Security` max-age, as a Go duration (e.g. `8760h`). `0` omits the header entirely, for a permanently-plaintext deployment. Never sent with `includeSubDomains` or `preload` | `8760h` (1 year) |
 | `RATE_LIMIT_BURST` / `RATE_LIMIT_PER_SEC` | Global token bucket, keyed by client address, in front of every route except the health probes | `60` / `20` |
 | `AUTH_RATE_LIMIT_BURST` / `AUTH_RATE_LIMIT_PER_SEC` | Tighter bucket for `POST /v1/auth/register` and `POST /v1/auth/login` together | `10` / `0.05` |
