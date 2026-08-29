@@ -238,10 +238,73 @@ válido, e é onde `cmd/api` (CI-5) de fato aplica a exigência, no
   (regressão explícita dos `curl` do README); `login` sem token CSRF →
   `403`; `login` com o token de `GET /auth/csrf-token` → passa; token
   emitido antes do login é rejeitado depois do login (prova de que
-  `Rotate` rodou — o token pós-login é diferente do pré-login).
+  `Rotate` rodou — o token pós-login é diferente do pré-login). Todos os
+  cinco escritos como `TestIntegration_CSRF_*`, verificados passando de
+  verdade, não só compilando.
 - **Verificação:** `make check` (a cadeia global mudou, vale o gate
-  inteiro) + o teste de integração acima.
+  inteiro) + `make test-integration` + o teste de integração acima +
+  smoke test contra o binário real (`docker build` + `docker run`,
+  `curl` seguindo exatamente o walkthrough do README).
 - **Depende de:** CI-3, CI-4, CI-5.
+
+**Achados reais ao implementar, nenhum antecipado pelo plano original —
+registrados aqui, não escondidos:**
+
+1. **`csrf.New` precisa de `WithTrustedOrigins(cfg.CORSAllowedOrigins...)`,
+   condicional a `CORSAllowedOrigins` não estar vazio.** Sem isso, a
+   checagem de Origin do `Protector` cai no default (compara contra o
+   próprio `Host` da requisição) — que nunca bate com o Origin de um
+   frontend servido de verdade numa origem separada, exatamente o cenário
+   que `CORS_ALLOWED_ORIGINS`/cookie existem para servir. Sem essa opção,
+   qualquer deploy real com frontend separado teria CSRF rejeitando 100%
+   das escritas do frontend, sempre — não um bug raro, um bug de todo
+   request. Descoberto rodando `TestIntegration_CrossOriginFlow` (que já
+   simula exatamente esse cenário) contra a implementação sem a opção.
+   Corrigido em `cmd/api/main.go`, na mesma construção do `csrfProtector`.
+2. **`docker-compose.yml` e `k8s/30-config.yaml` também precisam de
+   `COOKIE_INSECURE=true`, não só `CSRF_SECRET` (que CI-5 já tinha
+   adicionado).** Nenhum dos dois serve HTTPS — sem isso, o cookie de
+   sessão e o cookie de CSRF saem `Secure`, e nenhum cliente (`curl`,
+   browser, os testes de integração) os devolve sobre HTTP simples.
+   Descoberto rodando o walkthrough do README contra o binário real
+   (`docker build` + `docker run`) e recebendo `403` mesmo com o token
+   CSRF correto no header — o cookie nunca tinha ido junto.
+3. **O walkthrough de `curl` do README precisou ser reescrito para
+   `register`/`login` especificamente** — a decisão do usuário em AM-2
+   (proteger login/register com CSRF) significa que essas duas rotas, e
+   só essas duas (tudo que já carrega `Authorization: Bearer` continua
+   `curl`-friendly, sem mudança), agora exigem `GET /auth/csrf-token`
+   primeiro, um cookie-jar, e o header `X-CSRF-Token` — três coisas que
+   um `curl -X POST .../auth/register -d '...'` isolado, como o README
+   documentava antes desta seção, nunca teve. Não é um bug a corrigir —
+   é a consequência direta e esperada da decisão já tomada, mas o
+   README precisava refletir isso ou passaria a estar documentando um
+   fluxo que não funciona mais. O walkthrough atualizado foi verificado
+   rodando exatamente os comandos que ele agora mostra, contra o binário
+   real, do início (`GET /auth/csrf-token`) ao fim (`DELETE
+   /v1/tasks/$ID`).
+4. **Toda a suíte de testes de integração de `cmd/api` que chama `POST
+   /auth/register`/`/auth/login` diretamente precisou de um cliente com
+   cookie jar (`net/http/cookiejar`) e de um header `Origin` explícito**
+   — nenhum teste anterior a esta `CI` precisava de nenhum dos dois.
+   `registerAndLoginAs` (usado por quase toda a suíte) foi reescrito por
+   dentro para fazer a dança CSRF; `TestIntegration_CreateTask_RequiresAuth`,
+   `TestIntegration_RateLimit_AuthRoutesHaveTheirOwnTier`,
+   `TestIntegration_CrossOriginFlow` e o segundo login de
+   `TestIntegration_LogoutAll_InvalidatesEverySession` precisaram de
+   ajuste individual, cada um documentado no próprio commit. `testConfig()`
+   (a config compartilhada por praticamente todo teste do pacote) ganhou
+   `CookieInsecure: true` pela mesma razão do item 2 acima — sem isso, o
+   `cookiejar` de teste (spec-compliant, como um browser real) também se
+   recusa a devolver um cookie `Secure` sobre o HTTP simples que
+   `httptest.NewServer` serve.
+5. **A interface `RegisterRoutes` de `internal/user.Handler` perdeu o
+   parâmetro `csrfMiddleware` que CI-5 tinha introduzido como interim** —
+   exatamente como o comentário daquele `CI` já previa, o gate global
+   agora cobre `GET /auth/csrf-token` sozinho, e manter o wrap por rota
+   teria significado passar pelo `Protector` duas vezes por requisição.
+   `NewHandler` ganhou um parâmetro novo (`csrfProtector *csrf.Protector`)
+   no lugar, porque `login` precisa dele para `Rotate`.
 
 ### CI-7 — CORS com credenciais
 
