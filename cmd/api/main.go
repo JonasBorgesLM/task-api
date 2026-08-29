@@ -17,8 +17,10 @@ import (
 
 	core "github.com/JonasBorgesLM/crier/core"
 
+	"github.com/JonasBorgesLM/moat/csrf"
 	"github.com/JonasBorgesLM/moat/ratelimit"
 	"github.com/JonasBorgesLM/moat/realip"
+	"github.com/JonasBorgesLM/moat/secret"
 	"github.com/JonasBorgesLM/moat/secureheaders"
 
 	"github.com/JonasBorgesLM/task-api/internal/attachment"
@@ -277,6 +279,21 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	userHandler := user.NewHandler(userSvc, logger, cfg.CookieInsecure)
 	requireAuth := user.RequireAuth(userSvc, logger)
 
+	// csrfProtector is built here, in the composition root, the same
+	// reason ratelimit/secureheaders are (see CLAUDE.md § "Composition
+	// root"). CSRF_SECRET is intentionally not validated in
+	// config.Load — see the comment on Config.CSRFSecret and on its
+	// assignment in Load — so an empty or short value surfaces here, at
+	// startup, as csrf.New's own error, never at request time.
+	var csrfOpts []csrf.Option
+	if cfg.CookieInsecure {
+		csrfOpts = append(csrfOpts, csrf.WithInsecureCookie())
+	}
+	csrfProtector, err := csrf.New(secret.New([]byte(cfg.CSRFSecret)), csrfOpts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build csrf protector: %w", err)
+	}
+
 	// Three rate-limit tiers, each answering a threat the others cannot.
 	// All are token buckets over a bounded in-process store: a fixed
 	// window would let a client spend its whole quota at the end of one
@@ -368,7 +385,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// publish is what keeps newServer callable more than once per binary.
 	publishBuildInfoOnce()
 
-	userHandler.RegisterRoutes(v1, authenticated, authLimiter.Middleware)
+	userHandler.RegisterRoutes(v1, authenticated, authLimiter.Middleware, csrfProtector.Middleware)
 	taskHandler.RegisterRoutes(v1, authenticated)
 
 	// The liveness and readiness probes deliberately sit outside the

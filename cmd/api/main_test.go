@@ -39,6 +39,15 @@ type syncBuffer struct {
 	buf bytes.Buffer
 }
 
+// testCSRFSecretEnv is what every TestRun_* test in this package that
+// drives run() end-to-end (real config.Load, not testConfig()) sets
+// CSRF_SECRET to. config.Load itself never rejects an empty value (see
+// its doc comment on CSRFSecret's assignment) but newServer's
+// csrf.New does, at ≥32 bytes — without this, every one of these tests
+// would fail in run()'s config→server build, before whatever each
+// actually means to exercise.
+const testCSRFSecretEnv = "test-only-csrf-secret-not-for-production-use-000000"
+
 func (s *syncBuffer) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -486,6 +495,7 @@ func TestSecurityHeaders_HSTSMaxAgeMatchesLibraryDefault(t *testing.T) {
 func TestRun_GracefulShutdownOnContextCancel(t *testing.T) {
 	t.Setenv("HTTP_ADDR", freeAddr(t))
 	t.Setenv("HTTP_SHUTDOWN_TIMEOUT", "5s")
+	t.Setenv("CSRF_SECRET", testCSRFSecretEnv)
 
 	out := &syncBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -539,6 +549,7 @@ func TestRun_AddrAlreadyInUse_ReturnsError(t *testing.T) {
 	defer ln.Close()
 
 	t.Setenv("HTTP_ADDR", addr)
+	t.Setenv("CSRF_SECRET", testCSRFSecretEnv)
 
 	runErr := make(chan error, 1)
 	go func() { runErr <- run(context.Background(), io.Discard) }()
@@ -559,6 +570,7 @@ func TestRun_AddrAlreadyInUse_ReturnsError(t *testing.T) {
 func TestRun_UsesConfiguredLogLevel(t *testing.T) {
 	t.Setenv("HTTP_ADDR", freeAddr(t))
 	t.Setenv("LOG_LEVEL", "error")
+	t.Setenv("CSRF_SECRET", testCSRFSecretEnv)
 
 	out := &syncBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())

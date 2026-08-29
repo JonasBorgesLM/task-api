@@ -12,8 +12,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JonasBorgesLM/moat/csrf"
+	"github.com/JonasBorgesLM/moat/secret"
+
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 )
+
+// testCSRFSecret is a fixed, valid-length secret for tests that need a
+// real csrf.Protector rather than a pass-through — csrf.New rejects
+// anything shorter than csrf.MinSecretLen (32 bytes), so this is padded
+// well past it.
+const testCSRFSecret = "test-only-csrf-secret-not-for-production-use-000000"
+
+// newTestCSRFProtector returns a real *csrf.Protector for tests, with
+// WithInsecureCookie so it works in a plain httptest request (no TLS).
+func newTestCSRFProtector(t *testing.T) *csrf.Protector {
+	t.Helper()
+	p, err := csrf.New(secret.New([]byte(testCSRFSecret)), csrf.WithInsecureCookie())
+	if err != nil {
+		t.Fatalf("csrf.New() unexpected error: %v", err)
+	}
+	return p
+}
 
 // fakeService is a test double for userService (Handler) and
 // sessionValidator (RequireAuth) — one fake implements both, since
@@ -415,6 +435,50 @@ func TestMe_Handler_UsesUserIDFromContext(t *testing.T) {
 	}
 }
 
+// --- GET /auth/csrf-token ---
+
+// TestCSRFToken_Handler_ReturnsToken drives the request through a real
+// csrf.Protector.Middleware first, the same way cmd/api's newServer will
+// (see CI-6 of docs/changes/dual-auth-mode/plan.md) — csrf.Token only
+// finds a value once that has happened, so testing h.csrfToken in
+// isolation would prove nothing about the actual guarantee.
+func TestCSRFToken_Handler_ReturnsToken(t *testing.T) {
+	h := newHandlerWithFake(&fakeService{})
+	protector := newTestCSRFProtector(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/csrf-token", nil)
+	w := httptest.NewRecorder()
+	protector.Middleware(http.HandlerFunc(h.csrfToken)).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("csrf-token status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var got csrfTokenResponse
+	decodeBody(t, w, &got)
+	if got.CSRFToken == "" {
+		t.Error("csrf-token body csrf_token is empty, want a real token")
+	}
+}
+
+// TestCSRFToken_Handler_MiddlewareNotWired_Returns500 is the wiring-bug
+// case csrfToken's own doc comment describes: called directly, without
+// csrf.Protector.Middleware in front of it, csrf.Token reports ok=false
+// and the handler must fail loudly (500, logged) rather than silently
+// returning an empty token that would make every subsequent write fail
+// CSRF with no clue why.
+func TestCSRFToken_Handler_MiddlewareNotWired_Returns500(t *testing.T) {
+	h := newHandlerWithFake(&fakeService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/csrf-token", nil)
+	w := httptest.NewRecorder()
+	h.csrfToken(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("csrf-token without middleware: status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+}
+
 // --- RegisterRoutes ---
 
 func TestRegisterRoutes_PublicAndProtectedRoutes(t *testing.T) {
@@ -439,7 +503,11 @@ func TestRegisterRoutes_PublicAndProtectedRoutes(t *testing.T) {
 	// limiting, and the limiter that guards these routes in production is
 	// composed in cmd/api (see newServer) rather than here.
 	noopRateLimit := func(next http.Handler) http.Handler { return next }
-	h.RegisterRoutes(mux, RequireAuth(svc, slog.New(slog.NewTextHandler(io.Discard, nil))), noopRateLimit)
+	// A real Protector, not a pass-through: "csrf-token is public" below
+	// asserts on the actual response body, which only exists once a
+	// request has gone through csrf.Protector.Middleware for real.
+	csrfProtector := newTestCSRFProtector(t)
+	h.RegisterRoutes(mux, RequireAuth(svc, slog.New(slog.NewTextHandler(io.Discard, nil))), noopRateLimit, csrfProtector.Middleware)
 
 	cases := []struct {
 		name   string
@@ -451,6 +519,7 @@ func TestRegisterRoutes_PublicAndProtectedRoutes(t *testing.T) {
 	}{
 		{"register is public", http.MethodPost, "/auth/register", `{"email":"a@example.com","password":"password123"}`, "", http.StatusCreated},
 		{"login is public", http.MethodPost, "/auth/login", `{"email":"a@example.com","password":"password123"}`, "", http.StatusOK},
+		{"csrf-token is public", http.MethodGet, "/auth/csrf-token", "", "", http.StatusOK},
 		{"logout without token is rejected", http.MethodPost, "/auth/logout", "", "", http.StatusUnauthorized},
 		{"logout with valid token succeeds", http.MethodPost, "/auth/logout", "", "valid-token", http.StatusNoContent},
 		{"me without token is rejected", http.MethodGet, "/auth/me", "", "", http.StatusUnauthorized},

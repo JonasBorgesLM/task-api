@@ -250,6 +250,7 @@ func TestRun_CrierMirrorsAccessLogWithRequestID(t *testing.T) {
 	addr := freeAddr(t)
 	t.Setenv("HTTP_ADDR", addr)
 	t.Setenv("CRIER_OTLP_ENDPOINT", collector.URL)
+	t.Setenv("CSRF_SECRET", testCSRFSecretEnv)
 
 	out := &syncBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
