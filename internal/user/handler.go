@@ -30,10 +30,11 @@ type userService interface {
 
 // Handler exposes the user Service over HTTP.
 type Handler struct {
-	svc            userService
-	logger         *slog.Logger
-	cookieInsecure bool
-	csrfProtector  *csrf.Protector
+	svc                userService
+	logger             *slog.Logger
+	cookieInsecure     bool
+	csrfProtector      *csrf.Protector
+	attachmentsEnabled bool
 }
 
 // NewHandler returns a new Handler with the given userService and logger.
@@ -43,9 +44,14 @@ type Handler struct {
 // csrfProtector is the same *csrf.Protector cmd/api's newServer builds
 // and wires into the global CSRF gate (internal/middleware/csrf.go) —
 // login uses it to rotate the CSRF cookie on every successful
-// authentication (see login's doc comment).
-func NewHandler(svc userService, logger *slog.Logger, cookieInsecure bool, csrfProtector *csrf.Protector) *Handler {
-	return &Handler{svc: svc, logger: logger, cookieInsecure: cookieInsecure, csrfProtector: csrfProtector}
+// authentication (see login's doc comment). attachmentsEnabled mirrors
+// cmd/api's own attachmentsEnabled(cfg) check — it decides whether the
+// attachment routes exist at all — and is surfaced verbatim on GET
+// /auth/me (see meResponse) so a frontend knows whether to offer
+// attachment upload UI without probing an endpoint that may 404 either
+// because it doesn't exist or because of something else entirely.
+func NewHandler(svc userService, logger *slog.Logger, cookieInsecure bool, csrfProtector *csrf.Protector, attachmentsEnabled bool) *Handler {
+	return &Handler{svc: svc, logger: logger, cookieInsecure: cookieInsecure, csrfProtector: csrfProtector, attachmentsEnabled: attachmentsEnabled}
 }
 
 // RegisterRoutes registers every /auth/* route on mux. Register and Login
@@ -293,6 +299,15 @@ func (h *Handler) csrfToken(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, r, http.StatusOK, csrfTokenResponse{CSRFToken: token})
 }
 
+// meResponse is the body returned by GET /auth/me: the caller's own User
+// plus attachments_enabled, which is not part of User itself because
+// User is also register's response body and attachment availability is
+// a deployment-wide fact, not something about a particular account.
+type meResponse struct {
+	User
+	AttachmentsEnabled bool `json:"attachments_enabled"`
+}
+
 // me handles GET /auth/me — returns the authenticated caller's own User.
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	userID, _ := middleware.UserIDFromContext(r.Context())
@@ -303,7 +318,7 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.writeJSON(w, r, http.StatusOK, u)
+	h.writeJSON(w, r, http.StatusOK, meResponse{User: u, AttachmentsEnabled: h.attachmentsEnabled})
 }
 
 // handleServiceError maps known domain errors to HTTP status codes,

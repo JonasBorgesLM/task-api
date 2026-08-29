@@ -343,7 +343,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/User'
+                $ref: '#/components/schemas/MeResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1357,6 +1357,28 @@ components:
         - email
         - created_at
         - updated_at
+
+    MeResponse:
+      description: >
+        The body returned by GET /v1/auth/me: every User field, plus
+        attachments_enabled. That field is not part of User itself —
+        User is also RegisterResponse's schema, and whether attachment
+        upload/download routes exist at all is a deployment-wide
+        configuration fact (see config.Config.AttachmentStorageDir /
+        ATTACHMENT_S3_ENDPOINT), not something about a particular
+        account. A frontend reads it to decide whether to offer
+        attachment UI, instead of inferring availability from a 404 that
+        could also mean something else.
+      allOf:
+        - $ref: '#/components/schemas/User'
+        - type: object
+          properties:
+            attachments_enabled:
+              type: boolean
+              readOnly: true
+              example: true
+          required:
+            - attachments_enabled
 
     RegisterRequest:
       type: object
