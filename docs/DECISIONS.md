@@ -391,7 +391,19 @@ medição real desse orçamento sob carga, não só a aritmética.
 
 ---
 
-## Fase 11: crier embutido, stdout mantido em paralelo
+## crier + SigNoz: registro consolidado da Fase 11 (issue 11.9)
+
+Registro único da Fase 11 (crier embutido + validação contra um SigNoz
+real), reunindo aqui o que antes estava espalhado em quatro seções
+separadas deste arquivo. Nenhum conteúdo técnico foi alterado nesta
+consolidação — apenas a organização; ver a issue 11.9 e o PR que fechou
+esta issue para a verificação de que o texto é o mesmo, só reagrupado.
+As quatro subseções abaixo mantêm a ordem cronológica original em que as
+decisões foram tomadas: a integração do crier em si, a validação de que
+os logs chegam de fato ao SigNoz, o comportamento sob shutdown e carga
+real, e por fim onde e como o SigNoz roda.
+
+### Fase 11: crier embutido, stdout mantido em paralelo
 
 `cmd/api/crier.go` integra a biblioteca `crier` (`core.New()` + o
 exportador `exporters/otlp`) como um segundo destino de log, opt-in via
@@ -418,7 +430,7 @@ egress dobrados para o volume de acesso. Aceito porque a alternativa
 (substituir stdout) reintroduz exatamente o ponto único de falha que o
 parágrafo acima descreve.
 
-### Um "tee" de `slog.Handler`, não uma chamada por call site
+#### Um "tee" de `slog.Handler`, não uma chamada por call site
 
 A alternativa considerada foi adicionar `crier.Log(...)` em cada um dos
 ~20 call sites de log do projeto (cmd/api e os três Handlers de domínio).
@@ -428,7 +440,7 @@ caminhos para divergir. Em vez disso, `crierTeeHandler` embrulha o
 já existente passa a alcançar o crier automaticamente, `request_id`
 incluído (é só mais um atributo que a linha de log já carregava).
 
-### Um achado real, não só leitura de documentação: atributos precisam de conversão
+#### Um achado real, não só leitura de documentação: atributos precisam de conversão
 
 Verificado por experimento, não por ler o código do crier: um atributo
 `slog` de tipo `error` (o que `"error", err` produz — `error` não é um
@@ -445,7 +457,7 @@ representação em texto (`slog.Value.String()`, que corretamente chama
 cada um foi verificado falhando de propósito (a conversão removida
 temporariamente) antes de mergear.
 
-### Custo de dependência (issue 11.3)
+#### Custo de dependência (issue 11.3)
 
 `go get` real, grafo conferido (não suposto): `CRIER_OTLP_ENDPOINT`
 configurado adiciona exatamente **4 módulos** —
@@ -465,7 +477,7 @@ esboço original desta fase). Se um backend de observabilidade futuro só
 falar gRPC, essa decisão precisa ser revisitada — não é o caso do SigNoz,
 que traz coletor OTLP/HTTP embutido.
 
-### Nome de serviço e versão
+#### Nome de serviço e versão
 
 `Options.ServiceName` é a constante `"task-api"` (`crierServiceName`).
 `Options.ServiceVersion` fica vazio por ora — o mecanismo de
@@ -475,7 +487,7 @@ consequência de uma linha só assim que aquele PR mergear; não vale
 duplicar aqui o mecanismo de detecção de versão só para adiantar este
 campo opcional.
 
-### `crierShutdownTimeout`: provisório, não a aritmética final
+#### `crierShutdownTimeout`: provisório, não a aritmética final
 
 `crier.Shutdown` roda dentro de `closeAll`, **antes** de `closeDB` e
 **depois** de `closeBlobs` — na mesma ordem já estabelecida para os
@@ -495,7 +507,7 @@ um deploy real para rodar `k8s/rollout-test.sh` contra ele, igual ao que
 já foi feito para `HTTP_PRE_SHUTDOWN_DELAY` — ver a seção "Drain antes do
 shutdown" acima.
 
-### `/health/ready` não é acoplado ao crier (issue 11.8)
+#### `/health/ready` não é acoplado ao crier (issue 11.8)
 
 `core.Crier.Health()` existe e reporta liveness/readiness do próprio
 pipeline do crier — e **deliberadamente não é consultado por**
@@ -523,9 +535,7 @@ estabelecido no projeto de "fechar sobre a variável de pacote, nunca
 sobre um parâmetro capturado", aplicado aqui pela primeira vez a um
 recurso construído mais de uma vez por processo de teste.
 
----
-
-## Validação real da issue 11.6: dois registros confirmados no ClickHouse do SigNoz
+### Validação real da issue 11.6: dois registros confirmados no ClickHouse do SigNoz
 
 `CRIER_OTLP_ENDPOINT` verificado entregando de verdade, não apenas "o
 exportador não retornou erro" — cada prova consultou diretamente o
@@ -557,9 +567,7 @@ Recursos de teste (cluster(s) kind descartáveis, imagem
 `task-api:crier-e2e-test`) removidos depois; o stack do SigNoz continua
 rodando na máquina para a issue 11.7 reaproveitar.
 
----
-
-## Issue 11.7: shutdown sob carga real, drain do crier reconciliado com o SigNoz
+### Issue 11.7: shutdown sob carga real, drain do crier reconciliado com o SigNoz
 
 `k8s/rollout-test.sh` estendido para, quando encontra um SigNoz rodando
 (`SIGNOZ_UP=true`, mesma detecção da seção acima), reconciliar o que o
@@ -627,9 +635,7 @@ de clusters kind nesta máquina de desenvolvimento, não algo que o código
 do crier introduziu. Registrado em vez de descartado, para que uma
 reaparição futura tenha este parágrafo como ponto de partida.
 
----
-
-## SigNoz: Docker Compose oficial, mesma máquina do cluster, ligado à rede do `kind` (issue 11.5)
+### SigNoz: Docker Compose oficial, mesma máquina do cluster, ligado à rede do `kind` (issue 11.5)
 
 **Decisão revisada — substitui a versão anterior desta seção (VM
 dedicada + VPN/peering), descartada antes de qualquer provisionamento.**
@@ -672,7 +678,7 @@ Com o nome de projeto padrão ("signoz"), o container que recebe OTLP é
 acessível por nome dentro da rede Docker `signoz-network` que o Compose
 cria.
 
-### A pergunta que não podia ser assumida: como um pod alcança um serviço no host
+#### A pergunta que não podia ser assumida: como um pod alcança um serviço no host
 
 A ferramenta que cria o cluster Kubernetes local neste repositório é
 **kind** — confirmado lendo `k8s/rollout-test.sh` (`kind create cluster`,
