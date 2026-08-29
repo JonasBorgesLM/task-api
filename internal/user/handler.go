@@ -28,13 +28,17 @@ type userService interface {
 
 // Handler exposes the user Service over HTTP.
 type Handler struct {
-	svc    userService
-	logger *slog.Logger
+	svc            userService
+	logger         *slog.Logger
+	cookieInsecure bool
 }
 
 // NewHandler returns a new Handler with the given userService and logger.
-func NewHandler(svc userService, logger *slog.Logger) *Handler {
-	return &Handler{svc: svc, logger: logger}
+// cookieInsecure mirrors config.Config.CookieInsecure — see its doc
+// comment for why the session cookie ever drops Secure at all (only for
+// http://localhost in local development; never in production).
+func NewHandler(svc userService, logger *slog.Logger, cookieInsecure bool) *Handler {
+	return &Handler{svc: svc, logger: logger, cookieInsecure: cookieInsecure}
 }
 
 // RegisterRoutes registers every /auth/* route on mux. Register and Login
@@ -114,7 +118,67 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Must happen before writeJSON: Set-Cookie is a header, and headers
+	// can no longer be added once the body starts writing. See
+	// docs/DECISIONS.md § "Autenticação: modo duplo (cookie httpOnly +
+	// Bearer)" — the cookie carries the same token as the body's own
+	// "token" field, which is unchanged by this: a client that only ever
+	// read the body keeps working exactly as before.
+	setSessionCookie(w, token, expiresAt, h.cookieInsecure)
+
 	h.writeJSON(w, r, http.StatusOK, loginResponse{Token: token, ExpiresAt: expiresAt, User: u})
+}
+
+// setSessionCookie writes the session cookie a browser client
+// authenticates with from then on, carrying the same opaque token
+// loginResponse.Token already does. HttpOnly and the deliberate absence
+// of any client-readable duplicate are what make it immune to theft via
+// XSS, unlike the localStorage alternative docs/DECISIONS.md rejected.
+//
+// Its expiry mirrors the token's own expiresAt exactly, rather than a
+// separately-configured duration: the cookie must never outlive, or
+// undercut, the credential it carries.
+func setSessionCookie(w http.ResponseWriter, token string, expiresAt time.Time, insecure bool) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   sessionCookieMaxAgeSeconds(expiresAt),
+		HttpOnly: true,
+		Secure:   !insecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// clearSessionCookie expires the session cookie on logout/logout-all.
+//
+// MaxAge: -1 is Go's spelling for "delete this cookie now" — net/http
+// writes that as the wire value "Max-Age=0" (the attribute meaning
+// "already expired"), which is different from the Go zero value
+// (MaxAge: 0), which omits the Max-Age attribute entirely and would
+// leave the cookie's original expiry in place. Every other attribute
+// must match what setSessionCookie wrote, or the browser treats this as
+// a different cookie and leaves the real one untouched.
+func clearSessionCookie(w http.ResponseWriter, insecure bool) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   !insecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// sessionCookieMaxAgeSeconds is setSessionCookie's Max-Age, in whole
+// seconds until expiresAt. CreateSession always returns a time in the
+// future, so this is never zero or negative in practice — but the value
+// is used as-is rather than clamped, so a bug upstream would surface as
+// a cookie the browser discards immediately, not as one silently valid
+// for longer than the token actually is.
+func sessionCookieMaxAgeSeconds(expiresAt time.Time) int {
+	return int(time.Until(expiresAt).Seconds())
 }
 
 // logout handles POST /auth/logout. It reads the raw bearer token
@@ -130,6 +194,7 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clearSessionCookie(w, h.cookieInsecure)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -147,6 +212,7 @@ func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clearSessionCookie(w, h.cookieInsecure)
 	w.WriteHeader(http.StatusNoContent)
 }
 

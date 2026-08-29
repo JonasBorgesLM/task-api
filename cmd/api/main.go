@@ -274,7 +274,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	userSvc := user.NewService(userRepo, cfg.AuthSessionTTL, cfg.AuthMaxSessionsPerUser)
 
 	taskHandler := task.NewHandler(taskSvc, logger)
-	userHandler := user.NewHandler(userSvc, logger)
+	userHandler := user.NewHandler(userSvc, logger, cfg.CookieInsecure)
 	requireAuth := user.RequireAuth(userSvc, logger)
 
 	// Three rate-limit tiers, each answering a threat the others cannot.

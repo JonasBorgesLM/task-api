@@ -56,7 +56,7 @@ func newIntegrationServer(t *testing.T) (*httptest.Server, string) {
 	taskHandler := NewHandler(taskSvc, logger)
 
 	userSvc := user.NewService(user.NewMemoryRepository(), 24*time.Hour, 1000)
-	userHandler := user.NewHandler(userSvc, logger)
+	userHandler := user.NewHandler(userSvc, logger, false)
 	requireAuth := user.RequireAuth(userSvc, logger)
 
 	// A generous limit here: these tests exercise the task/auth stack, not

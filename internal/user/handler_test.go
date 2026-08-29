@@ -85,8 +85,15 @@ func (f *fakeService) ValidateToken(_ context.Context, token string) (string, er
 }
 
 func newHandlerWithFake(svc *fakeService) *Handler {
+	return newHandlerWithFakeCookieMode(svc, false)
+}
+
+// newHandlerWithFakeCookieMode is newHandlerWithFake with cookieInsecure
+// exposed, for the tests that specifically exercise its effect on the
+// session cookie's Secure attribute.
+func newHandlerWithFakeCookieMode(svc *fakeService, cookieInsecure bool) *Handler {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewHandler(svc, logger)
+	return NewHandler(svc, logger, cookieInsecure)
 }
 
 func do(handler http.HandlerFunc, method, target, body string) *httptest.ResponseRecorder {
@@ -190,6 +197,76 @@ func TestLogin_Handler_ValidCredentials(t *testing.T) {
 	}
 }
 
+// TestLogin_Handler_SetsSessionCookie is CI-4's core assertion: the four
+// attributes docs/DECISIONS.md § "Autenticação: modo duplo" commits to,
+// on the same response TestLogin_Handler_ValidCredentials already proves
+// carries an unchanged body — this is the "the cookie is additive, not a
+// replacement" half of that guarantee, not a substitute for it.
+func TestLogin_Handler_SetsSessionCookie(t *testing.T) {
+	expiresAt := time.Now().Add(2 * time.Hour)
+	svc := &fakeService{
+		authenticateFn: func(email, _ string) (User, error) { return User{ID: "u1", Email: email}, nil },
+		createSessionFn: func(userID string) (string, time.Time, error) {
+			return "a-real-token", expiresAt, nil
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(h.login, http.MethodPost, "/auth/login", `{"email":"user@example.com","password":"password123"}`)
+
+	cookie := findCookie(t, w, sessionCookieName)
+	if cookie.Value != "a-real-token" {
+		t.Errorf("cookie Value = %q, want %q — must carry the same token the body does", cookie.Value, "a-real-token")
+	}
+	if !cookie.HttpOnly {
+		t.Error("cookie HttpOnly = false, want true")
+	}
+	if !cookie.Secure {
+		t.Error("cookie Secure = false, want true (cookieInsecure is false in this test)")
+	}
+	if cookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("cookie SameSite = %v, want SameSiteLaxMode", cookie.SameSite)
+	}
+	if cookie.Path != "/" {
+		t.Errorf("cookie Path = %q, want %q", cookie.Path, "/")
+	}
+	// Allow a couple of seconds of slack for the time between expiresAt
+	// being computed above and the cookie being written.
+	if cookie.MaxAge < 7195 || cookie.MaxAge > 7200 {
+		t.Errorf("cookie MaxAge = %d, want close to 7200 (2h)", cookie.MaxAge)
+	}
+}
+
+func TestLogin_Handler_CookieInsecure_DropsSecureAttribute(t *testing.T) {
+	svc := &fakeService{
+		authenticateFn: func(email, _ string) (User, error) { return User{ID: "u1", Email: email}, nil },
+	}
+	h := newHandlerWithFakeCookieMode(svc, true)
+
+	w := do(h.login, http.MethodPost, "/auth/login", `{"email":"user@example.com","password":"password123"}`)
+
+	cookie := findCookie(t, w, sessionCookieName)
+	if cookie.Secure {
+		t.Error("cookie Secure = true, want false — cookieInsecure(true) must drop it for http://localhost in dev")
+	}
+	if !cookie.HttpOnly {
+		t.Error("cookieInsecure must only affect Secure, not HttpOnly")
+	}
+}
+
+// findCookie decodes every Set-Cookie header on w and returns the one
+// named name, failing the test if none matches.
+func findCookie(t *testing.T, w *httptest.ResponseRecorder, name string) *http.Cookie {
+	t.Helper()
+	for _, c := range w.Result().Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("no Set-Cookie named %q in response; got %v", name, w.Result().Header.Values("Set-Cookie"))
+	return nil
+}
+
 func TestLogin_Handler_InvalidCredentials(t *testing.T) {
 	svc := &fakeService{
 		authenticateFn: func(_, _ string) (User, error) { return User{}, ErrInvalidCredentials },
@@ -232,6 +309,31 @@ func TestLogout_Handler_UsesTokenFromContext(t *testing.T) {
 	}
 }
 
+// TestLogout_Handler_ExpiresSessionCookie is the wire-level half of "the
+// server invalidates the session, and so does the browser stop sending
+// its cookie" — MaxAge < 0 is what net/http turns into the literal
+// "Max-Age=0" a browser deletes a cookie on sight for (see
+// clearSessionCookie's doc comment; MaxAge == 0, the zero value, would
+// instead omit the attribute and leave the original cookie's expiry
+// untouched).
+func TestLogout_Handler_ExpiresSessionCookie(t *testing.T) {
+	svc := &fakeService{}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req = req.WithContext(middleware.ContextWithSessionToken(req.Context(), "the-token"))
+	w := httptest.NewRecorder()
+	h.logout(w, req)
+
+	cookie := findCookie(t, w, sessionCookieName)
+	if cookie.MaxAge >= 0 {
+		t.Errorf("cookie MaxAge = %d, want negative (net/http's spelling for immediate deletion)", cookie.MaxAge)
+	}
+	if cookie.Path != "/" {
+		t.Errorf("cookie Path = %q, want %q — must match what setSessionCookie wrote or the browser keeps the original", cookie.Path, "/")
+	}
+}
+
 // --- POST /auth/logout-all ---
 
 func TestLogoutAll_Handler_UsesUserIDFromContext(t *testing.T) {
@@ -248,6 +350,25 @@ func TestLogoutAll_Handler_UsesUserIDFromContext(t *testing.T) {
 	}
 	if svc.logoutAllCalledWith != "u1" {
 		t.Errorf("logout-all called Service.LogoutAll with %q, want %q", svc.logoutAllCalledWith, "u1")
+	}
+}
+
+// TestLogoutAll_Handler_ExpiresSessionCookie mirrors
+// TestLogout_Handler_ExpiresSessionCookie — logout-all ends every
+// session, including the one that made this very request, so the
+// browser must stop sending its cookie exactly the same way.
+func TestLogoutAll_Handler_ExpiresSessionCookie(t *testing.T) {
+	svc := &fakeService{}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout-all", nil)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.logoutAll(w, req)
+
+	cookie := findCookie(t, w, sessionCookieName)
+	if cookie.MaxAge >= 0 {
+		t.Errorf("cookie MaxAge = %d, want negative (net/http's spelling for immediate deletion)", cookie.MaxAge)
 	}
 }
 
