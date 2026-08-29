@@ -52,12 +52,21 @@ data:
   # serves — see docs/DECISIONS.md. Set to 0 to omit it entirely.
   HSTS_MAX_AGE: "8760h"
 
-  # No Ingress/TLS termination in front of this disposable cluster (see
-  # k8s/rollout-test.sh — it talks to the Service directly) — without
-  # this, the session and CSRF cookies would both carry Secure, and no
-  # client validating against this cluster over plain HTTP would ever be
-  # able to send either back. Never set true against a real deployment
-  # that does terminate TLS somewhere in front of it.
+  # ⚠️  This drops Secure from the session cookie and the CSRF cookie —
+  # anyone on the network path between a client and this process reads
+  # the session cookie in plain text and can replay it as that user, no
+  # attack tooling required beyond a packet capture.
+  #
+  # That is acceptable *here* and nowhere else: this manifest has no
+  # Ingress or TLS termination in front of it (k8s/rollout-test.sh talks
+  # to the Service directly, over plain HTTP, by design — see
+  # .claude/rules/k8s-deploy.md), so without this setting neither cookie
+  # would ever come back to a client at all, and there is nothing real
+  # this disposable cluster protects to begin with (see the Secret
+  # warning below — same reasoning). A real deployment terminates TLS
+  # somewhere in front of the API and must not carry this setting into
+  # that manifest — copying this file wholesale into one is exactly the
+  # mistake this comment exists to interrupt.
   COOKIE_INSECURE: "true"
 
   # Mirrors every log record to SigNoz, alongside stdout — see
