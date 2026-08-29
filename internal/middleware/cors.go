@@ -49,6 +49,17 @@ const (
 // its OPTIONS preflight, or a same-origin-policy failure on the browser
 // side reading the actual response) — CORS being enabled for one origin
 // never widens what any other origin can do.
+//
+// Every allowed-origin response also carries
+// Access-Control-Allow-Credentials: true, which is what lets a browser
+// actually send and read the session cookie (see docs/DECISIONS.md §
+// "Autenticação: modo duplo (cookie httpOnly + Bearer)") on a
+// cross-origin request — without it, a fetch made with credentials:
+// "include" fails even though the server would have accepted the cookie.
+// This is safe precisely because the origin is never "*": a browser
+// itself refuses a response that combines a wildcard origin with
+// credentials allowed, so this codebase only ever has to keep not doing
+// that, which the allow-list above already guarantees.
 func CORS(allowedOrigins []string) Middleware {
 	allowed := make(map[string]bool, len(allowedOrigins))
 	for _, origin := range allowedOrigins {
@@ -83,6 +94,18 @@ func CORS(allowedOrigins []string) Middleware {
 			}
 
 			w.Header().Set("Access-Control-Allow-Origin", origin)
+
+			// Set on every response to an allowed origin — preflight and
+			// actual alike, both are required for a browser to complete a
+			// credentialed request (fetch(..., {credentials: "include"}),
+			// what a cookie-authenticated frontend uses). Safe to send
+			// unconditionally here specifically because this branch is only
+			// ever reached for an origin already on the explicit allow-list
+			// — Access-Control-Allow-Origin is never "*" in this codebase
+			// (see the doc comment above), and a browser refuses the
+			// combination of a wildcard origin with credentials allowed. If
+			// that ever changed, this header would have to change with it.
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 
 			if r.Method == http.MethodOptions {
 				w.Header().Set("Access-Control-Allow-Methods", corsAllowedMethods)

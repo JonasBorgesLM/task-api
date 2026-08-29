@@ -130,6 +130,94 @@ func TestCORS_Enabled_MultipleAllowedOrigins_EachEchoedBack(t *testing.T) {
 	}
 }
 
+// --- Access-Control-Allow-Credentials (CI-7 of
+// docs/changes/dual-auth-mode/plan.md) ---
+//
+// Required for a browser to complete a credentialed request
+// (fetch(..., {credentials: "include"}) — what a cookie-authenticated
+// frontend uses, see docs/DECISIONS.md § "Autenticação: modo duplo"), on
+// both the actual response and the preflight. It must never appear
+// alongside a wildcard Access-Control-Allow-Origin — a browser refuses
+// that combination outright — so every case below also pins that this
+// codebase's own "never *" rule (see CORS's doc comment) holds together
+// with the credentials header, not just on its own.
+
+func TestCORS_Enabled_AllowedOrigin_SetsAllowCredentials(t *testing.T) {
+	next, _ := newCORSTestHandler()
+	handler := CORS([]string{"http://localhost:8082"})(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set("Origin", "http://localhost:8082")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("Access-Control-Allow-Credentials = %q, want %q", got, "true")
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got == "*" {
+		t.Error("Access-Control-Allow-Origin = \"*\" alongside Allow-Credentials — a browser refuses this combination")
+	}
+}
+
+func TestCORS_Enabled_AllowedOriginPreflight_SetsAllowCredentials(t *testing.T) {
+	next, _ := newCORSTestHandler()
+	handler := CORS([]string{"http://localhost:8082"})(next)
+
+	req := httptest.NewRequest(http.MethodOptions, "/tasks", nil)
+	req.Header.Set("Origin", "http://localhost:8082")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("preflight Access-Control-Allow-Credentials = %q, want %q", got, "true")
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got == "*" {
+		t.Error("preflight Access-Control-Allow-Origin = \"*\" alongside Allow-Credentials — a browser refuses this combination")
+	}
+}
+
+func TestCORS_Enabled_DisallowedOrigin_NoAllowCredentials(t *testing.T) {
+	next, _ := newCORSTestHandler()
+	handler := CORS([]string{"http://localhost:8082"})(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("disallowed origin got Access-Control-Allow-Credentials = %q, want none", got)
+	}
+}
+
+func TestCORS_Enabled_NoOriginHeader_NoAllowCredentials(t *testing.T) {
+	next, _ := newCORSTestHandler()
+	handler := CORS([]string{"http://localhost:8082"})(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("request with no Origin got Access-Control-Allow-Credentials = %q, want none", got)
+	}
+}
+
+func TestCORS_Disabled_NoAllowCredentials(t *testing.T) {
+	next, _ := newCORSTestHandler()
+	handler := CORS(nil)(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set("Origin", "http://localhost:8082")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("disabled CORS set Access-Control-Allow-Credentials = %q, want none", got)
+	}
+}
+
 // --- Enabled, allowed origin: preflight (OPTIONS) request ---
 
 func TestCORS_Enabled_AllowedOriginPreflight_ShortCircuitsWithNoContent(t *testing.T) {

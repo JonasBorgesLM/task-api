@@ -671,6 +671,12 @@ func TestIntegration_CORS_Enabled_AllowedOrigin_ActualRequest(t *testing.T) {
 	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "http://localhost:8082" {
 		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, "http://localhost:8082")
 	}
+	// CI-7: without this, a browser's fetch(..., {credentials: "include"})
+	// — what the cookie-authenticated flows in the TestIntegration_CSRF_*
+	// tests above rely on — would refuse to expose the response at all.
+	if got := resp.Header.Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("Access-Control-Allow-Credentials = %q, want %q", got, "true")
+	}
 }
 
 // TestIntegration_CORS_Enabled_PreflightForRegisteredRoute is the exact
