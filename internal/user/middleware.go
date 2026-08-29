@@ -18,11 +18,48 @@ type sessionValidator interface {
 	ValidateToken(ctx context.Context, token string) (userID string, err error)
 }
 
+// sessionCookieName is the cookie Handler.login sets and this middleware
+// reads back, carrying the same opaque token Authorization: Bearer would
+// (see docs/DECISIONS.md § "Autenticação: modo duplo (cookie httpOnly +
+// Bearer)"). Defined here, alongside the reader, rather than in
+// handler.go alongside the writer — RequireAuth is what makes the cookie
+// meaningful; handler.go's Set-Cookie references this same constant.
+const sessionCookieName = "session_token"
+
+// credentialSource reports which of the two accepted transports r
+// presents a session credential on — "bearer", "cookie", or "" when
+// neither is present — and the token it carries.
+//
+// Authorization takes precedence when both are present: it is explicit
+// and deliberate on the caller's part, while the cookie is attached by
+// the browser automatically without the caller choosing to. A request
+// resolved this way is the Bearer path for every purpose downstream,
+// CSRF included — this is deliberately the same question a CSRF gate
+// needs answered (does this request carry Authorization?), so it is
+// factored out here rather than duplicated in a second place that could
+// drift from this one.
+//
+// A cookie present but empty is treated the same as absent, not as a
+// distinct malformed-credential case: an empty token would fail
+// ValidateToken as unknown anyway, so there is no separate failure mode
+// worth preserving here.
+func credentialSource(r *http.Request) (source, token string) {
+	if t, ok := bearerToken(r); ok {
+		return "bearer", t
+	}
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		return "cookie", c.Value
+	}
+	return "", ""
+}
+
 // RequireAuth returns a middleware.Middleware that rejects any request
-// without a valid "Authorization: Bearer <token>" header, and on success
-// stores the authenticated user's ID and the raw token in the request
-// context (via middleware.ContextWithUserID / ContextWithSessionToken)
-// before calling the wrapped handler.
+// without a valid session credential — "Authorization: Bearer <token>" or
+// the session cookie (see credentialSource for how the two are resolved
+// when both are present) — and on success stores the authenticated
+// user's ID and the raw token in the request context (via
+// middleware.ContextWithUserID / ContextWithSessionToken) before calling
+// the wrapped handler.
 //
 // It distinguishes two very different reasons a request can fail here,
 // because collapsing them into one status is actively harmful:
@@ -53,9 +90,9 @@ type sessionValidator interface {
 func RequireAuth(svc sessionValidator, logger *slog.Logger) middleware.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token, ok := bearerToken(r)
-			if !ok {
-				writeAuthError(w, http.StatusUnauthorized, "missing or malformed Authorization header")
+			_, token := credentialSource(r)
+			if token == "" {
+				writeAuthError(w, http.StatusUnauthorized, "missing or invalid session credential")
 				return
 			}
 
