@@ -337,7 +337,7 @@ func TestReadinessEndpoint_UnreachableDB_ReturnsServiceUnavailable(t *testing.T)
 func newTestHandler(t *testing.T, cfg config.Config) http.Handler {
 	t.Helper()
 
-	srv, closeDB, err := newServer(t.Context(), cfg, discardLogger())
+	srv, closeDB, err := newServer(t.Context(), cfg, discardLogger(), nil)
 	if err != nil {
 		t.Fatalf("newServer() error = %v", err)
 	}
@@ -586,5 +586,52 @@ func TestRun_UsesConfiguredLogLevel(t *testing.T) {
 
 	if strings.Contains(out.String(), "server started") {
 		t.Error(`LOG_LEVEL=error must suppress the Info-level "server started" log line`)
+	}
+}
+
+// TestRun_DatabaseURLPasswordNeverLeaks locks in a property the codebase
+// has always relied on but never proved: DATABASE_URL's password must
+// never reach either the structured log stream or the error run() returns
+// (which main() logs to stderr), however database startup fails.
+//
+// config.Load doesn't format-validate DATABASE_URL (see its doc comment),
+// so a malformed or unreachable one flows straight into openDatabase and
+// pgx. The property holds today only because pgx's own error formatting
+// redacts credentials before echoing a DSN back — confirmed empirically
+// against both connection failures (the password is omitted entirely,
+// only user=/database= appear) and parse failures (the password is
+// replaced with "xxxxx") — not because task-api's own code does any
+// redaction. Nothing here stops a future pgx version, or a future
+// mis-wrapped error, from changing that; this test is what would catch it.
+func TestRun_DatabaseURLPasswordNeverLeaks(t *testing.T) {
+	const password = "sw0rdfish-do-not-log-me"
+
+	// freeAddr's listener is closed before this runs, so connecting to it
+	// fails fast with "connection refused" instead of waiting out
+	// openDatabase's 10s ping timeout or a DNS lookup.
+	t.Setenv("DATABASE_URL", "postgres://dbuser:"+password+"@"+freeAddr(t)+"/dbname?sslmode=disable")
+	t.Setenv("HTTP_ADDR", freeAddr(t))
+
+	out := &syncBuffer{}
+	err := run(context.Background(), out)
+	if err == nil {
+		t.Fatal("run() with an unreachable DATABASE_URL: expected an error, got nil")
+	}
+
+	if strings.Contains(err.Error(), password) {
+		t.Errorf("run() error contains the DATABASE_URL password: %v", err)
+	}
+
+	// main() logs exactly this error, through a fresh stderr logger, as
+	// the last-resort "fatal error" line — reproduce that here since run()
+	// itself never writes it to out.
+	var fatalLog bytes.Buffer
+	slog.New(slog.NewJSONHandler(&fatalLog, nil)).Error("fatal error", "error", err)
+	if strings.Contains(fatalLog.String(), password) {
+		t.Errorf("main()'s fatal-error log line contains the DATABASE_URL password: %s", fatalLog.String())
+	}
+
+	if strings.Contains(out.String(), password) {
+		t.Errorf("run()'s own log output contains the DATABASE_URL password: %s", out.String())
 	}
 }

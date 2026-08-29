@@ -23,11 +23,13 @@ type fakeService struct {
 	authenticateFn  func(email, password string) (User, error)
 	createSessionFn func(userID string) (string, time.Time, error)
 	logoutFn        func(token string) error
+	logoutAllFn     func(userID string) error
 	getUserFn       func(id string) (User, error)
 	validateTokenFn func(token string) (string, error)
 
-	logoutCalledWith  string
-	getUserCalledWith string
+	logoutCalledWith    string
+	logoutAllCalledWith string
+	getUserCalledWith   string
 }
 
 func (f *fakeService) Register(_ context.Context, email, password string) (User, error) {
@@ -55,6 +57,14 @@ func (f *fakeService) Logout(_ context.Context, token string) error {
 	f.logoutCalledWith = token
 	if f.logoutFn != nil {
 		return f.logoutFn(token)
+	}
+	return nil
+}
+
+func (f *fakeService) LogoutAll(_ context.Context, userID string) error {
+	f.logoutAllCalledWith = userID
+	if f.logoutAllFn != nil {
+		return f.logoutAllFn(userID)
 	}
 	return nil
 }
@@ -219,6 +229,41 @@ func TestLogout_Handler_UsesTokenFromContext(t *testing.T) {
 	}
 	if svc.logoutCalledWith != "the-token" {
 		t.Errorf("logout called Service.Logout with %q, want %q", svc.logoutCalledWith, "the-token")
+	}
+}
+
+// --- POST /auth/logout-all ---
+
+func TestLogoutAll_Handler_UsesUserIDFromContext(t *testing.T) {
+	svc := &fakeService{}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout-all", nil)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.logoutAll(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("logout-all status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	if svc.logoutAllCalledWith != "u1" {
+		t.Errorf("logout-all called Service.LogoutAll with %q, want %q", svc.logoutAllCalledWith, "u1")
+	}
+}
+
+func TestLogoutAll_Handler_RepositoryError(t *testing.T) {
+	svc := &fakeService{
+		logoutAllFn: func(_ string) error { return errors.New("boom") },
+	}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout-all", nil)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.logoutAll(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("logout-all with a repository error: status = %d, want %d", w.Code, http.StatusInternalServerError)
 	}
 }
 

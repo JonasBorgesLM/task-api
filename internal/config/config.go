@@ -70,6 +70,15 @@ const (
 	defaultDBAutoMigrate   = true
 	defaultAuthSessionTTL  = 24 * time.Hour
 
+	// defaultAuthMaxSessionsPerUser is 10 — generous for a real person
+	// across a phone, a laptop, a second browser profile and whatever
+	// else, finite enough that repeated logins (a script, a leaked and
+	// reused credential) cannot grow the sessions table without bound.
+	// See docs/DECISIONS.md § "Limite de sessões: teto com evicção da
+	// mais antiga" for why eviction, not refusal, is what happens past
+	// it.
+	defaultAuthMaxSessionsPerUser = 10
+
 	// defaultHSTSMaxAge mirrors secureheaders.DefaultHSTSMaxAge — one
 	// year, the shortest span browsers and the preload list treat as a
 	// serious commitment. It is duplicated here rather than imported so
@@ -106,6 +115,15 @@ const (
 	// single request cannot occupy a meaningful share of a modest disk.
 	// It bounds one attachment, not a user's total.
 	defaultAttachmentMaxBytes = 10 << 20
+
+	// defaultAttachmentMaxBytesPerUser is 500 MiB — about fifty uploads
+	// at the single-attachment ceiling above, generous for legitimate
+	// use and finite enough that one account cannot fill the store
+	// through nothing but valid, individually-accepted uploads. See
+	// docs/DECISIONS.md § "Quota de anexos: por usuário, em bytes" for
+	// why this axis (not per-task, not a count) and why the check runs
+	// before the upload rather than after.
+	defaultAttachmentMaxBytesPerUser = 500 << 20
 
 	// defaultAttachmentOrphanMinAge is one hour: far longer than any
 	// upload this service accepts could take to land (10 MiB streamed to
@@ -188,6 +206,13 @@ type Config struct {
 	// user.Service.ValidateToken rejects it.
 	AuthSessionTTL time.Duration
 
+	// AuthMaxSessionsPerUser bounds how many of a user's sessions stay
+	// alive at once. A login past the limit evicts that user's oldest
+	// sessions rather than being refused — see
+	// user.Repository.CreateSession's doc comment for exactly how, and
+	// docs/DECISIONS.md for why eviction over refusal.
+	AuthMaxSessionsPerUser int
+
 	// CORSAllowedOrigins is the set of origins a browser-based client may
 	// call this API from (see middleware.CORS). A nil/empty slice — the
 	// zero value, and what every test building a bare config.Config{}
@@ -252,6 +277,14 @@ type Config struct {
 	// Content-Length, which the client writes and can understate.
 	AttachmentMaxBytes int64
 
+	// AttachmentMaxBytesPerUser bounds the sum of SizeBytes across every
+	// attachment a user owns (through their tasks), not any single
+	// upload — AttachmentMaxBytes already bounds that. Checked against
+	// the total the user already had, before the new upload streams in;
+	// see attachment.Service.Upload's doc comment for what that means
+	// for how far a single upload can push the total past this ceiling.
+	AttachmentMaxBytesPerUser int64
+
 	// AttachmentS3 configures the object-storage backend for
 	// attachments. Endpoint empty — the zero value — means it is not in
 	// use, and AttachmentStorageDir selects the filesystem backend
@@ -305,6 +338,22 @@ type Config struct {
 	AuthRateLimitPerSec float64
 	UserRateLimitBurst  int
 	UserRateLimitPerSec float64
+
+	// CrierOTLPEndpoint is the OTLP/HTTP collector logs are mirrored to,
+	// in addition to (never instead of) the stdout JSON log — see
+	// docs/DECISIONS.md's Fase 11 section for why both exist. Empty (the
+	// zero value) disables it entirely: cmd/api never constructs a
+	// crier.Crier, and nothing about logging changes. Unlike
+	// AttachmentS3Endpoint, this carries a full URL with scheme
+	// (e.g. "https://collector.example.com:4318") — that is the shape
+	// crier/exporters/otlp.Config.Endpoint requires, and there is no
+	// separate UseSSL field to keep in sync with it.
+	//
+	// Credential, headers and compression are not configurable yet —
+	// there is nothing to point them at until a collector is actually
+	// provisioned. Adding them here before that would be exactly the
+	// speculative config CLAUDE.md warns against.
+	CrierOTLPEndpoint string
 }
 
 // Load reads configuration from environment variables and applies defaults
@@ -326,18 +375,19 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Addr:              defaultAddr,
-		ReadTimeout:       defaultReadTimeout,
-		WriteTimeout:      defaultWriteTimeout,
-		IdleTimeout:       defaultIdleTimeout,
-		ShutdownTimeout:   defaultShutdownTimeout,
-		LogLevel:          defaultLogLevel,
-		DBMaxOpenConns:    defaultDBMaxOpenConns,
-		DBMaxIdleConns:    defaultDBMaxIdleConns,
-		DBConnMaxLifetime: defaultDBConnMaxLife,
-		DBAutoMigrate:     defaultDBAutoMigrate,
-		AuthSessionTTL:    defaultAuthSessionTTL,
-		HSTSMaxAge:        defaultHSTSMaxAge,
+		Addr:                   defaultAddr,
+		ReadTimeout:            defaultReadTimeout,
+		WriteTimeout:           defaultWriteTimeout,
+		IdleTimeout:            defaultIdleTimeout,
+		ShutdownTimeout:        defaultShutdownTimeout,
+		LogLevel:               defaultLogLevel,
+		DBMaxOpenConns:         defaultDBMaxOpenConns,
+		DBMaxIdleConns:         defaultDBMaxIdleConns,
+		DBConnMaxLifetime:      defaultDBConnMaxLife,
+		DBAutoMigrate:          defaultDBAutoMigrate,
+		AuthSessionTTL:         defaultAuthSessionTTL,
+		AuthMaxSessionsPerUser: defaultAuthMaxSessionsPerUser,
+		HSTSMaxAge:             defaultHSTSMaxAge,
 	}
 
 	if raw := os.Getenv("HTTP_ADDR"); raw != "" {
@@ -392,6 +442,9 @@ func Load() (Config, error) {
 	if cfg.AuthSessionTTL, err = parseDuration("AUTH_SESSION_TTL", defaultAuthSessionTTL); err != nil {
 		return Config{}, err
 	}
+	if cfg.AuthMaxSessionsPerUser, err = parsePositiveInt("AUTH_MAX_SESSIONS_PER_USER", defaultAuthMaxSessionsPerUser); err != nil {
+		return Config{}, err
+	}
 
 	cfg.CORSAllowedOrigins = parseCommaSeparated("CORS_ALLOWED_ORIGINS")
 
@@ -402,6 +455,8 @@ func Load() (Config, error) {
 	if cfg.HSTSMaxAge, err = parseNonNegativeDuration("HSTS_MAX_AGE", defaultHSTSMaxAge); err != nil {
 		return Config{}, err
 	}
+
+	cfg.CrierOTLPEndpoint = strings.TrimSpace(os.Getenv("CRIER_OTLP_ENDPOINT"))
 
 	cfg.AttachmentStorageDir = strings.TrimSpace(os.Getenv("ATTACHMENT_STORAGE_DIR"))
 
@@ -418,6 +473,10 @@ func Load() (Config, error) {
 	}
 
 	if cfg.AttachmentMaxBytes, err = parsePositiveInt64("ATTACHMENT_MAX_BYTES", defaultAttachmentMaxBytes); err != nil {
+		return Config{}, err
+	}
+
+	if cfg.AttachmentMaxBytesPerUser, err = parsePositiveInt64("ATTACHMENT_MAX_BYTES_PER_USER", defaultAttachmentMaxBytesPerUser); err != nil {
 		return Config{}, err
 	}
 

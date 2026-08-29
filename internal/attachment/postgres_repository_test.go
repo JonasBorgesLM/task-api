@@ -393,3 +393,154 @@ func TestPostgres_UnreferencedKeys_ScopelessByDesign(t *testing.T) {
 		t.Errorf("UnreferencedKeys() = %v, want empty — both keys are referenced, and whose task they hang off is irrelevant here", got)
 	}
 }
+
+// --- Delete ---
+
+func TestPostgres_Delete_RemovesTheRow(t *testing.T) {
+	repo, db, owner, _, taskID := newPostgresTestRepo(t)
+	att := newPostgresAttachment(t, taskID)
+	if err := repo.Create(context.Background(), att, owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	if err := repo.Delete(context.Background(), att.StorageKey, owner); err != nil {
+		t.Fatalf("Delete() unexpected error: %v", err)
+	}
+
+	if _, err := repo.FindByStorageKey(context.Background(), att.StorageKey, owner); !errors.Is(err, ErrNotFound) {
+		t.Errorf("FindByStorageKey() after Delete() = %v, want ErrNotFound", err)
+	}
+
+	var count int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM attachments`).Scan(&count); err != nil {
+		t.Fatalf("count attachments: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("attachments table has %d rows after Delete, want 0", count)
+	}
+}
+
+// TestPostgres_Delete_OnSomeoneElsesTask_IsNotFound is the SQL half of
+// the ownership rule: the DELETE ... USING tasks join must match no rows
+// for a stranger, and the row must survive for the real owner.
+func TestPostgres_Delete_OnSomeoneElsesTask_IsNotFound(t *testing.T) {
+	repo, _, owner, stranger, taskID := newPostgresTestRepo(t)
+	att := newPostgresAttachment(t, taskID)
+	if err := repo.Create(context.Background(), att, owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	if err := repo.Delete(context.Background(), att.StorageKey, stranger); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() by a non-owner = %v, want ErrNotFound", err)
+	}
+
+	if _, err := repo.FindByStorageKey(context.Background(), att.StorageKey, owner); err != nil {
+		t.Errorf("FindByStorageKey() after a refused Delete() unexpected error: %v", err)
+	}
+}
+
+func TestPostgres_Delete_UnknownKey_IsNotFound(t *testing.T) {
+	repo, _, owner, _, _ := newPostgresTestRepo(t)
+
+	if err := repo.Delete(context.Background(), newUUID(t), owner); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPostgres_Delete_Twice_SecondCallIsNotFound(t *testing.T) {
+	repo, _, owner, _, taskID := newPostgresTestRepo(t)
+	att := newPostgresAttachment(t, taskID)
+	if err := repo.Create(context.Background(), att, owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+	if err := repo.Delete(context.Background(), att.StorageKey, owner); err != nil {
+		t.Fatalf("first Delete() unexpected error: %v", err)
+	}
+
+	if err := repo.Delete(context.Background(), att.StorageKey, owner); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second Delete() = %v, want ErrNotFound", err)
+	}
+}
+
+// TestPostgres_Delete_MalformedKey_IsAQueryError documents Repository's
+// own behavior when called directly with a key that isn't a syntactically
+// valid UUID — the same shape TestPostgres_FindByID_MalformedID pins in
+// internal/task. Whoever wires this into Service is responsible for
+// isValidID (see internal/task/service.go and, once #98 lands, this
+// package's own copy) running first — Repository does not, and should
+// not, guess at that on its own.
+func TestPostgres_Delete_MalformedKey_IsAQueryError(t *testing.T) {
+	repo, _, owner, _, _ := newPostgresTestRepo(t)
+
+	err := repo.Delete(context.Background(), "not-a-uuid", owner)
+	if err == nil {
+		t.Fatal("Delete() with a malformed key: expected an error, got nil")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Error("Delete() with a malformed key: got ErrNotFound, want a query/type error")
+	}
+}
+
+// --- TotalBytesForUser ---
+
+func TestPostgres_TotalBytesForUser_SumsOwnedAttachments(t *testing.T) {
+	repo, _, owner, _, taskID := newPostgresTestRepo(t)
+
+	att1 := newPostgresAttachment(t, taskID)
+	att1.SizeBytes = 1000
+	if err := repo.Create(context.Background(), att1, owner); err != nil {
+		t.Fatalf("Create(att1) unexpected error: %v", err)
+	}
+	att2 := newPostgresAttachment(t, taskID)
+	att2.SizeBytes = 2000
+	if err := repo.Create(context.Background(), att2, owner); err != nil {
+		t.Fatalf("Create(att2) unexpected error: %v", err)
+	}
+
+	total, err := repo.TotalBytesForUser(context.Background(), owner)
+	if err != nil {
+		t.Fatalf("TotalBytesForUser() unexpected error: %v", err)
+	}
+	if total != 3000 {
+		t.Errorf("TotalBytesForUser() = %d, want 3000", total)
+	}
+}
+
+// TestPostgres_TotalBytesForUser_NoAttachments_IsZero pins COALESCE:
+// SUM() over zero rows is SQL NULL, not 0, and the query must not let
+// that surface as either an error or a NULL scanned into an int64.
+func TestPostgres_TotalBytesForUser_NoAttachments_IsZero(t *testing.T) {
+	repo, _, owner, _, _ := newPostgresTestRepo(t)
+
+	total, err := repo.TotalBytesForUser(context.Background(), owner)
+	if err != nil {
+		t.Fatalf("TotalBytesForUser() unexpected error: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("TotalBytesForUser() = %d, want 0", total)
+	}
+}
+
+func TestPostgres_TotalBytesForUser_ExcludesOtherUsers(t *testing.T) {
+	repo, db, owner, stranger, taskID := newPostgresTestRepo(t)
+	otherTaskID := insertTask(t, db, stranger)
+
+	mine := newPostgresAttachment(t, taskID)
+	mine.SizeBytes = 500
+	if err := repo.Create(context.Background(), mine, owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+	theirs := newPostgresAttachment(t, otherTaskID)
+	theirs.SizeBytes = 999999
+	if err := repo.Create(context.Background(), theirs, stranger); err != nil {
+		t.Fatalf("Create() for the other user unexpected error: %v", err)
+	}
+
+	total, err := repo.TotalBytesForUser(context.Background(), owner)
+	if err != nil {
+		t.Fatalf("TotalBytesForUser() unexpected error: %v", err)
+	}
+	if total != 500 {
+		t.Errorf("TotalBytesForUser() = %d, want 500 (must exclude the stranger's 999999-byte file)", total)
+	}
+}

@@ -240,6 +240,29 @@ func TestLoad_DatabaseURL_Custom(t *testing.T) {
 	}
 }
 
+func TestLoad_CrierOTLPEndpoint_DefaultsToEmpty(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.CrierOTLPEndpoint != "" {
+		t.Errorf("Load() CrierOTLPEndpoint = %q, want empty (crier disabled)", cfg.CrierOTLPEndpoint)
+	}
+}
+
+func TestLoad_CrierOTLPEndpoint_Custom(t *testing.T) {
+	const endpoint = "https://collector.example.com:4318"
+	t.Setenv("CRIER_OTLP_ENDPOINT", endpoint)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.CrierOTLPEndpoint != endpoint {
+		t.Errorf("Load() CrierOTLPEndpoint = %q, want %q", cfg.CrierOTLPEndpoint, endpoint)
+	}
+}
+
 func TestLoad_DBPoolDefaults(t *testing.T) {
 	cfg, err := Load()
 	if err != nil {
@@ -640,5 +663,47 @@ func TestLoad_TrustedProxies_RejectsDefaultRoute(t *testing.T) {
 				t.Errorf("Load() error = nil, want a refusal for TRUSTED_PROXIES=%q", value)
 			}
 		})
+	}
+}
+
+// --- ATTACHMENT_MAX_BYTES_PER_USER ---
+
+func TestLoad_AttachmentMaxBytesPerUser_Default(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.AttachmentMaxBytesPerUser != defaultAttachmentMaxBytesPerUser {
+		t.Errorf("Load() AttachmentMaxBytesPerUser = %d, want %d", cfg.AttachmentMaxBytesPerUser, defaultAttachmentMaxBytesPerUser)
+	}
+}
+
+func TestLoad_AttachmentMaxBytesPerUser_CustomValue(t *testing.T) {
+	t.Setenv("ATTACHMENT_MAX_BYTES_PER_USER", "1073741824") // 1 GiB
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.AttachmentMaxBytesPerUser != 1073741824 {
+		t.Errorf("Load() AttachmentMaxBytesPerUser = %d, want %d", cfg.AttachmentMaxBytesPerUser, 1073741824)
+	}
+}
+
+func TestLoad_InvalidAttachmentMaxBytesPerUser_NotAnInteger(t *testing.T) {
+	t.Setenv("ATTACHMENT_MAX_BYTES_PER_USER", "not-a-number")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for ATTACHMENT_MAX_BYTES_PER_USER=not-a-number, got nil")
+	}
+}
+
+func TestLoad_InvalidAttachmentMaxBytesPerUser_Zero(t *testing.T) {
+	t.Setenv("ATTACHMENT_MAX_BYTES_PER_USER", "0")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for ATTACHMENT_MAX_BYTES_PER_USER=0, got nil")
 	}
 }

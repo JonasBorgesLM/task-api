@@ -1,10 +1,24 @@
 .PHONY: help run build tidy clean \
         test test-race test-integration test-integration-race coverage coverage-full fuzz \
-        fmt fmt-check vet lint vulncheck check \
+        fmt fmt-check vet lint vulncheck tidy-check check \
         docker-build docker-up docker-down db-up storage-up \
-        migrate-up migrate-down seed seed-reset db-reset
+        migrate-up migrate-down seed seed-reset db-reset \
+        changelog-section
 
 .DEFAULT_GOAL := help
+
+# Versões pinadas das ferramentas de análise. Elas são invocadas via
+# `go run <pkg>@<versão>`, não instaladas no $GOBIN: com `go install` +
+# `command -v`, uma versão já presente na máquina é usada em silêncio no
+# lugar da que o projeto escolheu — o que fazia `make lint` local e o CI
+# rodarem linters diferentes sem nada indicar isso. `go run` resolve a
+# versão exata e usa o cache de módulos a partir da primeira execução.
+#
+# Atualizar é deliberado: suba o número aqui, rode `make check`, e o
+# commit registra a troca. O CI chama estes mesmos alvos, então não há um
+# segundo lugar para desalinhar.
+STATICCHECK_VERSION ?= v0.8.1
+GOVULNCHECK_VERSION ?= v1.7.0
 
 # Connection string used by the local PostgreSQL instance started via
 # `make db-up` / `make docker-up` (see docker-compose.yml). Override on
@@ -17,6 +31,16 @@ DATABASE_URL       ?= $(TEST_DATABASE_URL)
 # Override on the command line, e.g. `make seed SEED_USERS=20 SEED_TASKS_PER_USER=50`.
 SEED_USERS ?= 5
 SEED_TASKS_PER_USER ?= 10
+
+# What `make build` and `make docker-build` stamp into the binary via
+# -ldflags -X (see cmd/api/main.go's version/commit doc comment for why
+# this exists at all — it's the only way a running pod can be traced
+# back to the exact commit it was built from). Both fall back cleanly
+# when git isn't available or there's no history to describe (a shallow
+# clone, a tarball export): "dev"/"unknown", the same defaults main.go
+# itself uses for a build with no -ldflags.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 # How long `make fuzz` runs for. CI uses its own budget (see
 # .github/workflows/ci.yml); a longer one here is what you want when
@@ -42,8 +66,8 @@ help: ## Show this help
 run: ## Start the API (in-memory store unless DATABASE_URL is set — see README "Configuration")
 	go run ./cmd/api
 
-build: ## Compile the API binary to ./bin/task-api
-	go build -o bin/task-api ./cmd/api
+build: ## Compile the API binary to ./bin/task-api (stamped with VERSION/COMMIT)
+	go build -ldflags="-X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o bin/task-api ./cmd/api
 
 tidy: ## Tidy and verify go.mod/go.sum
 	go mod tidy
@@ -124,24 +148,30 @@ vet: ## Run go vet (default-tagged and integration-tagged source)
 	go vet ./...
 	go vet -tags=integration ./...
 
-lint: ## Run staticcheck (installs it into $GOBIN if not already present)
-	@command -v staticcheck >/dev/null 2>&1 || go install honnef.co/go/tools/cmd/staticcheck@latest
-	staticcheck ./...
-	staticcheck -tags=integration ./...
+lint: ## Run staticcheck at the pinned version (see STATICCHECK_VERSION)
+	go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
+	go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -tags=integration ./...
 
-vulncheck: ## Run govulncheck (installs it into $GOBIN if not already present)
-	@command -v govulncheck >/dev/null 2>&1 || go install golang.org/x/vuln/cmd/govulncheck@latest
-	govulncheck ./...
+vulncheck: ## Run govulncheck at the pinned version (see GOVULNCHECK_VERSION)
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
-check: fmt-check vet lint vulncheck test-race ## Run everything the CI quality gate runs (no PostgreSQL required)
+tidy-check: ## Fail if go.mod/go.sum are not tidy (matches CI; fix with `make tidy`)
+	@if ! go mod tidy -diff; then \
+		echo ""; \
+		echo "go.mod/go.sum não estão tidy. Rode: make tidy"; \
+		exit 1; \
+	fi
+	go mod verify
+
+check: fmt-check tidy-check vet lint vulncheck test-race ## Run the CI static gate + race-tested unit tests (no PostgreSQL/MinIO; CI also runs fuzz and the integration suite)
 
 ##@ Docker
 
-docker-build: ## Build the production API image (see Dockerfile)
-	docker build -t task-api:latest .
+docker-build: ## Build the production API image (see Dockerfile), stamped with VERSION/COMMIT
+	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t task-api:latest .
 
 docker-up: ## Start the full stack (API + PostgreSQL + Swagger UI at :8082) via docker compose
-	docker compose up -d --build
+	VERSION=$(VERSION) COMMIT=$(COMMIT) docker compose up -d --build
 
 docker-down: ## Stop and remove every container docker compose started (data volume is kept)
 	docker compose down
@@ -168,3 +198,36 @@ seed-reset: ## Empty users/sessions/tasks, then reseed with SEED_USERS/SEED_TASK
 
 db-reset: ## Wipe ALL data (users, sessions, tasks) without reseeding
 	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/seed -reset -users=0
+
+##@ Release
+
+changelog-section: ## Print one version's section from CHANGELOG.md (e.g. make changelog-section VERSION=1.1.0)
+	@# CHANGELOG.md holds every release, newest section first, each
+	@# headed `## [x.y.z] — ...`. Once a second entry existed alongside
+	@# [1.0.0], `gh release create --notes-file CHANGELOG.md` stopped
+	@# being correct — it publishes the whole file, every version's notes
+	@# concatenated, as this one release's notes. This target is the fix:
+	@# it prints just the one section asked for, header included, stopping
+	@# at the next `## [` line or end of file, with the `---` divider that
+	@# separates it from the next section (and any blank lines around it)
+	@# trimmed off the end — buffered in an array rather than printed as
+	@# each line is read, since that trailing divider isn't known to be
+	@# trailing until the line *after* it (the next section's own `## [`,
+	@# or EOF) is reached. Reuses the VERSION variable already defined
+	@# above (for build stamping) — pass it explicitly here since a
+	@# release's version is rarely the same as HEAD's `git describe`.
+	@test -n "$(VERSION)" || { echo "usage: make changelog-section VERSION=1.1.0" >&2; exit 1; }
+	@awk -v ver="$(VERSION)" ' \
+		BEGIN { target = "## [" ver "]"; found = 0; n = 0 } \
+		/^## \[/ { \
+			if (found) exit; \
+			if (index($$0, target) == 1) { found = 1; buf[++n] = $$0; next } \
+			next \
+		} \
+		found { buf[++n] = $$0 } \
+		END { \
+			if (!found) { print "changelog-section: no \"" target "\" heading in CHANGELOG.md" > "/dev/stderr"; exit 1 } \
+			while (n > 0 && (buf[n] == "" || buf[n] == "---")) { n-- } \
+			for (i = 1; i <= n; i++) { print buf[i] } \
+		} \
+	' CHANGELOG.md

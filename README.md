@@ -32,7 +32,7 @@ For AI agents (or new contributors) working in this codebase, see **[CLAUDE.md](
 - **Go 1.26+**, matching `go.mod`.
 - **No external service needed for the core application or the in-memory store** — the entire unit test suite runs without one. Of the four runtime dependencies, [`pgx/v5`](https://github.com/jackc/pgx) matters only once `DATABASE_URL` is configured, [`minio-go`](https://github.com/minio/minio-go) only once `ATTACHMENT_S3_ENDPOINT` is, [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) only when a password is hashed, and [`moat`](https://github.com/JonasBorgesLM/moat) is in the request path but talks to nothing outside the process.
 - **[Docker](https://www.docker.com/) and Docker Compose** (optional) — to run PostgreSQL locally without installing it directly.
-- **[`staticcheck`](https://staticcheck.dev/)** and **[`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck)** (optional) — used by `make lint` and `make vulncheck`; both installed automatically on first use if missing.
+- **Nothing to install for linting.** `make lint` and `make vulncheck` invoke [`staticcheck`](https://staticcheck.dev/) and [`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) through `go run <pkg>@<version>`, at versions pinned in the `Makefile` (`STATICCHECK_VERSION`, `GOVULNCHECK_VERSION`). CI calls the same targets, so a local run and the pipeline cannot drift onto different linter versions.
 
 ## Configuration
 
@@ -60,6 +60,7 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `DB_CONN_MAX_LIFETIME` | Max lifetime of a pooled connection | `5m` |
 | `DB_AUTO_MIGRATE` | Apply pending migrations automatically on startup | `true` |
 | `AUTH_SESSION_TTL` | How long a `POST /v1/auth/login` token stays valid | `24h` |
+| `AUTH_MAX_SESSIONS_PER_USER` | How many of a user's sessions stay alive at once. A login past the cap evicts that user's oldest session rather than being refused — see `docs/DECISIONS.md` | `10` |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call this API. Unset ⇒ CORS disabled | *(unset)* |
 | `HSTS_MAX_AGE` | `Strict-Transport-Security` max-age, as a Go duration (e.g. `8760h`). `0` omits the header entirely, for a permanently-plaintext deployment. Never sent with `includeSubDomains` or `preload` | `8760h` (1 year) |
 | `RATE_LIMIT_BURST` / `RATE_LIMIT_PER_SEC` | Global token bucket, keyed by client address, in front of every route except the health probes | `60` / `20` |
@@ -68,10 +69,12 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `TRUSTED_PROXIES` | Comma-separated CIDRs/addresses of reverse proxies you operate. Only then is `X-Forwarded-For` used to key the address-based limits — list your proxies, never your clients | *(unset)* |
 | `ATTACHMENT_STORAGE_DIR` | Directory file attachments are stored under. Unset disables attachments entirely (the routes 404). Must already exist — there is no default because the `scratch` image has nowhere to write | *(unset)* |
 | `ATTACHMENT_MAX_BYTES` | Largest single attachment accepted | `10485760` (10 MiB) |
+| `ATTACHMENT_MAX_BYTES_PER_USER` | Total bytes across every attachment one user owns, checked before an upload streams in — see `docs/DECISIONS.md` | `524288000` (500 MiB) |
 | `ATTACHMENT_ORPHAN_MIN_AGE` | How long a blob must sit unreferenced before the orphan collector removes it. A safety margin against deleting uploads in flight, not a tuning knob | `1h` |
 | `ATTACHMENT_S3_ENDPOINT` | Object-storage backend, as `host[:port]` without a scheme. The alternative to `ATTACHMENT_STORAGE_DIR` — setting both is rejected at startup. Required for any deployment where the process can move between machines | *(unset)* |
 | `ATTACHMENT_S3_BUCKET` / `..._ACCESS_KEY` / `..._SECRET_KEY` | Required when the endpoint is set. The bucket must already exist | *(unset)* |
 | `ATTACHMENT_S3_REGION` / `ATTACHMENT_S3_USE_SSL` | Optional; SSL defaults to on (turn it off for the local MinIO) | — / `true` |
+| `CRIER_OTLP_ENDPOINT` | Mirrors every log record to this OTLP/HTTP collector (e.g. SigNoz), alongside — never instead of — the stdout JSON log. Full URL with scheme; use the collector's OTLP/HTTP port (`4318`), not gRPC's `4317`. Unset disables it entirely | *(unset)* |
 
 `config.Load()` returns an error (and the process refuses to start) if a timeout/TTL/max-age isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
@@ -156,7 +159,7 @@ being fully exercised. `make coverage-full` measures both together
 
 Concurrency-sensitive paths (optimistic-concurrency conflicts) are exercised with real concurrent goroutines under `-race`, both against the in-memory store and against real PostgreSQL.
 
-`make check` is the full local gate — `gofmt`, `go vet`, `staticcheck`, `govulncheck` and the race-tested unit suite — and mirrors what CI runs, minus the PostgreSQL integration tests and the fuzz run.
+`make check` is the local gate — `gofmt`, `go mod tidy -diff`, `go vet` (default and integration tags), `staticcheck` (both), `govulncheck` and the race-tested unit suite. It is the static half of CI: the pipeline additionally runs the fuzz target, the PostgreSQL/MinIO integration suite, and a build plus smoke test of the production image.
 
 **`govulncheck` fails the build on a vulnerability the code can actually reach.** That is its own default rather than a setting here: an advisory against something present in the dependency graph but never called exits `0`, and only a reachable one exits non-zero. The trade accepted with that choice is that an advisory against the standard library can block merges until a Go release fixes it — see `docs/DECISIONS.md`. It is worth what it costs: the four standard-library advisories this project carried before Go 1.26.6 were found by running the tool by hand, because nothing in the pipeline was looking.
 
@@ -222,6 +225,7 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `POST` | `/v1/auth/register` | — | Create a user account |
 | `POST` | `/v1/auth/login` | — | Authenticate, receive a bearer session token |
 | `POST` | `/v1/auth/logout` | required | Invalidate the current session token |
+| `POST` | `/v1/auth/logout-all` | required | Invalidate every session for the account, including the one making the call |
 | `GET` | `/v1/auth/me` | required | Get the authenticated user |
 | `POST` | `/v1/tasks` | required | Create a task |
 | `GET` | `/v1/tasks` | required | List the caller's tasks, oldest first (`?limit=`, `?offset=`) |
@@ -233,9 +237,10 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `POST` | `/v1/tasks/{id}/attachments` | required | Upload a file attachment (multipart, part name `file`) |
 | `GET` | `/v1/tasks/{id}/attachments` | required | List a task's attachments |
 | `GET` | `/v1/files/{key}` | required | Download an attachment by its `storage_key` |
+| `DELETE` | `/v1/files/{key}` | required | Delete an attachment by its `storage_key` — removes the metadata row and the blob in the same request |
 | `GET` | `/health` | — | Liveness — always `200` while the process runs |
 | `GET` | `/health/ready` | — | Readiness — `200` if the database is reachable, `503` if not |
-| `GET` | `/debug/vars` | required | Runtime stats (`expvar`) — authenticated, unlike the health routes |
+| `GET` | `/debug/vars` | required | Runtime stats (`expvar`) plus `version`/`commit` for the running build — authenticated, unlike the health routes |
 
 Errors always use the same envelope, `{"error": "description of the problem"}`. Common codes: `400` invalid input, `401` missing/invalid session token, `503` a dependency (the database) is unavailable — the token is fine, retry, `404` unknown or not-yours task ID, `409` optimistic-concurrency conflict or illegal status transition (re-fetch and retry), `429` a rate limit was exceeded (wait and retry; `/health` and `/health/ready` are the only routes never rate limited), `500` unexpected failure (details logged server-side, never in the response).
 

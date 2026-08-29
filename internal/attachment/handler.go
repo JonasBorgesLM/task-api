@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
-	"strconv"
 
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 )
@@ -33,6 +32,7 @@ type attachmentService interface {
 	Upload(ctx context.Context, userID, taskID, declaredFilename string, r io.Reader) (Attachment, error)
 	Download(ctx context.Context, userID, storageKey string) (Attachment, io.ReadSeekCloser, error)
 	ListByTask(ctx context.Context, userID, taskID string) ([]Attachment, error)
+	Delete(ctx context.Context, userID, storageKey string) error
 }
 
 // Handler exposes the attachment Service over HTTP.
@@ -64,6 +64,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth middleware.Midd
 	mux.Handle("POST /tasks/{id}/attachments", protect(h.upload))
 	mux.Handle("GET /tasks/{id}/attachments", protect(h.list))
 	mux.Handle("GET /files/{key}", protect(h.download))
+	mux.Handle("DELETE /files/{key}", protect(h.delete))
 }
 
 // upload handles POST /tasks/{id}/attachments.
@@ -142,6 +143,24 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, r, http.StatusOK, attachments)
 }
 
+// delete handles DELETE /files/{key}. Same path shape as download,
+// deliberately: see RegisterRoutes' doc comment on why a stored blob is
+// addressed by its own key rather than nested under /tasks/{id}.
+func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		h.writeError(w, r, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	if err := h.svc.Delete(r.Context(), userID, r.PathValue("key")); err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // download handles GET /files/{key}.
 func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
@@ -179,13 +198,18 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", att.ContentType)
 	w.Header().Set("Content-Disposition", disposition)
-	w.Header().Set("Content-Length", strconv.FormatInt(att.SizeBytes, 10))
 
 	// ServeContent rather than io.Copy: it handles Range requests and
 	// conditional headers, which is what makes a large download
 	// resumable. The modtime is the attachment's creation time — the
 	// bytes are immutable once stored, so that is genuinely when this
 	// content last changed.
+	//
+	// Content-Length is deliberately not set here: ServeContent computes
+	// and sets it itself from what it actually sends, which is
+	// att.SizeBytes for a full download but the slice's own (smaller)
+	// size for a 206 Partial Content response. Setting it beforehand
+	// would be redundant in the common case and wrong for Range.
 	http.ServeContent(w, r, att.OriginalFilename, att.CreatedAt, blob)
 }
 

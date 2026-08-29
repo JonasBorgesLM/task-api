@@ -207,6 +207,16 @@ func TestPostgres_FindByID_WrongUser_ReturnsErrNotFound(t *testing.T) {
 // syntactically valid UUID is rejected by the ::uuid cast rather than
 // causing a broken or injected query — the database itself validates the
 // shape of the value before it ever compares it against stored rows.
+//
+// This pins Repository's own behavior when called directly, as this test
+// does — it is unchanged, and stays unchanged, because the fix for a
+// client-facing malformed ID lives one layer up: Service.isValidID
+// rejects it before Repository is ever reached (see
+// TestGetTask_MalformedID_IsNotFound and its siblings in service_test.go
+// for that behavior). A caller that bypasses Service — exactly what this
+// test does — still gets the database's own query-error response, which
+// is what proves the Service-level check is not the only thing making
+// this safe: postgresRepository never trusted its input either.
 func TestPostgres_FindByID_MalformedID(t *testing.T) {
 	repo, _, userID := newPostgresTestRepo(t)
 
