@@ -15,9 +15,7 @@ const tokensPath = join(dirname(fileURLToPath(import.meta.url)), 'tokens.css')
 const tokensSource = readFileSync(tokensPath, 'utf-8')
 
 function readColorToken(name: string): string {
-  const match = tokensSource.match(
-    new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})\\s*;`),
-  )
+  const match = tokensSource.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})\\s*;`))
   if (!match) {
     throw new Error(`tokens.css has no color custom property named --${name}`)
   }
@@ -75,5 +73,26 @@ describe('design tokens: color contrast (WCAG AA)', () => {
     const bg = readColorToken(bgToken)
     const ratio = contrastRatio(fg, bg)
     expect(ratio).toBeGreaterThanOrEqual(AA_NORMAL_TEXT)
+  })
+})
+
+// WCAG 1.4.11 (Non-text Contrast): a UI component's visual boundary needs
+// this, not the stricter 4.5:1 normal-text threshold above — see CI-5's
+// entry in docs/changes/web-frontend/plan.md for the finding this
+// resolves. color-border itself is deliberately excluded (it's divider
+// weight, never a control boundary) — see its comment in tokens.css.
+const NON_TEXT_UI_CONTRAST = 3
+
+const interactiveBorderPairs: Array<[name: string, fg: string, bg: string]> = [
+  ['border-interactive on bg', 'color-border-interactive', 'color-bg'],
+  ['border-interactive on surface', 'color-border-interactive', 'color-surface'],
+]
+
+describe('design tokens: non-text UI contrast (WCAG 1.4.11)', () => {
+  it.each(interactiveBorderPairs)('%s is >= 3:1', (_name, fgToken, bgToken) => {
+    const fg = readColorToken(fgToken)
+    const bg = readColorToken(bgToken)
+    const ratio = contrastRatio(fg, bg)
+    expect(ratio).toBeGreaterThanOrEqual(NON_TEXT_UI_CONTRAST)
   })
 })

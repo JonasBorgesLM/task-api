@@ -10,7 +10,14 @@ export default defineConfig({
     // 'vitest', the same way any other module dependency is imported —
     // consistent with this project's strict TypeScript config, which
     // would otherwise need a separate ambient-globals allowance.
-    environment: 'node',
+    //
+    // jsdom, not node: CI-5's primitives are tested with React Testing
+    // Library, which needs a DOM. Node-only tests (tokens.test.ts,
+    // errors.test.ts) still work unchanged under jsdom — it only adds
+    // browser globals on top of the same Node process, it doesn't
+    // remove fs/path/etc.
+    environment: 'jsdom',
+    setupFiles: ['./src/test-utils/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
   },
 })

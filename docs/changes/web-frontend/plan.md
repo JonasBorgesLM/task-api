@@ -154,17 +154,20 @@ navegável só por teclado, com CI próprio que não interfere no gate Go.
   respeitado nas transições.
 - **Não faz:** não cria componente reutilizável por antecipação — só os
   sete listados, o resto espera uma segunda necessidade real.
-- **Pendência de `CI-3` a decidir aqui:** `color/border` (`#d9dde3`) tem
+- **Pendência de `CI-3`, resolvida aqui:** `color/border` (`#d9dde3`) tinha
   1.36:1 de contraste contra `color/bg` — abaixo do 3:1 que WCAG 1.4.11
   (Non-text Contrast) exige quando essa cor é o único indicador visual do
   limite de um componente interativo no estado padrão (ex.: borda de
   `TextField` sem foco). Confirmado por segunda leitura independente do
-  arquivo Figma (fórmula WCAG real, não estimativa — a maioria dos pares
-  texto/fundo passa AA com folga, 5:1+; este é o único abaixo do limiar
-  relevante). Se algum primitive usar `color/border` como único sinal do
-  limite de um controle interativo, escurecer o token ou somar um segundo
-  indicador (ex. `--shadow-sm`) nesse componente. Se o uso for só divisor
-  entre seções (não interativo), não há problema — segue como está.
+  arquivo Figma (fórmula WCAG real, não estimativa). **Resolvido** com um
+  segundo token, `color/border-interactive` (`#828a97`, 3.48:1 contra
+  `color/bg` e 3.31:1 contra `color/surface`), usado por `TextField`,
+  `Select` e `Checkbox` para a própria borda do controle;
+  `color/border` continua existindo, mas só para divisores não
+  interativos — nunca para o limite de um componente com o qual o
+  usuário interage. `tokens.test.ts` ganhou um segundo grupo de teste
+  (WCAG 1.4.11, ≥3:1) para este par, além do grupo original de texto
+  (WCAG AA, ≥4.5:1).
 - **Testes:** `*.test.tsx` (RTL) por primitive — navegável por teclado,
   foco visível, atributos ARIA corretos, nenhum valor de cor/spacing fora
   de `tokens.css` (checável por um teste que falha se um estilo inline

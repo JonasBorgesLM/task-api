@@ -28,7 +28,20 @@
   /* Slightly off-white rather than a second flat white: gives cards/panels
      a boundary against the page without needing a border on every one. */
   --color-surface: #f8f9fb;
+  /* Divider weight only — 1.36:1 against --color-bg, deliberately light.
+     Never use this for an interactive control's boundary (an unfocused
+     TextField, a Select, a Checkbox box): WCAG 1.4.11 (Non-text Contrast)
+     requires >= 3:1 there, and this token doesn't clear it. Confirmed by
+     a second, independent read of the CI-3 Figma mirror against the real
+     WCAG contrast formula — see docs/changes/web-frontend/plan.md's CI-5
+     entry for the finding this token resolves. Use
+     --color-border-interactive for that job instead. */
   --color-border: #d9dde3;
+  /* 3.48:1 against --color-bg, 3.31:1 against --color-surface — clears
+     the 3:1 floor with margin against either background a form control
+     might sit on. This is the only border color CI-5's primitives use
+     for an interactive control's own boundary. */
+  --color-border-interactive: #828a97;
 
   --color-text-primary: #14181f;
   --color-text-secondary: #4b5563;
