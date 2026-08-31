@@ -3,8 +3,16 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    # web/ has its own pipeline (.github/workflows/web-ci.yml) with its
+    # own toolchain (Node, not Go) — a PR that only touches it doesn't
+    # need this gate, and shouldn't wait ~1m30 for a Postgres service
+    # container that nothing here will even query. See
+    # docs/DECISIONS.md § "Frontend: Vite (SPA), monorepo em web/,
+    # mesma linha de versão do repo".
+    paths-ignore: ['web/**']
   pull_request:
     branches: [main, develop]
+    paths-ignore: ['web/**']
   workflow_dispatch:
 
 permissions:
