@@ -9,12 +9,12 @@ Versioned and released with the rest of the repo — no separate `web/` tag. See
 Requires Node ≥22.12 (see `.nvmrc`; `nvm use` picks it up automatically).
 
 ```
-npm install       # or npm ci, matching what CI runs
-npm run dev        # local dev server
+npm install         # or npm ci, matching what CI runs
+npm run dev         # local dev server
 npm run build       # typecheck + production build
-npm run typecheck    # tsc only, no build output
-npm run lint       # oxlint
-npm run test       # vitest, single run (CI mode)
+npm run typecheck   # tsc only, no build output
+npm run lint        # oxlint
+npm run test        # vitest, single run (CI mode)
 npm run format      # prettier --write
 ```
 
