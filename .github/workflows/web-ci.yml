@@ -48,11 +48,39 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # src/api/types.ts is generated from docs/openapi.yaml — CI-4 of
+      # docs/changes/web-frontend/plan.md says it's never hand-edited.
+      # This is the enforcement: regenerate it and fail if that produces
+      # a diff, the same way the Go side's `go mod tidy -diff` (see
+      # .github/workflows/ci.yml) catches a go.sum nobody bothered to
+      # regenerate after touching the contract.
+      - name: Verify generated types are up to date
+        run: |
+          npm run generate:types
+          if ! git diff --exit-code -- src/api/types.ts; then
+            echo "::error::src/api/types.ts is stale — run 'npm run generate:types' inside web/ and commit the result"
+            exit 1
+          fi
+
       - name: Typecheck
         run: npm run typecheck
 
       - name: Lint
         run: npm run lint
+
+      # CI-4 of docs/changes/web-frontend/plan.md: every HTTP call in this
+      # app goes through src/api/client.ts, so credential handling, CSRF,
+      # and the unauthorized-session hook live in exactly one place. A
+      # component that calls fetch directly bypasses all of that silently
+      # — this is what plan.md's "verificável por lint rule/grep no CI"
+      # means in practice. Excludes src/api itself, which is where fetch
+      # is meant to be called from.
+      - name: No direct fetch outside src/api
+        run: |
+          if grep -rn --include='*.ts' --include='*.tsx' -E '(^|[^.[:alnum:]_])fetch\(' src --exclude-dir=api; then
+            echo "::error::fetch() called outside src/api — route it through src/api/client.ts instead"
+            exit 1
+          fi
 
       - name: Test
         run: npm run test
