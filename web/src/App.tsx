@@ -4,14 +4,13 @@ import { LoginPage } from './features/auth/LoginPage'
 import { RegisterPage } from './features/auth/RegisterPage'
 import { RequireAuth } from './features/auth/RequireAuth'
 import { useAuth } from './features/auth/useAuth'
+import { TaskList } from './features/tasks/TaskList'
 
 /**
- * Stands in for the real task list until CI-7 of
- * docs/changes/web-frontend/plan.md replaces it — CI-6's own scope is
- * the auth flow, not task management, but the routing decision it made
- * (see docs/DECISIONS.md) needs a real, working destination behind
- * RequireAuth to actually prove the guard works end to end, not a route
- * that renders nothing.
+ * CI-7 of docs/changes/web-frontend/plan.md: the real task list,
+ * replacing CI-6's placeholder. logout/logout-all stay here rather than
+ * moving into TaskList — they're session actions, not task-list
+ * concerns, and TaskList has no reason to know useAuth exists.
  */
 function AuthenticatedHome() {
   const { user, logout, logoutAll } = useAuth()
@@ -25,6 +24,7 @@ function AuthenticatedHome() {
       <Button variant="secondary" onClick={() => void logoutAll()}>
         Sign out of all devices
       </Button>
+      <TaskList />
     </div>
   )
 }
