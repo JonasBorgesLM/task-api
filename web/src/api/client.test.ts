@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apiFetch, invalidateCsrfToken, setUnauthorizedHandler } from './client'
+import { apiFetch, invalidateCsrfToken, setUnauthorizedHandler, uploadFile } from './client'
 
 function jsonResponse(status: number, body: unknown, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(body), {
@@ -37,20 +37,23 @@ describe('apiFetch', () => {
     expect(new Headers(init?.headers).has('X-CSRF-Token')).toBe(false)
   })
 
-  it.each(['POST', 'PUT', 'PATCH', 'DELETE'])('%s fetches a CSRF token and attaches it', async (method) => {
-    const fetchMock = vi.mocked(fetch)
-    fetchMock.mockResolvedValueOnce(CSRF_TOKEN_RESPONSE()) // GET /auth/csrf-token
-    fetchMock.mockResolvedValueOnce(jsonResponse(201, {})) // the actual request
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE'])(
+    '%s fetches a CSRF token and attaches it',
+    async (method) => {
+      const fetchMock = vi.mocked(fetch)
+      fetchMock.mockResolvedValueOnce(CSRF_TOKEN_RESPONSE()) // GET /auth/csrf-token
+      fetchMock.mockResolvedValueOnce(jsonResponse(201, {})) // the actual request
 
-    await apiFetch('/v1/tasks', { method })
+      await apiFetch('/v1/tasks', { method })
 
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    const [tokenUrl] = fetchMock.mock.calls[0]!
-    expect(String(tokenUrl)).toContain('/v1/auth/csrf-token')
-    const [, requestInit] = fetchMock.mock.calls[1]!
-    expect(new Headers(requestInit?.headers).get('X-CSRF-Token')).toBe('test-csrf-token')
-    expect(requestInit?.credentials).toBe('include')
-  })
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      const [tokenUrl] = fetchMock.mock.calls[0]!
+      expect(String(tokenUrl)).toContain('/v1/auth/csrf-token')
+      const [, requestInit] = fetchMock.mock.calls[1]!
+      expect(new Headers(requestInit?.headers).get('X-CSRF-Token')).toBe('test-csrf-token')
+      expect(requestInit?.credentials).toBe('include')
+    },
+  )
 
   it('caches the CSRF token across multiple mutating calls', async () => {
     const fetchMock = vi.mocked(fetch)
@@ -106,7 +109,9 @@ describe('apiFetch', () => {
 
   it('calls the registered handler on 401', async () => {
     const fetchMock = vi.mocked(fetch)
-    fetchMock.mockResolvedValueOnce(jsonResponse(401, { error: 'invalid or expired session token' }))
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(401, { error: 'invalid or expired session token' }),
+    )
     const onUnauthorized = vi.fn()
     setUnauthorizedHandler(onUnauthorized)
 
@@ -127,5 +132,132 @@ describe('apiFetch', () => {
 
     expect(onUnauthorized).not.toHaveBeenCalled()
     expect(response.status).toBe(503)
+  })
+})
+
+// jsdom's XMLHttpRequest doesn't hit a real network by itself — this
+// stands in for a real server, the same role vi.stubGlobal('fetch', ...)
+// plays for apiFetch's tests. It exists because uploadFile deliberately
+// doesn't use fetch (see client.ts's doc comment on why), so it needs
+// its own harness rather than reusing the fetch mock.
+class MockXHR {
+  static instances: MockXHR[] = []
+
+  method = ''
+  url = ''
+  withCredentials = false
+  status = 0
+  responseText = ''
+  requestHeaders: Record<string, string> = {}
+  sentBody: FormData | null = null
+
+  private listeners: Record<string, Array<(event: unknown) => void>> = {}
+  private uploadListeners: Record<string, Array<(event: unknown) => void>> = {}
+
+  upload = {
+    addEventListener: (type: string, fn: (event: unknown) => void) => {
+      ;(this.uploadListeners[type] ??= []).push(fn)
+    },
+  }
+
+  constructor() {
+    MockXHR.instances.push(this)
+  }
+
+  open(method: string, url: string) {
+    this.method = method
+    this.url = url
+  }
+
+  setRequestHeader(name: string, value: string) {
+    this.requestHeaders[name] = value
+  }
+
+  getAllResponseHeaders(): string {
+    return 'Content-Type: application/json\r\n'
+  }
+
+  addEventListener(type: string, fn: (event: unknown) => void) {
+    ;(this.listeners[type] ??= []).push(fn)
+  }
+
+  send(body: FormData) {
+    this.sentBody = body
+  }
+
+  simulateUploadProgress(loaded: number, total: number) {
+    for (const fn of this.uploadListeners.progress ?? [])
+      fn({ lengthComputable: true, loaded, total })
+  }
+
+  simulateLoad(status: number, responseText: string) {
+    this.status = status
+    this.responseText = responseText
+    for (const fn of this.listeners.load ?? []) fn({})
+  }
+
+  simulateError() {
+    for (const fn of this.listeners.error ?? []) fn({})
+  }
+}
+
+describe('uploadFile', () => {
+  beforeEach(() => {
+    invalidateCsrfToken()
+    vi.stubGlobal('fetch', vi.fn())
+    MockXHR.instances = []
+    vi.stubGlobal('XMLHttpRequest', MockXHR)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('POSTs multipart form data with credentials and the CSRF header', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(CSRF_TOKEN_RESPONSE())
+    const file = new File(['hello'], 'report.pdf', { type: 'application/pdf' })
+
+    const uploadPromise = uploadFile('/v1/tasks/t1/attachments', file)
+    await vi.waitFor(() => expect(MockXHR.instances).toHaveLength(1))
+    const xhr = MockXHR.instances[0]!
+    xhr.simulateLoad(201, JSON.stringify({ id: 'a1' }))
+    const response = await uploadPromise
+
+    expect(xhr.method).toBe('POST')
+    expect(xhr.url).toContain('/v1/tasks/t1/attachments')
+    expect(xhr.withCredentials).toBe(true)
+    expect(xhr.requestHeaders['X-CSRF-Token']).toBe('test-csrf-token')
+    expect(xhr.sentBody?.get('file')).toBe(file)
+    expect(response.status).toBe(201)
+    expect(await response.json()).toEqual({ id: 'a1' })
+  })
+
+  it('reports upload progress as it happens', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(CSRF_TOKEN_RESPONSE())
+    const file = new File(['hello'], 'report.pdf', { type: 'application/pdf' })
+    const onProgress = vi.fn()
+
+    const uploadPromise = uploadFile('/v1/tasks/t1/attachments', file, onProgress)
+    await vi.waitFor(() => expect(MockXHR.instances).toHaveLength(1))
+    const xhr = MockXHR.instances[0]!
+    xhr.simulateUploadProgress(50, 100)
+    xhr.simulateLoad(201, '{}')
+    await uploadPromise
+
+    expect(onProgress).toHaveBeenCalledWith({ loaded: 50, total: 100 })
+  })
+
+  it('rejects on a network error', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(CSRF_TOKEN_RESPONSE())
+    const file = new File(['hello'], 'report.pdf', { type: 'application/pdf' })
+
+    const uploadPromise = uploadFile('/v1/tasks/t1/attachments', file)
+    await vi.waitFor(() => expect(MockXHR.instances).toHaveLength(1))
+    MockXHR.instances[0]!.simulateError()
+
+    await expect(uploadPromise).rejects.toThrow('network error during upload')
   })
 })

@@ -3,7 +3,11 @@ import { createContext, useContext, useEffect, useState } from 'react'
 import { apiFetch, setUnauthorizedHandler } from '../../api/client'
 import type { components } from '../../api/types'
 
-export type User = components['schemas']['User']
+// MeResponse, not the bare User schema: GET /auth/me is the only
+// endpoint that carries attachments_enabled (dual-auth-mode CI-8) — see
+// login() below for why that matters for the *login* response too, not
+// just boot hydration.
+export type User = components['schemas']['MeResponse']
 
 export type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated'
 
@@ -27,18 +31,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('loading')
   const [user, setUser] = useState<User | null>(null)
 
+  /**
+   * GET /auth/me and apply the result to state. Shared by boot
+   * hydration and login() — see login()'s own comment for why login
+   * needs this too, not just the cookie the response already set.
+   */
+  async function hydrate(): Promise<void> {
+    const response = await apiFetch('/v1/auth/me')
+    if (response.ok) {
+      setUser((await response.json()) as User)
+      setStatus('authenticated')
+    } else {
+      setStatus('unauthenticated')
+    }
+  }
+
   useEffect(() => {
     // The cookie is httpOnly — this app has no way to read it, so
     // GET /auth/me on boot is the only way to know whether a session
     // already exists (e.g. the user reloaded the page).
-    apiFetch('/v1/auth/me').then(async (response) => {
-      if (response.ok) {
-        setUser((await response.json()) as User)
-        setStatus('authenticated')
-      } else {
-        setStatus('unauthenticated')
-      }
-    })
+    void hydrate()
 
     // Any request anywhere in the app that comes back 401 means the
     // session is gone (expired, revoked from another device via
@@ -79,9 +91,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!response.ok) {
       throw response
     }
-    const body = (await response.json()) as { user: User }
-    setUser(body.user)
-    setStatus('authenticated')
+    // LoginResponse.user is the bare User schema — no attachments_enabled
+    // (only GET /auth/me's MeResponse carries that). Re-hydrating here,
+    // instead of trusting the login response's own user object, is what
+    // makes attachments_enabled correct immediately after login rather
+    // than only after the next page reload's boot hydration — a real gap
+    // found while wiring CI-9's feature detection, not a hypothetical one.
+    await hydrate()
   }
 
   async function logout(): Promise<void> {

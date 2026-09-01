@@ -108,8 +108,19 @@ describe('App routing', () => {
     )
     await user.type(screen.getByLabelText(/Email/), 'alice@example.com')
     await user.type(screen.getByLabelText(/Password/), 'correct horse battery staple')
-    // TaskList (CI-7) mounts alongside the account info once login
-    // succeeds and fetches its own first page.
+    // login() re-hydrates via GET /auth/me afterwards (see useAuth.tsx —
+    // LoginResponse.user has no attachments_enabled, only MeResponse
+    // does), then TaskList (CI-7) mounts alongside the account info and
+    // fetches its own first page.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        id: 'u1',
+        email: 'alice@example.com',
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        attachments_enabled: false,
+      }),
+    )
     fetchMock.mockResolvedValueOnce(jsonResponse(200, []))
     await user.click(screen.getByRole('button', { name: 'Log in' }))
 

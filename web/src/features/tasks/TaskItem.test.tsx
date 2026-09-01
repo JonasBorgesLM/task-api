@@ -8,8 +8,31 @@ import type { ComponentProps } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { invalidateCsrfToken } from '../../api/client'
 import { assertOnlyTokens } from '../../test-utils/assertOnlyTokens'
+import { useAuth } from '../auth/useAuth'
 import { TaskItem } from './TaskItem'
 import type { Task } from './useTasks'
+
+vi.mock('../auth/useAuth', () => ({ useAuth: vi.fn() }))
+
+const mockedUseAuth = vi.mocked(useAuth)
+
+const AUTH_USER = {
+  id: 'u1',
+  email: 'alice@example.com',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+}
+
+function stubAuth(attachmentsEnabled: boolean) {
+  mockedUseAuth.mockReturnValue({
+    status: 'authenticated',
+    user: { ...AUTH_USER, attachments_enabled: attachmentsEnabled },
+    register: vi.fn(),
+    login: vi.fn(),
+    logout: vi.fn(),
+    logoutAll: vi.fn(),
+  })
+}
 
 describe('TaskItem.module.css', () => {
   it('uses only design tokens, no literal color/spacing', () => {
@@ -52,10 +75,16 @@ describe('TaskItem', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn())
     invalidateCsrfToken()
+    // Off by default — the existing tests below don't care about
+    // attachments, and this keeps them from accidentally depending on
+    // AttachmentList's own GET firing. The gating itself is covered by
+    // the two tests at the bottom of this file.
+    stubAuth(false)
   })
 
   afterEach(() => {
     vi.unstubAllGlobals()
+    vi.clearAllMocks()
   })
 
   it('renders the task title, description and badges', () => {
@@ -166,5 +195,24 @@ describe('TaskItem', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/too many attempts/i)
     expect(onDeleted).not.toHaveBeenCalled()
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('attachments_enabled: false hides the entire attachments section — not just disables it', () => {
+    stubAuth(false)
+    renderItem()
+
+    // "Upload file" is AttachmentList's own trigger button (via Upload) —
+    // absent entirely means AttachmentList never mounted, not that it
+    // rendered in some disabled state.
+    expect(screen.queryByRole('button', { name: 'Upload file' })).not.toBeInTheDocument()
+  })
+
+  it('attachments_enabled: true renders the attachments section', async () => {
+    stubAuth(true)
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, []))
+    renderItem()
+
+    expect(await screen.findByRole('button', { name: 'Upload file' })).toBeInTheDocument()
   })
 })
