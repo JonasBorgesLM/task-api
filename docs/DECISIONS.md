@@ -1137,3 +1137,9 @@ O custo do monorepo é acoplar os dois gates de CI se não houver cuidado: um PR
 ### Cookie httpOnly, nunca `localStorage`
 
 O frontend nunca guarda a credencial de sessão em `localStorage`/`sessionStorage`. A sessão vive exclusivamente no cookie `HttpOnly` que o backend já emite em `POST /auth/login` (ver § "Autenticação: modo duplo (cookie httpOnly + Bearer)" acima) — o próprio motivo de o backend ter adotado esse modo de autenticação já era fechar a superfície de roubo de token via XSS que `localStorage` deixa aberta; seria autocontraditório o frontend reabrir essa mesma superfície guardando o token CSRF, ou qualquer outra coisa sensível, num storage que qualquer script no mesmo documento consegue ler. O token CSRF (obtido de `GET /v1/auth/csrf-token`) vive só em memória — uma variável JS que desaparece a cada reload, exigindo uma nova busca — nunca persistido.
+
+### Navegação: `react-router-dom`, URLs reais desde a Fase 13.6
+
+Nenhum item de `docs/changes/web-frontend/plan.md` (`CI-1`–`CI-11`) nem as issues `#119`–`#129` decidiam isso explicitamente antes de `CI-6` — só nomeavam "Page"s (`RegisterPage`, `LoginPage`, e mais tarde a lista de tasks), sem dizer se cada uma teria sua própria URL ou seria só uma troca de view por estado local. Como a decisão molda a estrutura de todo o resto da Fase 13 (CRUD de task, anexos), foi levada ao usuário em vez de escolhida em silêncio — decisão: `react-router-dom`, com URLs reais desde já (`/login`, `/register`, `/`), não uma alternativa sem dependência nova baseada em estado local.
+
+Consequência direta, não antecipação: `RequireAuth` (`web/src/features/auth/RequireAuth.tsx`) — um guard de rota que redireciona para `/login` quando `useAuth()` não está autenticado — não está na lista de arquivos de `CI-6` em `plan.md`, mas é o que torna a rota `/` protegida possível; sem ele, "URLs reais" e "sessão só sabida via `GET /auth/me`" não se sustentam juntas.
