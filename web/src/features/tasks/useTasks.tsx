@@ -17,6 +17,17 @@ export interface UseTasksResult {
   isLoadingMore: boolean
   loadMore: () => void
   reload: () => void
+  /**
+   * Local-only mutations for CI-8 (create/edit/delete/status change) —
+   * none of them re-fetch. A full reload() after every mutation would
+   * be simpler, but it would also throw away everything the user
+   * scrolled past via loadMore(), for no reason: the mutation response
+   * already carries the updated Task, so patching the array in place is
+   * both cheaper and less disruptive.
+   */
+  addTaskLocally: (task: Task) => void
+  updateTaskLocally: (task: Task) => void
+  removeTaskLocally: (id: string) => void
 }
 
 // No hard reason this has to be exactly 20 — it's a reasonable page size,
@@ -82,6 +93,31 @@ export function useTasks(): UseTasksResult {
     void fetchPage(0, false)
   }, [fetchPage])
 
+  // Appended at the end, matching the list's own created_at-ascending
+  // order for the common case (viewing the first, un-paginated page). A
+  // newly created task is always the newest, so it belongs after
+  // everything currently loaded — this can only misplace it relative to
+  // not-yet-loaded pages if the caller has already scrolled past page 1,
+  // a deliberately accepted, minor edge case rather than a reload().
+  const addTaskLocally = useCallback((task: Task) => {
+    setTasks((previous) => [...previous, task])
+  }, [])
+
+  const updateTaskLocally = useCallback((task: Task) => {
+    setTasks((previous) => previous.map((t) => (t.id === task.id ? task : t)))
+  }, [])
+
+  // nextOffset shifts back by one to keep loadMore's offset roughly
+  // aligned with the server-side dataset, which just got one row
+  // shorter. Not exact under multiple concurrent deletes, but correct
+  // for the common single-delete case, and a drift here only ever
+  // costs a duplicate or skipped row on the *next* loadMore — never a
+  // wrong row in what's already rendered.
+  const removeTaskLocally = useCallback((id: string) => {
+    setTasks((previous) => previous.filter((t) => t.id !== id))
+    nextOffset.current = Math.max(0, nextOffset.current - 1)
+  }, [])
+
   const status: TasksStatus =
     phase === 'loading'
       ? 'loading'
@@ -91,5 +127,16 @@ export function useTasks(): UseTasksResult {
           ? 'empty'
           : 'success'
 
-  return { status, tasks, error, hasMore, isLoadingMore, loadMore, reload }
+  return {
+    status,
+    tasks,
+    error,
+    hasMore,
+    isLoadingMore,
+    loadMore,
+    reload,
+    addTaskLocally,
+    updateTaskLocally,
+    removeTaskLocally,
+  }
 }

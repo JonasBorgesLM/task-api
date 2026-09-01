@@ -1,7 +1,12 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '../../components/Button'
+import { Modal } from '../../components/Modal'
 import { Skeleton } from '../../components/Skeleton'
+import { Toast } from '../../components/Toast'
 import styles from './TaskList.module.css'
+import { TaskForm } from './TaskForm'
+import { TaskItem } from './TaskItem'
+import type { Task } from './useTasks'
 import { useTasks } from './useTasks'
 
 const SKELETON_ROWS = 5
@@ -12,10 +17,29 @@ const SKELETON_ROWS = 5
  * via the "ask for one extra" technique (see useTasks.tsx) — there is
  * no numbered "page N of M" anywhere here, because GET /v1/tasks gives
  * this app no total count to build one from.
+ *
+ * CI-8 adds create/edit/delete/status-change (TaskForm,
+ * TaskStatusControls, TaskItem) and a single success-toast surface —
+ * issue #126's own added criterion, "feedback de sucesso em toda
+ * mutação" — shared across every mutation rather than each one
+ * building its own.
  */
 export function TaskList() {
-  const { status, tasks, error, hasMore, isLoadingMore, loadMore, reload } = useTasks()
+  const {
+    status,
+    tasks,
+    error,
+    hasMore,
+    isLoadingMore,
+    loadMore,
+    reload,
+    addTaskLocally,
+    updateTaskLocally,
+    removeTaskLocally,
+  } = useTasks()
   const sentinelRef = useRef<HTMLDivElement>(null)
+  const [creating, setCreating] = useState(false)
+  const [successMessage, setSuccessMessage] = useState<string | null>(null)
 
   // Infinite scroll is a progressive enhancement over the real "Load
   // more" button below, not a replacement for it: IntersectionObserver
@@ -36,6 +60,22 @@ export function TaskList() {
     return () => observer.disconnect()
   }, [hasMore, loadMore])
 
+  function handleCreated(task: Task) {
+    setCreating(false)
+    addTaskLocally(task)
+    setSuccessMessage('Task created.')
+  }
+
+  function handleUpdated(task: Task) {
+    updateTaskLocally(task)
+    setSuccessMessage('Task updated.')
+  }
+
+  function handleDeleted(id: string) {
+    removeTaskLocally(id)
+    setSuccessMessage('Task deleted.')
+  }
+
   if (status === 'loading') {
     return (
       <div className={styles.container}>
@@ -54,9 +94,24 @@ export function TaskList() {
     )
   }
 
-  if (status === 'error') {
-    return (
-      <div className={styles.container}>
+  return (
+    <div className={styles.container}>
+      {successMessage && (
+        <Toast
+          message={successMessage}
+          variant="success"
+          onDismiss={() => setSuccessMessage(null)}
+        />
+      )}
+
+      <div className={styles.header}>
+        <Button onClick={() => setCreating(true)}>New task</Button>
+      </div>
+      <Modal open={creating} onClose={() => setCreating(false)} title="New task">
+        <TaskForm onCancel={() => setCreating(false)} onSuccess={handleCreated} />
+      </Modal>
+
+      {status === 'error' && (
         <p className={styles.error} role="alert">
           {error?.kind === 'unavailable'
             ? "Couldn't load your tasks — the service is temporarily unavailable. "
@@ -65,44 +120,34 @@ export function TaskList() {
             Retry
           </Button>
         </p>
-      </div>
-    )
-  }
+      )}
 
-  if (status === 'empty') {
-    return (
-      <div className={styles.container}>
-        <p className={styles.empty}>You don't have any tasks yet.</p>
-      </div>
-    )
-  }
+      {status === 'empty' && <p className={styles.empty}>You don't have any tasks yet.</p>}
 
-  return (
-    <div className={styles.container}>
-      <p className={styles.note}>
-        Sorted by creation date, oldest first. There's no filtering or a different sort order yet —
-        this list always shows everything, in the order the API returns it.
-      </p>
-      <ul className={styles.list}>
-        {tasks.map((task) => (
-          <li key={task.id} className={styles.item}>
-            <div className={styles.itemHeader}>
-              <h3 className={styles.title}>{task.title}</h3>
-              <div className={styles.badges}>
-                <span className={styles.badge}>{task.status}</span>
-                <span className={styles.badge}>{task.priority}</span>
-              </div>
+      {status === 'success' && (
+        <>
+          <p className={styles.note}>
+            Sorted by creation date, oldest first. There's no filtering or a different sort order
+            yet — this list always shows everything, in the order the API returns it.
+          </p>
+          <ul className={styles.list}>
+            {tasks.map((task) => (
+              <TaskItem
+                key={task.id}
+                task={task}
+                onUpdated={handleUpdated}
+                onDeleted={handleDeleted}
+              />
+            ))}
+          </ul>
+          {hasMore && (
+            <div className={styles.loadMore} ref={sentinelRef}>
+              <Button variant="secondary" onClick={loadMore} loading={isLoadingMore}>
+                Load more
+              </Button>
             </div>
-            {task.description && <p className={styles.description}>{task.description}</p>}
-          </li>
-        ))}
-      </ul>
-      {hasMore && (
-        <div className={styles.loadMore} ref={sentinelRef}>
-          <Button variant="secondary" onClick={loadMore} loading={isLoadingMore}>
-            Load more
-          </Button>
-        </div>
+          )}
+        </>
       )}
     </div>
   )
