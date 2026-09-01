@@ -12,6 +12,7 @@
     "typecheck": "tsc -b",
     "lint": "oxlint",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "generate:types": "openapi-typescript ../docs/openapi.yaml -o src/api/types.ts",
     "format": "prettier --write .",
     "preview": "vite preview"

@@ -41,9 +41,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (response.ok) {
       setUser((await response.json()) as User)
       setStatus('authenticated')
-    } else {
+    } else if (response.status === 401) {
       setStatus('unauthenticated')
     }
+    // Any other failure (503 chief among them — see client.ts's
+    // finalize()/setUnauthorizedHandler, which makes the identical
+    // 401-only distinction for every other endpoint) leaves status
+    // untouched. A boot/reload during an outage genuinely cannot tell
+    // whether the session is fine, so it must not guess "logged out" —
+    // RequireAuth's 'loading' branch keeps showing its placeholder
+    // instead of redirecting, which is the honest state here: found by
+    // CI-11's real docker-compose Postgres-outage test, not by
+    // inspection — a naive "any non-ok response means logged out" check
+    // is exactly the bug that test exists to catch.
   }
 
   useEffect(() => {
