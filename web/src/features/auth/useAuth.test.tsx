@@ -55,6 +55,27 @@ describe('useAuth', () => {
     expect(result.current.user).toBeNull()
   })
 
+  it('stays in "loading" (never "unauthenticated") when GET /auth/me returns 503 on boot', async () => {
+    // Found by CI-11's real docker-compose Postgres-outage E2E test, not
+    // by inspection: a boot/reload during an outage cannot tell whether
+    // the session is fine, so it must not guess "logged out" — that
+    // would bounce an authenticated user to /login for a problem that
+    // has nothing to do with their session. See client.ts's
+    // finalize()/setUnauthorizedHandler, which makes the identical
+    // 401-only distinction for every other endpoint.
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(503, { error: 'service temporarily unavailable, please retry' }),
+    )
+
+    const { result } = renderHook(() => useAuth(), { wrapper })
+
+    expect(result.current.status).toBe('loading')
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(result.current.status).toBe('loading')
+    expect(result.current.user).toBeNull()
+  })
+
   it('login sets status to authenticated and hydrates the user via a fresh /me call', async () => {
     // LoginResponse.user is the bare User schema — it has no
     // attachments_enabled. login() re-hydrates via GET /auth/me
