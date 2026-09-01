@@ -154,4 +154,57 @@ describe('useTasks', () => {
     const secondUrl = fetchMock.mock.calls[1]![0]
     expect(String(secondUrl)).toContain('offset=0')
   })
+
+  it('addTaskLocally appends without a re-fetch', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(2)))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    act(() => {
+      result.current.addTaskLocally(makeTask('new'))
+    })
+
+    expect(result.current.tasks.map((t) => t.id)).toEqual(['1', '2', 'new'])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('updateTaskLocally replaces the matching task in place, without a re-fetch', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(2)))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    act(() => {
+      result.current.updateTaskLocally({ ...makeTask('1'), title: 'Renamed' })
+    })
+
+    expect(result.current.tasks.map((t) => t.id)).toEqual(['1', '2'])
+    expect(result.current.tasks[0]!.title).toBe('Renamed')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('removeTaskLocally drops the matching task, without a re-fetch', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(2)))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    act(() => {
+      result.current.removeTaskLocally('1')
+    })
+
+    expect(result.current.tasks.map((t) => t.id)).toEqual(['2'])
+    // Deleting down to zero moves the list to the 'empty' state, the
+    // same as if the server had returned no tasks — TaskList must not
+    // need a separate "just deleted the last one" state.
+    act(() => {
+      result.current.removeTaskLocally('2')
+    })
+    expect(result.current.status).toBe('empty')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
 })

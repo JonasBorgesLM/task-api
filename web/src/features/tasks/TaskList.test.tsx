@@ -4,10 +4,18 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { invalidateCsrfToken } from '../../api/client'
 import { assertOnlyTokens } from '../../test-utils/assertOnlyTokens'
 import { TaskList } from './TaskList'
 import { useTasks } from './useTasks'
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
 
 vi.mock('./useTasks', () => ({ useTasks: vi.fn() }))
 
@@ -40,13 +48,22 @@ function mockTasksResult(overrides: Partial<ReturnType<typeof useTasks>>) {
     isLoadingMore: false,
     loadMore: vi.fn(),
     reload: vi.fn(),
+    addTaskLocally: vi.fn(),
+    updateTaskLocally: vi.fn(),
+    removeTaskLocally: vi.fn(),
     ...overrides,
   })
 }
 
 describe('TaskList', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+    invalidateCsrfToken()
+  })
+
   afterEach(() => {
     vi.clearAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('loading: shows skeleton placeholders, not the list or a message', () => {
@@ -119,5 +136,33 @@ describe('TaskList', () => {
     render(<TaskList />)
 
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
+  })
+
+  it('offers "New task" even with zero tasks — creating the first one isn\'t blocked by the empty state', () => {
+    mockTasksResult({ status: 'empty', tasks: [] })
+    render(<TaskList />)
+
+    expect(screen.getByRole('button', { name: 'New task' })).toBeInTheDocument()
+  })
+
+  it('creating a task adds it locally, closes the modal, and shows a success toast', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { csrf_token: 'tok' }))
+    const created = makeTask({ id: 'new', title: 'New task' })
+    fetchMock.mockResolvedValueOnce(jsonResponse(201, created))
+    const addTaskLocally = vi.fn()
+    mockTasksResult({ status: 'success', tasks: [makeTask()], addTaskLocally })
+    const user = userEvent.setup()
+    render(<TaskList />)
+
+    await user.click(screen.getByRole('button', { name: 'New task' }))
+    expect(screen.getByRole('dialog', { name: 'New task' })).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText(/^Title/), 'New task')
+    await user.click(screen.getByRole('button', { name: 'Create task' }))
+
+    await vi.waitFor(() => expect(addTaskLocally).toHaveBeenCalledWith(created))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(await screen.findByText('Task created.')).toBeInTheDocument()
   })
 })
