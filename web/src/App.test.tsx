@@ -55,10 +55,14 @@ describe('App routing', () => {
         attachments_enabled: false,
       }),
     )
+    // TaskList (CI-7) mounts alongside the account info and fetches its
+    // own first page.
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, []))
 
     renderApp('/')
 
     expect(await screen.findByText('Logged in as alice@example.com')).toBeInTheDocument()
+    expect(await screen.findByText("You don't have any tasks yet.")).toBeInTheDocument()
   })
 
   it('the full flow: register → login → /me hydrates → logout redirects back to /login', async () => {
@@ -104,9 +108,13 @@ describe('App routing', () => {
     )
     await user.type(screen.getByLabelText(/Email/), 'alice@example.com')
     await user.type(screen.getByLabelText(/Password/), 'correct horse battery staple')
+    // TaskList (CI-7) mounts alongside the account info once login
+    // succeeds and fetches its own first page.
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, []))
     await user.click(screen.getByRole('button', { name: 'Log in' }))
 
     expect(await screen.findByText('Logged in as alice@example.com')).toBeInTheDocument()
+    expect(await screen.findByText("You don't have any tasks yet.")).toBeInTheDocument()
 
     // Logout — clears state, and RequireAuth (still mounted at /)
     // reacts to the status change on its own, with no explicit
