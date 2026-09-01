@@ -3,7 +3,13 @@
 // through apiFetch instead, so credential handling, CSRF, and the
 // unauthorized-session hook live in exactly one place.
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
+// Exported for the one legitimate non-apiFetch use in this app: a plain
+// <a href> download link (CI-9's AttachmentList) needs the *absolute*
+// origin, not a path relative to this app's own — the frontend and API
+// are different origins by the Fase 12 dual-auth-mode design (that's
+// the entire reason CORS + credentials exist), so a relative href would
+// resolve against the wrong origin and 404.
+export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
@@ -66,7 +72,11 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   onUnauthorized = handler
 }
 
-async function doFetch(path: string, init: RequestInit, csrfHeader: string | null): Promise<Response> {
+async function doFetch(
+  path: string,
+  init: RequestInit,
+  csrfHeader: string | null,
+): Promise<Response> {
   const headers = new Headers(init.headers)
   if (csrfHeader !== null) {
     headers.set('X-CSRF-Token', csrfHeader)
@@ -88,7 +98,11 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   const method = (init.method ?? 'GET').toUpperCase()
   const isMutating = MUTATING_METHODS.has(method)
 
-  const response = await doFetch(path, { ...init, method }, isMutating ? await getCsrfToken() : null)
+  const response = await doFetch(
+    path,
+    { ...init, method },
+    isMutating ? await getCsrfToken() : null,
+  )
 
   // A mutating request's CSRF token can go stale without this client
   // doing anything wrong: the backend rotates the CSRF cookie on every
@@ -112,4 +126,59 @@ function finalize(response: Response): Response {
     onUnauthorized?.()
   }
   return response
+}
+
+export interface UploadProgress {
+  loaded: number
+  total: number
+}
+
+/**
+ * Multipart file upload with real progress — the one HTTP call in this
+ * app that doesn't go through apiFetch's fetch() call, because fetch has
+ * no broadly-supported way to report upload (request body) progress,
+ * only response/download progress. Kept here rather than in a feature
+ * file for the same reason every other HTTP call is centralized:
+ * credentials and CSRF stay in exactly one place. Does not retry on a
+ * stale CSRF token the way apiFetch does — by the time a caller uploads
+ * a file it has always already made at least one prior mutating
+ * request (creating the task the file attaches to), which already paid
+ * that cost, so the extra complexity isn't worth carrying here too.
+ */
+export function uploadFile(
+  path: string,
+  file: File,
+  onProgress?: (progress: UploadProgress) => void,
+): Promise<Response> {
+  return getCsrfToken().then(
+    (token) =>
+      new Promise<Response>((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', `${API_BASE}${path}`)
+        xhr.withCredentials = true
+        xhr.setRequestHeader('X-CSRF-Token', token)
+
+        xhr.upload.addEventListener('progress', (event) => {
+          if (event.lengthComputable) {
+            onProgress?.({ loaded: event.loaded, total: event.total })
+          }
+        })
+
+        xhr.addEventListener('load', () => {
+          const headers = new Headers()
+          for (const line of xhr.getAllResponseHeaders().trim().split('\r\n')) {
+            const separatorIndex = line.indexOf(':')
+            if (separatorIndex === -1) continue
+            headers.set(line.slice(0, separatorIndex).trim(), line.slice(separatorIndex + 1).trim())
+          }
+          resolve(new Response(xhr.responseText, { status: xhr.status, headers }))
+        })
+
+        xhr.addEventListener('error', () => reject(new Error('network error during upload')))
+
+        const formData = new FormData()
+        formData.append('file', file)
+        xhr.send(formData)
+      }),
+  )
 }

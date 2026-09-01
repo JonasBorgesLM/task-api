@@ -55,13 +55,19 @@ describe('useAuth', () => {
     expect(result.current.user).toBeNull()
   })
 
-  it('login sets status to authenticated and hydrates the user from the response body', async () => {
+  it('login sets status to authenticated and hydrates the user via a fresh /me call', async () => {
+    // LoginResponse.user is the bare User schema — it has no
+    // attachments_enabled. login() re-hydrates via GET /auth/me
+    // afterwards specifically so that field is known immediately,
+    // rather than only after the next boot — see login()'s own doc
+    // comment in useAuth.tsx for the real gap this closes.
     const fetchMock = vi.mocked(fetch)
     fetchMock.mockResolvedValueOnce(jsonResponse(401, {})) // boot /me — no session yet
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { csrf_token: 'tok' })) // CSRF token fetch
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, { token: 'raw-token', expires_at: '2026-01-02T00:00:00Z', user: USER }),
     )
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ...USER, attachments_enabled: true })) // post-login /me
 
     const { result } = renderHook(() => useAuth(), { wrapper })
     await waitFor(() => expect(result.current.status).toBe('unauthenticated'))
@@ -71,7 +77,7 @@ describe('useAuth', () => {
     })
 
     expect(result.current.status).toBe('authenticated')
-    expect(result.current.user).toEqual(USER)
+    expect(result.current.user).toEqual({ ...USER, attachments_enabled: true })
   })
 
   it('login throws the raw Response on failure, for the caller to classify', async () => {

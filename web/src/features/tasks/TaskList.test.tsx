@@ -7,6 +7,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { invalidateCsrfToken } from '../../api/client'
 import { assertOnlyTokens } from '../../test-utils/assertOnlyTokens'
+import { useAuth } from '../auth/useAuth'
 import { TaskList } from './TaskList'
 import { useTasks } from './useTasks'
 
@@ -18,6 +19,7 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 vi.mock('./useTasks', () => ({ useTasks: vi.fn() }))
+vi.mock('../auth/useAuth', () => ({ useAuth: vi.fn() }))
 
 describe('TaskList.module.css', () => {
   it('uses only design tokens, no literal color/spacing', () => {
@@ -59,6 +61,23 @@ describe('TaskList', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn())
     invalidateCsrfToken()
+    // Every TaskItem row calls useAuth() now (attachments gating) — off
+    // here since none of these tests are about attachments; that gating
+    // has its own coverage in TaskItem.test.tsx.
+    vi.mocked(useAuth).mockReturnValue({
+      status: 'authenticated',
+      user: {
+        id: 'u1',
+        email: 'alice@example.com',
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        attachments_enabled: false,
+      },
+      register: vi.fn(),
+      login: vi.fn(),
+      logout: vi.fn(),
+      logoutAll: vi.fn(),
+    })
   })
 
   afterEach(() => {

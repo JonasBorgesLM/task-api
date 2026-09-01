@@ -4,6 +4,8 @@ import type { ApiError } from '../../api/errors'
 import { classifyError } from '../../api/errors'
 import { Button } from '../../components/Button'
 import { Modal } from '../../components/Modal'
+import { AttachmentList } from '../attachments/AttachmentList'
+import { useAuth } from '../auth/useAuth'
 import styles from './TaskItem.module.css'
 import { TaskForm } from './TaskForm'
 import { TaskStatusControls } from './TaskStatusControls'
@@ -33,6 +35,7 @@ function messageForDeleteError(error: ApiError): string {
  * necessary, documented deviation as CI-6's RequireAuth/App.test.tsx.
  */
 export function TaskItem({ task, onUpdated, onDeleted }: TaskItemProps) {
+  const { user } = useAuth()
   const [editing, setEditing] = useState(false)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
@@ -77,6 +80,16 @@ export function TaskItem({ task, onUpdated, onDeleted }: TaskItemProps) {
           </Button>
         </div>
       </div>
+
+      {/* Entire section absent, not just disabled, when attachments are
+          off for this account — see plan.md's CI-9 test requirement.
+          attachments_enabled comes from GET /auth/me (dual-auth-mode
+          CI-8) via useAuth, never an HTTP probe (AM-2). */}
+      {user?.attachments_enabled && (
+        <div className={styles.attachments}>
+          <AttachmentList taskId={task.id} />
+        </div>
+      )}
 
       <Modal open={editing} onClose={() => setEditing(false)} title={`Edit "${task.title}"`}>
         <TaskForm
