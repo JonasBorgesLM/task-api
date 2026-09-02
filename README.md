@@ -283,4 +283,4 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 - **[docs/DECISIONS.md](docs/DECISIONS.md)** — the decisions a future change could undo without noticing, stated as decisions rather than as descriptions: why auth is a header and not a cookie, why attachment bytes are written before their metadata row, why the content-type allow-list ignores what the client declared, and the deploy topology the rate limiter's design assumes. Read it before implementing a backlog issue; if an issue seems to contradict it, ask rather than choose.
 - **[docs/openapi.yaml](docs/openapi.yaml)** — the full API contract.
 - **[CLAUDE.md](CLAUDE.md)** — conventions and rules for anyone (human or agent) changing this codebase.
-- **[web/README.md](web/README.md)** — the SPA frontend (Vite + React + TypeScript), in progress; versioned and released with the rest of this repo, not separately.
+- **[web/README.md](web/README.md)** — the SPA frontend (Vite + React + TypeScript); versioned and released with the rest of this repo, not separately.

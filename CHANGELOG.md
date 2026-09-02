@@ -8,8 +8,9 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
 
 ## [1.2.0] — a definir na tag
 
-Lote das issues #112 a #118 e #130 (Fase 12 — modo duplo de autenticação).
-**Minor, não major:** nenhuma mudança deste release quebra o contrato
+Lote das issues #112 a #118 e #130 (Fase 12 — modo duplo de autenticação),
+mais #119 a #129 e #153 (Fase 13 — frontend). **Minor, não major:**
+nenhuma mudança deste release quebra o contrato
 existente. Um cliente que só usa `Authorization: Bearer` continua
 funcionando exatamente como antes, sem alteração de rota, código de
 status, ou formato de resposta — o cookie é um segundo *transporte* para
@@ -45,6 +46,16 @@ enviada) nunca esteve fixada como exemplo no contrato — só o caso
 - `docs/openapi.yaml` ganha o segundo `securityScheme` (`cookieAuth`),
   a resposta `403` (`Forbidden`) em toda rota mutadora, e documentação
   do fluxo de CSRF de ponta a ponta.
+- `web/` — a primeira SPA do projeto (Vite + React + TypeScript, Fase 13,
+  issues #119–#129): registro, login/logout, CRUD de task, transições de
+  status e anexos (upload com progresso, preview, download, exclusão),
+  autenticada pelo cookie httpOnly + CSRF acima. Quatro estados de UI
+  explícitos (loading/empty/error/sucesso) em cada tela, navegável só por
+  teclado, auditoria de acessibilidade automatizada sem violação (CI-10)
+  e E2E real contra `docker compose up` — incluindo o teste que mais
+  importa, um `503` de banco fora do ar não desloga a sessão (CI-11).
+  Versionada e lançada junto com o resto do repo, sem tag própria — ver
+  `docs/DECISIONS.md` § "Frontend: Vite (SPA)...".
 
 ### Alterado
 - Toda resposta a um método seguro (`GET`/`HEAD`/`OPTIONS`/`TRACE`)
@@ -63,6 +74,12 @@ enviada) nunca esteve fixada como exemplo no contrato — só o caso
 - A resposta `403` de CSRF não usa o envelope `{"error": "..."}` do
   resto da API — é texto puro (`Forbidden`) escrito pelo handler padrão
   de `moat/csrf`. Ver `docs/ARCHITECTURE.md` § Future Improvements.
+- `PATCH /tasks/{id}/status`'s `409` (transição ilegal vs. conflito de
+  concorrência) não tem um código de erro legível por máquina — o
+  frontend distingue os dois casos por match de string na mensagem
+  (`web/src/api/errors.ts`), frágil a uma mudança futura do texto.
+  Registrado deliberadamente, não corrigido em silêncio — ver issue
+  #153 e `docs/changes/web-frontend/validation.md`'s `AM-5`.
 
 ### Migração necessária
 1. Definir `CSRF_SECRET` (≥32 bytes aleatórios) antes de subir esta
