@@ -565,6 +565,7 @@ type countingRepo struct {
 	createCalled           bool
 	findByStorageKeyCalled bool
 	findByTaskCalled       bool
+	deleteCalled           bool
 }
 
 func (r *countingRepo) Create(ctx context.Context, att Attachment, userID string) error {
@@ -580,6 +581,11 @@ func (r *countingRepo) FindByStorageKey(ctx context.Context, storageKey, userID 
 func (r *countingRepo) FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error) {
 	r.findByTaskCalled = true
 	return r.Repository.FindByTask(ctx, taskID, userID)
+}
+
+func (r *countingRepo) Delete(ctx context.Context, storageKey, userID string) error {
+	r.deleteCalled = true
+	return r.Repository.Delete(ctx, storageKey, userID)
 }
 
 // malformedIDs is the shared table every test below runs against —
@@ -645,6 +651,34 @@ func TestListByTask_MalformedTaskID_IsTaskNotFound(t *testing.T) {
 			}
 			if repo.findByTaskCalled {
 				t.Errorf("ListByTask(taskID=%q) reached Repository.FindByTask; isValidID should have rejected it first", tc.id)
+			}
+		})
+	}
+}
+
+// TestDelete_MalformedStorageKey_IsNotFound is the Delete counterpart of
+// TestDownload_MalformedStorageKey_IsNotFound — see issue #107. Delete
+// used to be the one method of the four that skipped isValidID, so a
+// malformed key reached Repository.Delete unchecked: memoryRepository
+// answered it with ErrNotFound anyway (a malformed key just isn't a key
+// in its map, same as an unknown well-formed one), which is exactly why
+// deleteCalled, not just the returned error, is what proves the guard
+// runs — see countingRepo's doc comment above. Against the real
+// postgresRepository the same unchecked call reaches the ::uuid cast
+// instead and surfaces as a query error, not a 404 — pinned at the
+// Repository layer by TestPostgres_Delete_MalformedKey_IsAQueryError.
+func TestDelete_MalformedStorageKey_IsNotFound(t *testing.T) {
+	for _, tc := range malformedIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &countingRepo{Repository: NewMemoryRepository(fixedOwnership)}
+			svc := NewService(repo, newTestStore(t), 1024, unlimitedQuota)
+
+			err := svc.Delete(context.Background(), ownerID, tc.id)
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("Delete(storageKey=%q) error = %v, want ErrNotFound", tc.id, err)
+			}
+			if repo.deleteCalled {
+				t.Errorf("Delete(storageKey=%q) reached Repository.Delete; isValidID should have rejected it first", tc.id)
 			}
 		})
 	}

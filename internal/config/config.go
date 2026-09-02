@@ -87,6 +87,8 @@ const (
 	// cmd/api's tests.
 	defaultHSTSMaxAge = 365 * 24 * time.Hour
 
+	defaultCookieInsecure = false
+
 	// Rate-limit defaults, in token-bucket terms: burst is the depth of
 	// the bucket (how many requests may arrive at once) and perSec the
 	// rate it refills at (the sustained throughput allowed afterwards).
@@ -354,6 +356,30 @@ type Config struct {
 	// provisioned. Adding them here before that would be exactly the
 	// speculative config CLAUDE.md warns against.
 	CrierOTLPEndpoint string
+
+	// CSRFSecret signs the CSRF token issued to browser clients (see
+	// docs/DECISIONS.md § "Autenticação: modo duplo (cookie httpOnly +
+	// Bearer)"). A per-process random fallback would reject every token
+	// minted by a different replica, so this must come from the
+	// environment for cmd/api to actually build a csrf.Protector — but
+	// that requirement is enforced there, not here: cmd/migrate and
+	// cmd/seed load this same Config and never touch CSRF, so failing
+	// Load over an empty value would refuse to run either of them for a
+	// reason that has nothing to do with what they do. See the comment on
+	// CSRFSecret's assignment in Load for the same reasoning applied to
+	// DatabaseURL.
+	//
+	// Never logged, same rule as AttachmentS3SecretKey above.
+	CSRFSecret string
+
+	// CookieInsecure drops the Secure attribute from both the session
+	// cookie and the CSRF cookie, so they can be sent over plain
+	// http://localhost in local development. It is one switch for both
+	// cookies, not two, because they share the same reason to exist: dev
+	// without TLS. Never set true in production — a false Secure attribute
+	// lets an active network attacker read and write the cookie over any
+	// plaintext request to this host.
+	CookieInsecure bool
 }
 
 // Load reads configuration from environment variables and applies defaults
@@ -457,6 +483,21 @@ func Load() (Config, error) {
 	}
 
 	cfg.CrierOTLPEndpoint = strings.TrimSpace(os.Getenv("CRIER_OTLP_ENDPOINT"))
+
+	// CSRF_SECRET is intentionally not length-validated here, the same
+	// reason DATABASE_URL isn't above: cmd/migrate and cmd/seed load this
+	// same Config and never touch CSRF, so failing Load over a secret
+	// only cmd/api needs would refuse to run a migration or a seed script
+	// over something unrelated to either. moat/csrf.New is the authority
+	// on what a valid secret is (MinSecretLen, currently 32 bytes) and is
+	// where cmd/api actually enforces it, at the point it builds the
+	// Protector — an empty or short value surfaces there, at startup,
+	// with that library's own error. See Config.CSRFSecret's doc comment.
+	cfg.CSRFSecret = os.Getenv("CSRF_SECRET")
+
+	if cfg.CookieInsecure, err = parseBool("COOKIE_INSECURE", defaultCookieInsecure); err != nil {
+		return Config{}, err
+	}
 
 	cfg.AttachmentStorageDir = strings.TrimSpace(os.Getenv("ATTACHMENT_STORAGE_DIR"))
 

@@ -37,8 +37,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JonasBorgesLM/moat/csrf"
+	"github.com/JonasBorgesLM/moat/secret"
+
 	"github.com/JonasBorgesLM/task-api/internal/user"
 )
+
+// testCSRFSecret is a fixed, valid-length secret for the real
+// csrf.Protector newIntegrationServer builds — user.Handler.login calls
+// Protector.Rotate unconditionally on success, so this cannot be nil,
+// even though these tests don't otherwise exercise CSRF themselves (the
+// real gate is composed in cmd/api's newServer, not here).
+const testCSRFSecret = "task-integration-test-csrf-secret-not-for-prod-0"
 
 // newIntegrationServer wires real MemoryRepositorys (task and user), real
 // Services, real Handlers and user.RequireAuth together — the same
@@ -55,8 +65,17 @@ func newIntegrationServer(t *testing.T) (*httptest.Server, string) {
 	taskSvc := NewService(NewMemoryRepository())
 	taskHandler := NewHandler(taskSvc, logger)
 
+	// WithInsecureCookie: httptest.NewServer below is plain HTTP, and a
+	// Secure cookie would never come back to the client's cookie jar (if
+	// it even had one — these tests read the bearer token from the JSON
+	// body, not the cookie) over that.
+	csrfProtector, err := csrf.New(secret.New([]byte(testCSRFSecret)), csrf.WithInsecureCookie())
+	if err != nil {
+		t.Fatalf("csrf.New() unexpected error: %v", err)
+	}
+
 	userSvc := user.NewService(user.NewMemoryRepository(), 24*time.Hour, 1000)
-	userHandler := user.NewHandler(userSvc, logger)
+	userHandler := user.NewHandler(userSvc, logger, false, csrfProtector, false)
 	requireAuth := user.RequireAuth(userSvc, logger)
 
 	// A generous limit here: these tests exercise the task/auth stack, not

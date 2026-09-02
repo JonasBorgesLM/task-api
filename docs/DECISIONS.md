@@ -24,6 +24,88 @@ a este modelo de auth** — não implementar `csrf` do moat aqui.
 `localStorage`, ele fica exposto a roubo via XSS. Isso é decisão do
 projeto de frontend quando existir, não deste backend.
 
+**Esse frontend passou a existir (Fase 13) — ver a seção seguinte,
+"Autenticação: modo duplo (cookie httpOnly + Bearer)", para a decisão
+tomada. O raciocínio acima continua valendo integralmente para o caminho
+Bearer; nada aqui foi revertido.**
+
+---
+
+## Autenticação: modo duplo (cookie httpOnly + Bearer), CSRF condicionado à origem da credencial
+
+A API passa a aceitar **duas** formas de credencial na mesma sessão, em vez
+de só `Authorization: Bearer`:
+
+- **Cookie `httpOnly`** — caminho do navegador (Fase 13, frontend em
+  `web/`). Imune a roubo por XSS, ao contrário do `localStorage` que a
+  seção anterior já apontava como o risco real de um frontend futuro.
+- **`Authorization: Bearer`** — caminho de script/serviço, inalterado. Todo
+  exemplo de `curl` do README continua funcionando exatamente como hoje.
+
+**A regra que faz isso ser seguro, e não reabrir o que a decisão anterior
+fechou:** a verificação de CSRF (`moat/csrf`) se aplica exatamente quando
+uma requisição mutadora **não** carrega `Authorization` — o que cobre tanto
+sessão autenticada por cookie quanto `POST /auth/login`/`register` sem
+sessão nenhuma ainda (ver abaixo). Uma requisição com `Authorization`
+nunca passa por CSRF, sob nenhuma circunstância.
+
+**Por que a checagem não depende de resolver a sessão primeiro.** Uma
+primeira formulação cogitada aqui fazia o gate de CSRF depender de saber,
+depois da autenticação, se a credencial resolvida veio do cookie —
+mas isso amarraria um middleware global a rodar só depois de
+`RequireAuth`, que é por rota, não global. A pergunta real é mais simples
+e não precisa de sessão nenhuma resolvida: **`Authorization` está
+presente ou não?** Presente → caminho Bearer, nunca CSRF. Ausente →
+requisição de navegador, sempre CSRF em método mutador. É a mesma função
+que decide qual credencial validar (`credentialSource`) que decide se o
+CSRF se aplica — uma decisão, dois usos, sem depender de ordem entre
+middlewares.
+
+**Por que `login`/`register` também são protegidos, e não só rotas já
+autenticadas.** A formulação original cobria só sessão já autenticada por
+cookie — mas isso deixa aberto "login CSRF": forçar o navegador da vítima
+a logar numa conta que o atacante controla, fazendo a vítima gravar dados
+sem saber numa conta alheia. Diferente do CSRF clássico (não rouba a
+sessão da vítima), mas é uma variante real, e não vale a mesma proteção
+que o resto da API já tem só porque a rota é pública. `login`/`register`
+passam a exigir o mesmo token CSRF que qualquer outra escrita de
+navegador exige.
+
+**Como o frontend obtém o token.** `GET /v1/auth/csrf-token`, endpoint
+público (sem sessão), devolve `{"csrf_token": "..."}`. O frontend guarda
+o valor em memória — nunca em `localStorage`/`sessionStorage`, pela mesma
+razão que o token de sessão em si nunca vai lá. `Protector.Rotate` roda
+dentro de `login`, logo após autenticar: o token emitido antes do login
+deixa de valer depois dele, fechando a janela de fixação que a própria
+biblioteca documenta.
+
+**`Secure` do cookie de sessão em desenvolvimento.** `COOKIE_INSECURE`
+(default `false`) relaxa `Secure` — e só `Secure` — para permitir
+`http://localhost` em dev; nunca usar em produção. Aplica-se igualmente ao
+cookie de sessão e ao cookie do `moat/csrf`, um único interruptor para o
+mesmo problema, não dois.
+
+**Por que não migrar tudo para cookie.** Seria quebra de contrato
+(`v2.0.0`): invalidaria os walkthroughs de `curl` do README e todo uso
+backend-to-backend documentado. O modo duplo é aditivo — `v1.2.0`.
+
+**Nota histórica:** as issues de CSRF fechadas na Fase 4 foram encerradas
+com "descontinuada — CSRF não se aplica a este modelo de auth". Aquilo
+estava correto *dado* header-only, o único modo que existia então. Esta
+seção não as reabre nem as contradiz — a premissa que as fechou (só
+Bearer) deixou de ser a premissa inteira, e CSRF passa a se aplicar
+exatamente à parte nova.
+
+**Trade-off aceito:** uma segunda superfície de configuração sensível
+(`CSRF_SECRET`, com o mesmo cuidado de nunca aparecer em log que
+`AttachmentS3SecretKey` já tem) e uma segunda checagem em toda escrita de
+navegador. Aceito porque a alternativa — cookie sem CSRF — é exatamente a
+vulnerabilidade que a decisão original evitou desde o início.
+
+Detalhes de implementação (nomes de variável, ordem de middleware,
+esquema de resposta) em `docs/openapi.yaml` e nas issues #112–#118 e
+#130.
+
 ---
 
 ## Storage de anexos: duas fronteiras, ordem de escrita é escolha
@@ -309,7 +391,19 @@ medição real desse orçamento sob carga, não só a aritmética.
 
 ---
 
-## Fase 11: crier embutido, stdout mantido em paralelo
+## crier + SigNoz: registro consolidado da Fase 11 (issue 11.9)
+
+Registro único da Fase 11 (crier embutido + validação contra um SigNoz
+real), reunindo aqui o que antes estava espalhado em quatro seções
+separadas deste arquivo. Nenhum conteúdo técnico foi alterado nesta
+consolidação — apenas a organização; ver a issue 11.9 e o PR que fechou
+esta issue para a verificação de que o texto é o mesmo, só reagrupado.
+As quatro subseções abaixo mantêm a ordem cronológica original em que as
+decisões foram tomadas: a integração do crier em si, a validação de que
+os logs chegam de fato ao SigNoz, o comportamento sob shutdown e carga
+real, e por fim onde e como o SigNoz roda.
+
+### Fase 11: crier embutido, stdout mantido em paralelo
 
 `cmd/api/crier.go` integra a biblioteca `crier` (`core.New()` + o
 exportador `exporters/otlp`) como um segundo destino de log, opt-in via
@@ -336,7 +430,7 @@ egress dobrados para o volume de acesso. Aceito porque a alternativa
 (substituir stdout) reintroduz exatamente o ponto único de falha que o
 parágrafo acima descreve.
 
-### Um "tee" de `slog.Handler`, não uma chamada por call site
+#### Um "tee" de `slog.Handler`, não uma chamada por call site
 
 A alternativa considerada foi adicionar `crier.Log(...)` em cada um dos
 ~20 call sites de log do projeto (cmd/api e os três Handlers de domínio).
@@ -346,7 +440,7 @@ caminhos para divergir. Em vez disso, `crierTeeHandler` embrulha o
 já existente passa a alcançar o crier automaticamente, `request_id`
 incluído (é só mais um atributo que a linha de log já carregava).
 
-### Um achado real, não só leitura de documentação: atributos precisam de conversão
+#### Um achado real, não só leitura de documentação: atributos precisam de conversão
 
 Verificado por experimento, não por ler o código do crier: um atributo
 `slog` de tipo `error` (o que `"error", err` produz — `error` não é um
@@ -363,7 +457,7 @@ representação em texto (`slog.Value.String()`, que corretamente chama
 cada um foi verificado falhando de propósito (a conversão removida
 temporariamente) antes de mergear.
 
-### Custo de dependência (issue 11.3)
+#### Custo de dependência (issue 11.3)
 
 `go get` real, grafo conferido (não suposto): `CRIER_OTLP_ENDPOINT`
 configurado adiciona exatamente **4 módulos** —
@@ -383,7 +477,7 @@ esboço original desta fase). Se um backend de observabilidade futuro só
 falar gRPC, essa decisão precisa ser revisitada — não é o caso do SigNoz,
 que traz coletor OTLP/HTTP embutido.
 
-### Nome de serviço e versão
+#### Nome de serviço e versão
 
 `Options.ServiceName` é a constante `"task-api"` (`crierServiceName`).
 `Options.ServiceVersion` fica vazio por ora — o mecanismo de
@@ -393,7 +487,7 @@ consequência de uma linha só assim que aquele PR mergear; não vale
 duplicar aqui o mecanismo de detecção de versão só para adiantar este
 campo opcional.
 
-### `crierShutdownTimeout`: provisório, não a aritmética final
+#### `crierShutdownTimeout`: provisório, não a aritmética final
 
 `crier.Shutdown` roda dentro de `closeAll`, **antes** de `closeDB` e
 **depois** de `closeBlobs` — na mesma ordem já estabelecida para os
@@ -413,7 +507,7 @@ um deploy real para rodar `k8s/rollout-test.sh` contra ele, igual ao que
 já foi feito para `HTTP_PRE_SHUTDOWN_DELAY` — ver a seção "Drain antes do
 shutdown" acima.
 
-### `/health/ready` não é acoplado ao crier (issue 11.8)
+#### `/health/ready` não é acoplado ao crier (issue 11.8)
 
 `core.Crier.Health()` existe e reporta liveness/readiness do próprio
 pipeline do crier — e **deliberadamente não é consultado por**
@@ -441,9 +535,7 @@ estabelecido no projeto de "fechar sobre a variável de pacote, nunca
 sobre um parâmetro capturado", aplicado aqui pela primeira vez a um
 recurso construído mais de uma vez por processo de teste.
 
----
-
-## Validação real da issue 11.6: dois registros confirmados no ClickHouse do SigNoz
+### Validação real da issue 11.6: dois registros confirmados no ClickHouse do SigNoz
 
 `CRIER_OTLP_ENDPOINT` verificado entregando de verdade, não apenas "o
 exportador não retornou erro" — cada prova consultou diretamente o
@@ -475,9 +567,7 @@ Recursos de teste (cluster(s) kind descartáveis, imagem
 `task-api:crier-e2e-test`) removidos depois; o stack do SigNoz continua
 rodando na máquina para a issue 11.7 reaproveitar.
 
----
-
-## Issue 11.7: shutdown sob carga real, drain do crier reconciliado com o SigNoz
+### Issue 11.7: shutdown sob carga real, drain do crier reconciliado com o SigNoz
 
 `k8s/rollout-test.sh` estendido para, quando encontra um SigNoz rodando
 (`SIGNOZ_UP=true`, mesma detecção da seção acima), reconciliar o que o
@@ -545,9 +635,7 @@ de clusters kind nesta máquina de desenvolvimento, não algo que o código
 do crier introduziu. Registrado em vez de descartado, para que uma
 reaparição futura tenha este parágrafo como ponto de partida.
 
----
-
-## SigNoz: Docker Compose oficial, mesma máquina do cluster, ligado à rede do `kind` (issue 11.5)
+### SigNoz: Docker Compose oficial, mesma máquina do cluster, ligado à rede do `kind` (issue 11.5)
 
 **Decisão revisada — substitui a versão anterior desta seção (VM
 dedicada + VPN/peering), descartada antes de qualquer provisionamento.**
@@ -590,7 +678,7 @@ Com o nome de projeto padrão ("signoz"), o container que recebe OTLP é
 acessível por nome dentro da rede Docker `signoz-network` que o Compose
 cria.
 
-### A pergunta que não podia ser assumida: como um pod alcança um serviço no host
+#### A pergunta que não podia ser assumida: como um pod alcança um serviço no host
 
 A ferramenta que cria o cluster Kubernetes local neste repositório é
 **kind** — confirmado lendo `k8s/rollout-test.sh` (`kind create cluster`,
@@ -1025,3 +1113,33 @@ resolvida depois de ver a execução real no pipeline (contagem de
 iterações, tempo, resultado). Aplique o mesmo padrão em qualquer issue
 que envolva CI, deploy, ou qualquer configuração que se pretende validar:
 não feche por ter editado o arquivo certo, feche por ter visto rodar.
+
+---
+
+## Frontend: Vite (SPA), monorepo em `web/`, mesma linha de versão do repo
+
+Quatro decisões de arquitetura para o frontend (Fase 13, `docs/changes/web-frontend/plan.md` `CI-1`), registradas antes de qualquer código para que a implementação não fique escolhendo essas coisas ad hoc conforme avança.
+
+### Vite, não Next.js
+
+O frontend é uma SPA pura (Vite + React + TypeScript), sem SSR e sem rotas de servidor. Isso não é uma omissão — é a confirmação de uma decisão já registrada em `docs/ARCHITECTURE.md` § Future Improvements, "BFF (Backend-for-Frontend) layer": esse item já dizia que um BFF só se justifica quando existir mais de um serviço downstream para agregar, ou quando um cliente web e um cliente mobile precisarem de formatos de payload genuinamente diferentes. Nenhuma das duas condições existe hoje — há um único recurso central (`task-api`) e um único cliente (este frontend). Next.js (ou qualquer framework com SSR/rotas de API embutidas) resolveria um problema que este projeto não tem, ao custo de um servidor Node adicional para operar, testar e fazer deploy. Se um BFF real se justificar no futuro, é uma camada nova e explícita — não uma razão para escolher um framework diferente agora.
+
+### Monorepo com CI filtrado por caminho
+
+`web/` vive dentro deste mesmo repositório, não em um repositório separado. A alternativa (multi-repo) exigiria coordenar duas releases, dois `CHANGELOG.md`, e — o problema real — versionar a compatibilidade entre o contrato do backend e o que o frontend espera dele através de dois históricos de commit diferentes, quando `docs/openapi.yaml` já é a fonte única da verdade para os dois lados dentro de um único commit.
+
+O custo do monorepo é acoplar os dois gates de CI se não houver cuidado: um PR que só toca `web/` não deveria disparar o gate Go (`gofmt`, `staticcheck`, `govulncheck`, testes com PostgreSQL), e vice-versa. `CI-2` do plano resolve isso com `paths-ignore`/`paths` nos dois workflows (`.github/workflows/ci.yml` ganha `paths-ignore: ['web/**']`; `.github/workflows/web-ci.yml`, novo, roda só em `web/**`) — e exige verificação por **execução real** nos dois sentidos antes de considerar o item pronto, não leitura do YAML, porque a Fase 7 já teve um caso real de filtro de workflow que parecia certo lido e não funcionava rodando (ver § "Princípio geral de validação" acima).
+
+### Versionamento compartilhado com o repo
+
+`web/` não tem sua própria tag/release — ele segue a mesma linha `vX.Y.Z` do repositório como um todo (a mesma que `CHANGELOG.md` já versiona). Um release do projeto que inclui mudança de frontend ganha uma entrada no mesmo `CHANGELOG.md`, não um arquivo separado. Isso é consistente com o monorepo: não faz sentido dizer que "o backend está na v1.2.0 mas o frontend está na v1.0.3" quando os dois são publicados, testados e versionados juntos a partir do mesmo commit.
+
+### Cookie httpOnly, nunca `localStorage`
+
+O frontend nunca guarda a credencial de sessão em `localStorage`/`sessionStorage`. A sessão vive exclusivamente no cookie `HttpOnly` que o backend já emite em `POST /auth/login` (ver § "Autenticação: modo duplo (cookie httpOnly + Bearer)" acima) — o próprio motivo de o backend ter adotado esse modo de autenticação já era fechar a superfície de roubo de token via XSS que `localStorage` deixa aberta; seria autocontraditório o frontend reabrir essa mesma superfície guardando o token CSRF, ou qualquer outra coisa sensível, num storage que qualquer script no mesmo documento consegue ler. O token CSRF (obtido de `GET /v1/auth/csrf-token`) vive só em memória — uma variável JS que desaparece a cada reload, exigindo uma nova busca — nunca persistido.
+
+### Navegação: `react-router-dom`, URLs reais desde a Fase 13.6
+
+Nenhum item de `docs/changes/web-frontend/plan.md` (`CI-1`–`CI-11`) nem as issues `#119`–`#129` decidiam isso explicitamente antes de `CI-6` — só nomeavam "Page"s (`RegisterPage`, `LoginPage`, e mais tarde a lista de tasks), sem dizer se cada uma teria sua própria URL ou seria só uma troca de view por estado local. Como a decisão molda a estrutura de todo o resto da Fase 13 (CRUD de task, anexos), foi levada ao usuário em vez de escolhida em silêncio — decisão: `react-router-dom`, com URLs reais desde já (`/login`, `/register`, `/`), não uma alternativa sem dependência nova baseada em estado local.
+
+Consequência direta, não antecipação: `RequireAuth` (`web/src/features/auth/RequireAuth.tsx`) — um guard de rota que redireciona para `/login` quando `useAuth()` não está autenticado — não está na lista de arquivos de `CI-6` em `plan.md`, mas é o que torna a rota `/` protegida possível; sem ele, "URLs reais" e "sessão só sabida via `GET /auth/me`" não se sustentam juntas.

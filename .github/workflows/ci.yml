@@ -3,8 +3,16 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    # web/ has its own pipeline (.github/workflows/web-ci.yml) with its
+    # own toolchain (Node, not Go) — a PR that only touches it doesn't
+    # need this gate, and shouldn't wait ~1m30 for a Postgres service
+    # container that nothing here will even query. See
+    # docs/DECISIONS.md § "Frontend: Vite (SPA), monorepo em web/,
+    # mesma linha de versão do repo".
+    paths-ignore: ['web/**']
   pull_request:
     branches: [main, develop]
+    paths-ignore: ['web/**']
   workflow_dispatch:
 
 permissions:
@@ -256,9 +264,17 @@ jobs:
       #
       # Sem DATABASE_URL, o processo escolhe os repositórios em memória (ver
       # openDatabase), então não há serviço nenhum para subir.
+      #
+      # CSRF_SECRET é obrigatório desde a Fase 12 (docs/DECISIONS.md §
+      # "Autenticação: modo duplo") — csrf.New recusa subir sem pelo menos
+      # 32 bytes (moat/csrf.MinSecretLen), então o processo nem chega a
+      # ouvir porta nenhuma sem isto. Valor descartável, só para o
+      # container deste job existir.
       - name: Smoke test the image
         run: |
-          docker run -d --name task-api-ci -p 18080:8080 task-api:ci
+          docker run -d --name task-api-ci -p 18080:8080 \
+            -e CSRF_SECRET="ci-smoke-test-throwaway-csrf-secret-00000000" \
+            task-api:ci
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:18080/health >/dev/null; then
               echo "API respondeu após ${i}s"

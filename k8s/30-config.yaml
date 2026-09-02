@@ -52,6 +52,23 @@ data:
   # serves — see docs/DECISIONS.md. Set to 0 to omit it entirely.
   HSTS_MAX_AGE: "8760h"
 
+  # ⚠️  This drops Secure from the session cookie and the CSRF cookie —
+  # anyone on the network path between a client and this process reads
+  # the session cookie in plain text and can replay it as that user, no
+  # attack tooling required beyond a packet capture.
+  #
+  # That is acceptable *here* and nowhere else: this manifest has no
+  # Ingress or TLS termination in front of it (k8s/rollout-test.sh talks
+  # to the Service directly, over plain HTTP, by design — see
+  # .claude/rules/k8s-deploy.md), so without this setting neither cookie
+  # would ever come back to a client at all, and there is nothing real
+  # this disposable cluster protects to begin with (see the Secret
+  # warning below — same reasoning). A real deployment terminates TLS
+  # somewhere in front of the API and must not carry this setting into
+  # that manifest — copying this file wholesale into one is exactly the
+  # mistake this comment exists to interrupt.
+  COOKIE_INSECURE: "true"
+
   # Mirrors every log record to SigNoz, alongside stdout — see
   # docs/DECISIONS.md's Fase 11 sections for the full validation this
   # was verified against (real ClickHouse query, not just "the exporter
@@ -101,3 +118,9 @@ type: Opaque
 stringData:
   ATTACHMENT_S3_ACCESS_KEY: "task_api"
   ATTACHMENT_S3_SECRET_KEY: "task_api_secret"
+  # Signs the CSRF token for cookie-authenticated writes (see
+  # docs/DECISIONS.md § "Autenticação: modo duplo") — csrf.New refuses
+  # anything under 32 bytes, and this cluster is single-replica anyway,
+  # so there is no cross-instance-agreement requirement it needs to
+  # satisfy beyond that.
+  CSRF_SECRET: "task-api-k8s-disposable-cluster-csrf-secret-000000"

@@ -6,6 +6,92 @@ versionamento seguindo [Semantic Versioning](https://semver.org/lang/pt-BR/).
 Este é o primeiro release versionado do projeto — não há tags anteriores.
 `v1.0.0` marca o ponto em que a API passa a ter contrato estável (`/v1`).
 
+## [1.2.0] — a definir na tag
+
+Lote das issues #112 a #118 e #130 (Fase 12 — modo duplo de autenticação),
+mais #119 a #129 e #153 (Fase 13 — frontend). **Minor, não major:**
+nenhuma mudança deste release quebra o contrato
+existente. Um cliente que só usa `Authorization: Bearer` continua
+funcionando exatamente como antes, sem alteração de rota, código de
+status, ou formato de resposta — o cookie é um segundo *transporte* para
+a mesma sessão opaca, não um segundo mecanismo de autenticação (ver
+`docs/DECISIONS.md` § "Autenticação: modo duplo"). A única mudança de
+texto de erro (`missing or malformed Authorization header` →
+`missing or invalid session credential`, quando nenhuma credencial é
+enviada) nunca esteve fixada como exemplo no contrato — só o caso
+"token presente mas inválido" estava, e esse texto não mudou.
+
+### Adicionado
+- Segundo modo de autenticação: cookie httpOnly (`session_token`), além
+  do Bearer já existente. `POST /auth/login` passa a também gravar esse
+  cookie (`Secure` por padrão, `SameSite=Lax`, carregando o mesmo token
+  opaco do corpo da resposta); `RequireAuth` aceita Bearer ou cookie,
+  com Bearer vencendo quando ambos estão presentes.
+  `POST /auth/logout`/`logout-all` passam a também limpar o cookie.
+- `GET /v1/auth/csrf-token` — emite o token CSRF que toda requisição
+  mutadora (`POST`/`PUT`/`PATCH`/`DELETE`) sem `Authorization` deve
+  enviar em `X-CSRF-Token`. Isso inclui `POST /auth/login` e
+  `POST /auth/register`, fechando deliberadamente o gap de "login CSRF"
+  — ver `docs/DECISIONS.md`.
+- `attachments_enabled` (boolean) na resposta de `GET /v1/auth/me` —
+  sinaliza se as rotas de anexo existem neste deployment, sem depender
+  de inferir isso de um `404` que também pode significar outra coisa
+  (issue #130).
+- `Access-Control-Allow-Credentials: true` em toda resposta CORS de
+  origem permitida — necessário para o cookie de sessão funcionar contra
+  um frontend hospedado em outra origem.
+- `CSRF_SECRET` (obrigatório, mínimo 32 bytes — o processo recusa
+  iniciar sem ele) e `COOKIE_INSECURE` (default `false`; só para
+  desenvolvimento local sobre HTTP puro) — ver README.md.
+- `docs/openapi.yaml` ganha o segundo `securityScheme` (`cookieAuth`),
+  a resposta `403` (`Forbidden`) em toda rota mutadora, e documentação
+  do fluxo de CSRF de ponta a ponta.
+- `web/` — a primeira SPA do projeto (Vite + React + TypeScript, Fase 13,
+  issues #119–#129): registro, login/logout, CRUD de task, transições de
+  status e anexos (upload com progresso, preview, download, exclusão),
+  autenticada pelo cookie httpOnly + CSRF acima. Quatro estados de UI
+  explícitos (loading/empty/error/sucesso) em cada tela, navegável só por
+  teclado, auditoria de acessibilidade automatizada sem violação (CI-10)
+  e E2E real contra `docker compose up` — incluindo o teste que mais
+  importa, um `503` de banco fora do ar não desloga a sessão (CI-11).
+  Versionada e lançada junto com o resto do repo, sem tag própria — ver
+  `docs/DECISIONS.md` § "Frontend: Vite (SPA)...".
+
+### Alterado
+- Toda resposta a um método seguro (`GET`/`HEAD`/`OPTIONS`/`TRACE`)
+  passa a incluir um `Set-Cookie` do cookie CSRF (`HttpOnly`, nunca
+  exposto a JavaScript) — aditivo; um cliente que ignora cookies, como
+  todo cliente Bearer-only até hoje, não é afetado.
+
+### Segurança
+- CSRF (`moat/csrf`, double-submit cookie assinado com HMAC) aplicado
+  globalmente a toda requisição mutadora que não carrega
+  `Authorization` — cobre tanto o cookie de sessão quanto
+  `login`/`register` sem sessão nenhuma ainda, o que fecha um gap que a
+  maioria das implementações de CSRF deixa aberto.
+
+### Dívidas técnicas conhecidas, não bloqueantes
+- A resposta `403` de CSRF não usa o envelope `{"error": "..."}` do
+  resto da API — é texto puro (`Forbidden`) escrito pelo handler padrão
+  de `moat/csrf`. Ver `docs/ARCHITECTURE.md` § Future Improvements.
+- `PATCH /tasks/{id}/status`'s `409` (transição ilegal vs. conflito de
+  concorrência) não tem um código de erro legível por máquina — o
+  frontend distingue os dois casos por match de string na mensagem
+  (`web/src/api/errors.ts`), frágil a uma mudança futura do texto.
+  Registrado deliberadamente, não corrigido em silêncio — ver issue
+  #153 e `docs/changes/web-frontend/validation.md`'s `AM-5`.
+
+### Migração necessária
+1. Definir `CSRF_SECRET` (≥32 bytes aleatórios) antes de subir esta
+   versão — `cmd/api` recusa iniciar sem ele. `COOKIE_INSECURE` só é
+   necessário em desenvolvimento local sobre HTTP puro; nunca em
+   produção.
+2. Nenhuma migração de schema. Nenhuma ação é necessária para um
+   cliente que só usa `Authorization: Bearer` — o modo cookie é
+   estritamente aditivo.
+
+---
+
 ## [1.1.0] — a definir na tag
 
 Lote das issues #96 a #106 (fora #95, já em v1.0.0). Nenhuma mudança
@@ -59,6 +145,11 @@ raciocínio de cada decisão).
 - Um `taskID`/`storageKey` malformado agora responde `404` contra o
   backend PostgreSQL, igual ao backend em memória — antes chegava ao
   cast `::uuid` do banco e virava `500`, logado como falha inesperada.
+- `attachment.Service.Delete` fechava a última lacuna dessa mesma
+  classe de bug: era o único dos quatro métodos do pacote que não
+  chamava `isValidID` antes de operar, então um `storage_key`
+  malformado em `DELETE /v1/files/{key}` ainda alcançava o cast
+  `::uuid` do banco (issue #107).
 - `middleware.Recovery` não escreve mais uma segunda resposta HTTP
   quando o handler já tinha começado a responder antes do panic — evita
   corpo duplicado/inválido e o aviso "superfluous response.WriteHeader"
@@ -71,12 +162,6 @@ raciocínio de cada decisão).
   credenciais no próprio texto de erro — agora está travada por dois
   testes de regressão, não só por leitura de código. Ver
   `docs/DECISIONS.md`.
-
-### Dívidas técnicas conhecidas, não bloqueantes
-- `Service.Delete` de anexos não valida o formato do `storage_key`
-  antes de operar, diferente de `Upload`/`Download`/`ListByTask` — um
-  `storage_key` malformado ainda chega ao cast `::uuid` do banco em vez
-  de responder `404` direto (issue #107).
 
 ### Migração necessária
 1. Se `DATABASE_URL` aponta para PostgreSQL, a migration `0008` (índice

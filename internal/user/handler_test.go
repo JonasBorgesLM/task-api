@@ -12,8 +12,37 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JonasBorgesLM/moat/csrf"
+	"github.com/JonasBorgesLM/moat/secret"
+
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 )
+
+// testCSRFSecret is a fixed, valid-length secret for tests that need a
+// real csrf.Protector rather than a pass-through — csrf.New rejects
+// anything shorter than csrf.MinSecretLen (32 bytes), so this is padded
+// well past it.
+const testCSRFSecret = "test-only-csrf-secret-not-for-production-use-000000"
+
+// testCSRFProtector is built once and shared by every test in this file
+// that needs a real *csrf.Protector — Protector is safe for concurrent
+// use and is meant to be created once and shared (see its own doc
+// comment), and testCSRFSecret is a fixed, always-valid constant, so
+// there is nothing here a per-call, per-test construction would ever
+// catch that this package-level one doesn't just as well. WithInsecureCookie
+// so it works in a plain httptest request (no TLS).
+//
+// user.Handler.login calls Protector.Rotate unconditionally on success
+// (see login's doc comment), so every Handler built by
+// newHandlerWithFake/newHandlerWithFakeCookieMode needs a non-nil one —
+// not only the tests that exercise CSRF directly.
+var testCSRFProtector = func() *csrf.Protector {
+	p, err := csrf.New(secret.New([]byte(testCSRFSecret)), csrf.WithInsecureCookie())
+	if err != nil {
+		panic("csrf.New() with a fixed, valid test secret failed: " + err.Error())
+	}
+	return p
+}()
 
 // fakeService is a test double for userService (Handler) and
 // sessionValidator (RequireAuth) — one fake implements both, since
@@ -85,8 +114,22 @@ func (f *fakeService) ValidateToken(_ context.Context, token string) (string, er
 }
 
 func newHandlerWithFake(svc *fakeService) *Handler {
+	return newHandlerWithFakeCookieMode(svc, false)
+}
+
+// newHandlerWithFakeCookieMode is newHandlerWithFake with cookieInsecure
+// exposed, for the tests that specifically exercise its effect on the
+// session cookie's Secure attribute.
+func newHandlerWithFakeCookieMode(svc *fakeService, cookieInsecure bool) *Handler {
+	return newHandlerWithFakeAttachments(svc, cookieInsecure, false)
+}
+
+// newHandlerWithFakeAttachments is newHandlerWithFakeCookieMode with
+// attachmentsEnabled exposed, for the tests that specifically exercise
+// its effect on GET /auth/me's response.
+func newHandlerWithFakeAttachments(svc *fakeService, cookieInsecure, attachmentsEnabled bool) *Handler {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewHandler(svc, logger)
+	return NewHandler(svc, logger, cookieInsecure, testCSRFProtector, attachmentsEnabled)
 }
 
 func do(handler http.HandlerFunc, method, target, body string) *httptest.ResponseRecorder {
@@ -190,6 +233,76 @@ func TestLogin_Handler_ValidCredentials(t *testing.T) {
 	}
 }
 
+// TestLogin_Handler_SetsSessionCookie is CI-4's core assertion: the four
+// attributes docs/DECISIONS.md § "Autenticação: modo duplo" commits to,
+// on the same response TestLogin_Handler_ValidCredentials already proves
+// carries an unchanged body — this is the "the cookie is additive, not a
+// replacement" half of that guarantee, not a substitute for it.
+func TestLogin_Handler_SetsSessionCookie(t *testing.T) {
+	expiresAt := time.Now().Add(2 * time.Hour)
+	svc := &fakeService{
+		authenticateFn: func(email, _ string) (User, error) { return User{ID: "u1", Email: email}, nil },
+		createSessionFn: func(userID string) (string, time.Time, error) {
+			return "a-real-token", expiresAt, nil
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(h.login, http.MethodPost, "/auth/login", `{"email":"user@example.com","password":"password123"}`)
+
+	cookie := findCookie(t, w, sessionCookieName)
+	if cookie.Value != "a-real-token" {
+		t.Errorf("cookie Value = %q, want %q — must carry the same token the body does", cookie.Value, "a-real-token")
+	}
+	if !cookie.HttpOnly {
+		t.Error("cookie HttpOnly = false, want true")
+	}
+	if !cookie.Secure {
+		t.Error("cookie Secure = false, want true (cookieInsecure is false in this test)")
+	}
+	if cookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("cookie SameSite = %v, want SameSiteLaxMode", cookie.SameSite)
+	}
+	if cookie.Path != "/" {
+		t.Errorf("cookie Path = %q, want %q", cookie.Path, "/")
+	}
+	// Allow a couple of seconds of slack for the time between expiresAt
+	// being computed above and the cookie being written.
+	if cookie.MaxAge < 7195 || cookie.MaxAge > 7200 {
+		t.Errorf("cookie MaxAge = %d, want close to 7200 (2h)", cookie.MaxAge)
+	}
+}
+
+func TestLogin_Handler_CookieInsecure_DropsSecureAttribute(t *testing.T) {
+	svc := &fakeService{
+		authenticateFn: func(email, _ string) (User, error) { return User{ID: "u1", Email: email}, nil },
+	}
+	h := newHandlerWithFakeCookieMode(svc, true)
+
+	w := do(h.login, http.MethodPost, "/auth/login", `{"email":"user@example.com","password":"password123"}`)
+
+	cookie := findCookie(t, w, sessionCookieName)
+	if cookie.Secure {
+		t.Error("cookie Secure = true, want false — cookieInsecure(true) must drop it for http://localhost in dev")
+	}
+	if !cookie.HttpOnly {
+		t.Error("cookieInsecure must only affect Secure, not HttpOnly")
+	}
+}
+
+// findCookie decodes every Set-Cookie header on w and returns the one
+// named name, failing the test if none matches.
+func findCookie(t *testing.T, w *httptest.ResponseRecorder, name string) *http.Cookie {
+	t.Helper()
+	for _, c := range w.Result().Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("no Set-Cookie named %q in response; got %v", name, w.Result().Header.Values("Set-Cookie"))
+	return nil
+}
+
 func TestLogin_Handler_InvalidCredentials(t *testing.T) {
 	svc := &fakeService{
 		authenticateFn: func(_, _ string) (User, error) { return User{}, ErrInvalidCredentials },
@@ -232,6 +345,31 @@ func TestLogout_Handler_UsesTokenFromContext(t *testing.T) {
 	}
 }
 
+// TestLogout_Handler_ExpiresSessionCookie is the wire-level half of "the
+// server invalidates the session, and so does the browser stop sending
+// its cookie" — MaxAge < 0 is what net/http turns into the literal
+// "Max-Age=0" a browser deletes a cookie on sight for (see
+// clearSessionCookie's doc comment; MaxAge == 0, the zero value, would
+// instead omit the attribute and leave the original cookie's expiry
+// untouched).
+func TestLogout_Handler_ExpiresSessionCookie(t *testing.T) {
+	svc := &fakeService{}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req = req.WithContext(middleware.ContextWithSessionToken(req.Context(), "the-token"))
+	w := httptest.NewRecorder()
+	h.logout(w, req)
+
+	cookie := findCookie(t, w, sessionCookieName)
+	if cookie.MaxAge >= 0 {
+		t.Errorf("cookie MaxAge = %d, want negative (net/http's spelling for immediate deletion)", cookie.MaxAge)
+	}
+	if cookie.Path != "/" {
+		t.Errorf("cookie Path = %q, want %q — must match what setSessionCookie wrote or the browser keeps the original", cookie.Path, "/")
+	}
+}
+
 // --- POST /auth/logout-all ---
 
 func TestLogoutAll_Handler_UsesUserIDFromContext(t *testing.T) {
@@ -248,6 +386,25 @@ func TestLogoutAll_Handler_UsesUserIDFromContext(t *testing.T) {
 	}
 	if svc.logoutAllCalledWith != "u1" {
 		t.Errorf("logout-all called Service.LogoutAll with %q, want %q", svc.logoutAllCalledWith, "u1")
+	}
+}
+
+// TestLogoutAll_Handler_ExpiresSessionCookie mirrors
+// TestLogout_Handler_ExpiresSessionCookie — logout-all ends every
+// session, including the one that made this very request, so the
+// browser must stop sending its cookie exactly the same way.
+func TestLogoutAll_Handler_ExpiresSessionCookie(t *testing.T) {
+	svc := &fakeService{}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout-all", nil)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.logoutAll(w, req)
+
+	cookie := findCookie(t, w, sessionCookieName)
+	if cookie.MaxAge >= 0 {
+		t.Errorf("cookie MaxAge = %d, want negative (net/http's spelling for immediate deletion)", cookie.MaxAge)
 	}
 }
 
@@ -294,6 +451,85 @@ func TestMe_Handler_UsesUserIDFromContext(t *testing.T) {
 	}
 }
 
+// TestMe_Handler_IncludesAttachmentsEnabled proves attachments_enabled on
+// GET /auth/me reflects whatever NewHandler was constructed with — a
+// deployment-wide fact (see cmd/api's attachmentsEnabled(cfg)), not
+// anything about the specific User returned, which is why both cases
+// below reuse the same fakeService.
+func TestMe_Handler_IncludesAttachmentsEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{name: "enabled", want: true},
+		{name: "disabled", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &fakeService{
+				getUserFn: func(id string) (User, error) { return User{ID: id, Email: "user@example.com"}, nil },
+			}
+			h := newHandlerWithFakeAttachments(svc, false, tt.want)
+
+			req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+			req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+			w := httptest.NewRecorder()
+			h.me(w, req)
+
+			var got meResponse
+			decodeBody(t, w, &got)
+			if got.AttachmentsEnabled != tt.want {
+				t.Errorf("me body attachments_enabled = %v, want %v", got.AttachmentsEnabled, tt.want)
+			}
+		})
+	}
+}
+
+// --- GET /auth/csrf-token ---
+
+// TestCSRFToken_Handler_ReturnsToken drives the request through a real
+// csrf.Protector.Middleware first, the same way cmd/api's newServer does
+// via middleware.CSRF (internal/middleware/csrf.go) — csrf.Token only
+// finds a value once that has happened, so testing h.csrfToken in
+// isolation would prove nothing about the actual guarantee.
+func TestCSRFToken_Handler_ReturnsToken(t *testing.T) {
+	h := newHandlerWithFake(&fakeService{})
+	protector := testCSRFProtector
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/csrf-token", nil)
+	w := httptest.NewRecorder()
+	protector.Middleware(http.HandlerFunc(h.csrfToken)).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("csrf-token status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var got csrfTokenResponse
+	decodeBody(t, w, &got)
+	if got.CSRFToken == "" {
+		t.Error("csrf-token body csrf_token is empty, want a real token")
+	}
+}
+
+// TestCSRFToken_Handler_MiddlewareNotWired_Returns500 is the wiring-bug
+// case csrfToken's own doc comment describes: called directly, without
+// csrf.Protector.Middleware in front of it, csrf.Token reports ok=false
+// and the handler must fail loudly (500, logged) rather than silently
+// returning an empty token that would make every subsequent write fail
+// CSRF with no clue why.
+func TestCSRFToken_Handler_MiddlewareNotWired_Returns500(t *testing.T) {
+	h := newHandlerWithFake(&fakeService{})
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/csrf-token", nil)
+	w := httptest.NewRecorder()
+	h.csrfToken(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("csrf-token without middleware: status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+}
+
 // --- RegisterRoutes ---
 
 func TestRegisterRoutes_PublicAndProtectedRoutes(t *testing.T) {
@@ -318,6 +554,16 @@ func TestRegisterRoutes_PublicAndProtectedRoutes(t *testing.T) {
 	// limiting, and the limiter that guards these routes in production is
 	// composed in cmd/api (see newServer) rather than here.
 	noopRateLimit := func(next http.Handler) http.Handler { return next }
+	// No CSRF middleware wrapping mux here, deliberately: since CI-6, the
+	// CSRF gate is a global concern composed once in cmd/api's newServer
+	// (see internal/middleware/csrf.go), not something RegisterRoutes
+	// wires per route anymore — mixing it into this test would make a
+	// requireAuth-wiring failure and a CSRF-gate failure indistinguishable
+	// from each other. GET /auth/csrf-token's own behavior (not gated by
+	// requireAuth, 500 when no Protector.Middleware ran) is covered by
+	// TestCSRFToken_Handler_ReturnsToken and
+	// TestCSRFToken_Handler_MiddlewareNotWired_Returns500 instead, so it
+	// has no row in the table below.
 	h.RegisterRoutes(mux, RequireAuth(svc, slog.New(slog.NewTextHandler(io.Discard, nil))), noopRateLimit)
 
 	cases := []struct {

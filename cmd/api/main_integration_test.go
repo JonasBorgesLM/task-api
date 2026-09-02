@@ -8,10 +8,13 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/JonasBorgesLM/moat/csrf"
 
 	"github.com/JonasBorgesLM/task-api/internal/config"
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
@@ -64,6 +67,29 @@ func testConfig() config.Config {
 		// use. The tests that exercise the cap itself set their own
 		// tight value.
 		AuthMaxSessionsPerUser: 1000,
+
+		// Another zero-value trap, new with CI-5: csrf.New rejects
+		// anything shorter than its own MinSecretLen (32 bytes), so a
+		// bare config.Config{} would make every test in this file fail
+		// in newServer before reaching whatever it actually means to
+		// test. The tests that exercise this rejection themselves
+		// (TestNewServer_RejectsMissingCSRFSecret,
+		// TestNewServer_RejectsShortCSRFSecret) start from this same
+		// testConfig() and then deliberately override the field back
+		// down.
+		CSRFSecret: "test-only-csrf-secret-not-for-production-use-000000",
+
+		// The CSRF cookie's default name carries the __Host- prefix,
+		// which a spec-compliant cookie jar (net/http/cookiejar, and any
+		// real browser) refuses to send back over plain HTTP — see
+		// moat/csrf's own doc comment on the prefix. Every server this
+		// file builds is httptest.NewServer, never TLS, so without this
+		// the cookie a jar-backed test client captures from GET
+		// /auth/csrf-token would silently never come back on the
+		// following request, and every CSRF-gated call (POST
+		// /auth/register, /auth/login — see registerAndLoginAs) would
+		// fail with 403 for a reason invisible from the test's own code.
+		CookieInsecure: true,
 	}
 }
 
@@ -108,10 +134,25 @@ func registerAndLogin(t *testing.T, srv *httptest.Server) string {
 // single identity.
 func registerAndLoginAs(t *testing.T, srv *httptest.Server, email string) string {
 	t.Helper()
+	_, token := registerAndLoginWithClient(t, srv, email)
+	return token
+}
+
+// registerAndLoginWithClient is registerAndLoginAs, but also returns the
+// *http.Client used to do it. That client's cookie jar carries both the
+// session cookie login set (see user.Handler.login) and the CSRF cookie
+// Rotate replaced it with on success — letting a caller drive a further
+// cookie-authenticated request exactly the way a browser would, without
+// ever touching Authorization. Tests that only need the bearer token use
+// registerAndLoginAs instead.
+func registerAndLoginWithClient(t *testing.T, srv *httptest.Server, email string) (*http.Client, string) {
+	t.Helper()
 
 	body := `{"email":"` + email + `","password":"password12345"}`
+	client := csrfClient(t, srv)
+	token := fetchCSRFToken(t, client, srv)
 
-	regResp, err := srv.Client().Post(srv.URL+apiPrefix+"/auth/register", "application/json", strings.NewReader(body))
+	regResp, err := client.Do(csrfPost(t, srv, token, apiPrefix+"/auth/register", body))
 	if err != nil {
 		t.Fatalf("POST /auth/register: %v", err)
 	}
@@ -121,7 +162,11 @@ func registerAndLoginAs(t *testing.T, srv *httptest.Server, email string) string
 		t.Fatalf("POST /auth/register status = %d, body = %s", regResp.StatusCode, respBody)
 	}
 
-	loginResp, err := srv.Client().Post(srv.URL+apiPrefix+"/auth/login", "application/json", strings.NewReader(body))
+	// The same CSRF token still works here: register doesn't authenticate
+	// anyone, so it never calls csrf.Protector.Rotate — only a successful
+	// login does (see user.Handler.login's doc comment), and that hasn't
+	// happened yet.
+	loginResp, err := client.Do(csrfPost(t, srv, token, apiPrefix+"/auth/login", body))
 	if err != nil {
 		t.Fatalf("POST /auth/login: %v", err)
 	}
@@ -137,7 +182,83 @@ func registerAndLoginAs(t *testing.T, srv *httptest.Server, email string) string
 	if err := json.NewDecoder(loginResp.Body).Decode(&loginBody); err != nil {
 		t.Fatalf("decode login response: %v", err)
 	}
-	return loginBody.Token
+	return client, loginBody.Token
+}
+
+// csrfClient returns an *http.Client backed by a real cookie jar, so a
+// CSRF cookie minted by one response (e.g. GET /auth/csrf-token) is sent
+// back automatically on the next request to srv — the same thing a
+// browser gives an SPA for free, and what every mutating request without
+// Authorization needs since CI-6 (see internal/middleware/csrf.go and
+// docs/DECISIONS.md § "Autenticação: modo duplo"). srv.Client() has no
+// jar by default, which is why every caller of POST /auth/register or
+// /auth/login (the two routes that can never carry Authorization —
+// there is no session yet) needs one of these instead of the plain
+// srv.Client() this file used before CI-6. Already-authenticated
+// requests are unaffected: Authorization skips CSRF entirely, so
+// authedRequest below still needs no cookie jar at all.
+func csrfClient(t *testing.T, srv *httptest.Server) *http.Client {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New: %v", err)
+	}
+	c := *srv.Client()
+	c.Jar = jar
+	return &c
+}
+
+// fetchCSRFToken drives GET /auth/csrf-token through client (which must
+// carry a cookie jar — see csrfClient) and returns the token. The
+// matching CSRF cookie lands in client's jar as a side effect of the
+// request and is what csrfPost's caller relies on client.Do sending back
+// automatically.
+func fetchCSRFToken(t *testing.T, client *http.Client, srv *httptest.Server) string {
+	t.Helper()
+
+	resp, err := client.Get(srv.URL + apiPrefix + "/auth/csrf-token")
+	if err != nil {
+		t.Fatalf("GET /auth/csrf-token: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET /auth/csrf-token status = %d, body = %s", resp.StatusCode, respBody)
+	}
+
+	var respBody struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
+		t.Fatalf("decode /auth/csrf-token response: %v", err)
+	}
+	if respBody.CSRFToken == "" {
+		t.Fatal("GET /auth/csrf-token: empty csrf_token")
+	}
+	return respBody.CSRFToken
+}
+
+// csrfPost builds a POST request carrying token in the header CI-6's
+// gate reads (csrf.DefaultHeaderName) — the CSRF cookie itself is not
+// set here; it must already be in the *http.Client's jar (see
+// csrfClient/fetchCSRFToken) for client.Do to attach it. Origin is set
+// to srv.URL itself: without WithTrustedOrigins configured (see
+// newServer — most of this file's tests use testConfig(), which leaves
+// CORSAllowedOrigins unset), csrf.Protector.Middleware compares Origin
+// against the request's own Host, so this is the one value that is
+// always correct here — a real browser making a same-origin request
+// sends exactly this.
+func csrfPost(t *testing.T, srv *httptest.Server, token, path, body string) *http.Request {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build POST %s request: %v", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(csrf.DefaultHeaderName, token)
+	req.Header.Set("Origin", srv.URL)
+	return req
 }
 
 // authedRequest builds an http.Request carrying the given bearer token.
@@ -287,11 +408,21 @@ func TestIntegration_TaskLifecycle(t *testing.T) {
 // reached with no Authorization header is rejected before it ever reaches
 // task.Handler — the real user.RequireAuth middleware, wired exactly as
 // newServer wires it in production.
+// This test's request deliberately carries a valid CSRF token/cookie
+// (see csrfPost) even though it has nothing to do with CSRF: without one,
+// a POST with no Authorization is rejected by the CSRF gate before ever
+// reaching requireAuth (see internal/middleware/csrf.go — the same gate
+// login/register go through), which would make this test observe CSRF's
+// 403 instead of the 401 it exists to pin. Giving it valid CSRF context
+// isolates the one thing this test is actually about.
 func TestIntegration_CreateTask_RequiresAuth(t *testing.T) {
 	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
 	defer srv.Close()
 
-	resp, err := srv.Client().Post(srv.URL+apiPrefix+"/tasks", "application/json", strings.NewReader(`{"title":"T"}`))
+	client := csrfClient(t, srv)
+	token := fetchCSRFToken(t, client, srv)
+
+	resp, err := client.Do(csrfPost(t, srv, token, apiPrefix+"/tasks", `{"title":"T"}`))
 	if err != nil {
 		t.Fatalf("POST /tasks: %v", err)
 	}
@@ -540,6 +671,12 @@ func TestIntegration_CORS_Enabled_AllowedOrigin_ActualRequest(t *testing.T) {
 	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "http://localhost:8082" {
 		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, "http://localhost:8082")
 	}
+	// CI-7: without this, a browser's fetch(..., {credentials: "include"})
+	// — what the cookie-authenticated flows in the TestIntegration_CSRF_*
+	// tests above rely on — would refuse to expose the response at all.
+	if got := resp.Header.Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("Access-Control-Allow-Credentials = %q, want %q", got, "true")
+	}
 }
 
 // TestIntegration_CORS_Enabled_PreflightForRegisteredRoute is the exact
@@ -608,6 +745,170 @@ func TestIntegration_CORS_Enabled_DisallowedOrigin_PreflightStill404s(t *testing
 
 	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
 		t.Errorf("disallowed origin got Access-Control-Allow-Origin = %q, want none", got)
+	}
+}
+
+// --- CSRF (CI-6 of docs/changes/dual-auth-mode/plan.md) ---
+//
+// These drive internal/middleware.CSRF through the real global chain
+// newServer composes, the same reason the CORS tests above do — what is
+// worth pinning here is that the gate is mounted where it claims to be
+// and reads what it claims to read, not the Protector library's own
+// Origin/token logic (that is moat/csrf's own test suite's job).
+
+// TestIntegration_CSRF_BearerWrite_NoCSRFTokenOrCookie_Succeeds is the
+// regression this whole design exists to protect: every curl/service
+// example in the README authenticates with Authorization and nothing
+// else, and none of them may start failing.
+func TestIntegration_CSRF_BearerWrite_NoCSRFTokenOrCookie_Succeeds(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	token := registerAndLoginAs(t, srv, "csrf-bearer@example.com")
+
+	// srv.Client() here, deliberately not a csrfClient: no cookie jar, no
+	// CSRF header, no Origin — exactly what a curl call looks like.
+	resp, err := srv.Client().Do(authedRequest(t, token, http.MethodPost, srv.URL+apiPrefix+"/tasks", `{"title":"from a Bearer client"}`))
+	if err != nil {
+		t.Fatalf("POST /tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST /tasks with Authorization, no CSRF token: status = %d, body = %s, want %d", resp.StatusCode, body, http.StatusCreated)
+	}
+}
+
+// TestIntegration_CSRF_CookieWrite_NoToken_Returns403 is the other half
+// of the design: a mutating request with no Authorization is assumed to
+// be a browser and must prove it holds the CSRF token, or it is rejected
+// — this is what actually closes the vulnerability the original
+// header-only decision (docs/DECISIONS.md) existed to avoid reopening.
+func TestIntegration_CSRF_CookieWrite_NoToken_Returns403(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	// client's jar carries the session cookie from login — this request
+	// authenticates by cookie alone, no Authorization at all.
+	client, _ := registerAndLoginWithClient(t, srv, "csrf-cookie-no-token@example.com")
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+apiPrefix+"/tasks", strings.NewReader(`{"title":"should be refused"}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", srv.URL) // isolates the token check specifically, not Origin
+	// Deliberately no X-CSRF-Token header.
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST /tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("cookie-authenticated POST /tasks with no CSRF token: status = %d, body = %s, want %d", resp.StatusCode, body, http.StatusForbidden)
+	}
+}
+
+// TestIntegration_CSRF_CookieWrite_WithToken_Succeeds is
+// TestIntegration_CSRF_CookieWrite_NoToken_Returns403's positive case: the
+// same cookie-authenticated request succeeds once it carries the token
+// that matches the client's (post-login, post-Rotate) CSRF cookie.
+func TestIntegration_CSRF_CookieWrite_WithToken_Succeeds(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	client, _ := registerAndLoginWithClient(t, srv, "csrf-cookie-with-token@example.com")
+	token := fetchCSRFToken(t, client, srv)
+
+	resp, err := client.Do(csrfPost(t, srv, token, apiPrefix+"/tasks", `{"title":"should succeed"}`))
+	if err != nil {
+		t.Fatalf("POST /tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("cookie-authenticated POST /tasks with a valid CSRF token: status = %d, body = %s, want %d", resp.StatusCode, body, http.StatusCreated)
+	}
+}
+
+// TestIntegration_CSRF_Login_NoToken_Returns403 is the "login CSRF" gap
+// (see docs/DECISIONS.md § "Autenticação: modo duplo") actually closed:
+// login itself, not just already-authenticated cookie routes, requires
+// the token.
+func TestIntegration_CSRF_Login_NoToken_Returns403(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	client := csrfClient(t, srv)
+	body := `{"email":"csrf-login-no-token@example.com","password":"password12345"}`
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+apiPrefix+"/auth/login", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", srv.URL)
+	// Deliberately no X-CSRF-Token header, and no prior GET
+	// /auth/csrf-token to mint a cookie either.
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST /auth/login: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST /auth/login with no CSRF token: status = %d, body = %s, want %d", resp.StatusCode, body, http.StatusForbidden)
+	}
+}
+
+// TestIntegration_CSRF_TokenIssuedBeforeLogin_RejectedAfterLogin proves
+// user.Handler.login's call to csrf.Protector.Rotate actually runs and
+// actually changes the token that verifies: a token minted before login
+// must stop working immediately afterward, or Rotate's entire purpose —
+// closing the fixation window described in its own doc comment — is
+// decorative.
+func TestIntegration_CSRF_TokenIssuedBeforeLogin_RejectedAfterLogin(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	const email = "csrf-rotate@example.com"
+	const password = "password12345"
+	body := `{"email":"` + email + `","password":"` + password + `"}`
+
+	client := csrfClient(t, srv)
+	preLoginToken := fetchCSRFToken(t, client, srv)
+
+	regResp, err := client.Do(csrfPost(t, srv, preLoginToken, apiPrefix+"/auth/register", body))
+	if err != nil {
+		t.Fatalf("POST /auth/register: %v", err)
+	}
+	regResp.Body.Close()
+	if regResp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /auth/register status = %d, want %d", regResp.StatusCode, http.StatusCreated)
+	}
+
+	loginResp, err := client.Do(csrfPost(t, srv, preLoginToken, apiPrefix+"/auth/login", body))
+	if err != nil {
+		t.Fatalf("POST /auth/login: %v", err)
+	}
+	loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /auth/login status = %d, want %d", loginResp.StatusCode, http.StatusOK)
+	}
+
+	// client's jar now holds the cookie Rotate replaced preLoginToken's
+	// cookie with — presenting preLoginToken alongside it must fail.
+	resp, err := client.Do(csrfPost(t, srv, preLoginToken, apiPrefix+"/tasks", `{"title":"should be refused"}`))
+	if err != nil {
+		t.Fatalf("POST /tasks: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST /tasks with the pre-login CSRF token: status = %d, body = %s, want %d — Rotate should have invalidated it", resp.StatusCode, respBody, http.StatusForbidden)
 	}
 }
 
@@ -741,7 +1042,15 @@ func TestIntegration_RateLimit_AuthRoutesHaveTheirOwnTier(t *testing.T) {
 
 	const body = `{"email":"nobody@example.com","password":"wrong-password-here"}`
 
-	first, err := srv.Client().Post(srv.URL+apiPrefix+"/auth/login", "application/json", strings.NewReader(body))
+	// CSRF (checked before either rate-limit tier — see
+	// internal/middleware/csrf.go's position in newServer's chain) sits
+	// in front of both calls below. One token/cookie pair covers both:
+	// the credentials are wrong, so login never authenticates and never
+	// rotates it.
+	client := csrfClient(t, srv)
+	token := fetchCSRFToken(t, client, srv)
+
+	first, err := client.Do(csrfPost(t, srv, token, apiPrefix+"/auth/login", body))
 	if err != nil {
 		t.Fatalf("first POST /auth/login: %v", err)
 	}
@@ -750,7 +1059,7 @@ func TestIntegration_RateLimit_AuthRoutesHaveTheirOwnTier(t *testing.T) {
 		t.Fatalf("first POST /auth/login = %d, want 401", first.StatusCode)
 	}
 
-	second, err := srv.Client().Post(srv.URL+apiPrefix+"/auth/login", "application/json", strings.NewReader(body))
+	second, err := client.Do(csrfPost(t, srv, token, apiPrefix+"/auth/login", body))
 	if err != nil {
 		t.Fatalf("second POST /auth/login: %v", err)
 	}
@@ -936,6 +1245,46 @@ func TestNewServer_RejectsDangerousTrustedProxies(t *testing.T) {
 		}
 		_ = srv
 		t.Fatal("newServer() error = nil, want a refusal to trust the default route")
+	}
+}
+
+// TestNewServer_RejectsMissingCSRFSecret and
+// TestNewServer_RejectsShortCSRFSecret pin CI-5's design: config.Load
+// deliberately does not validate CSRF_SECRET (see the comment on
+// Config.CSRFSecret's assignment there), so csrf.New — called here, in
+// newServer — is the actual, only place an empty or too-short value is
+// caught, at startup, never at request time.
+func TestNewServer_RejectsMissingCSRFSecret(t *testing.T) {
+	cfg := testConfig()
+	cfg.CSRFSecret = ""
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, closeAll, err := newServer(ctx, cfg, discardLogger(), nil)
+	if err == nil {
+		if closeAll != nil {
+			closeAll()
+		}
+		_ = srv
+		t.Fatal("newServer() error = nil, want a refusal to start without CSRF_SECRET")
+	}
+}
+
+func TestNewServer_RejectsShortCSRFSecret(t *testing.T) {
+	cfg := testConfig()
+	cfg.CSRFSecret = "too-short"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, closeAll, err := newServer(ctx, cfg, discardLogger(), nil)
+	if err == nil {
+		if closeAll != nil {
+			closeAll()
+		}
+		_ = srv
+		t.Fatal("newServer() error = nil, want a refusal to start with a CSRF_SECRET under moat/csrf.MinSecretLen")
 	}
 }
 
@@ -1310,6 +1659,19 @@ func TestIntegration_CrossOriginFlow(t *testing.T) {
 	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
 	defer srv.Close()
 
+	// A jar-backed client, not srv.Client(): register and login below
+	// carry no Authorization (there is no session yet), so both go
+	// through CSRF — which needs the cookie GET /auth/csrf-token mints
+	// sent back automatically, the same way a real browser would (see
+	// csrfClient). cfg.CORSAllowedOrigins above is also what makes
+	// csrf.New trust frontendOrigin's Origin header at all — see the
+	// WithTrustedOrigins comment in newServer; without it, this test's
+	// simulated frontend origin would never match the httptest server's
+	// real host, and every mutating request below would be rejected
+	// regardless of a valid CSRF token.
+	client := csrfClient(t, srv)
+	csrfTok := fetchCSRFToken(t, client, srv)
+
 	// A browser sends Origin on every cross-origin request, and refuses
 	// to expose the response to the script unless the reply allows it.
 	// Every request below carries it, and every response is checked.
@@ -1331,8 +1693,13 @@ func TestIntegration_CrossOriginFlow(t *testing.T) {
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
+		// Harmless when Authorization is also set (Bearer skips CSRF
+		// entirely) or on a safe method (never checked) — set
+		// unconditionally rather than threading a third parameter
+		// through every call site below.
+		req.Header.Set(csrf.DefaultHeaderName, csrfTok)
 
-		resp, err := srv.Client().Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("%s %s: %v", method, path, err)
 		}
@@ -1439,7 +1806,9 @@ func TestIntegration_LogoutAll_InvalidatesEverySession(t *testing.T) {
 
 	tokenA := registerAndLoginAs(t, srv, email)
 
-	loginResp, err := srv.Client().Post(srv.URL+apiPrefix+"/auth/login", "application/json", strings.NewReader(body))
+	client := csrfClient(t, srv)
+	csrfTok := fetchCSRFToken(t, client, srv)
+	loginResp, err := client.Do(csrfPost(t, srv, csrfTok, apiPrefix+"/auth/login", body))
 	if err != nil {
 		t.Fatalf("second POST /auth/login: %v", err)
 	}

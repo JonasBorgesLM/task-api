@@ -62,6 +62,8 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `AUTH_SESSION_TTL` | How long a `POST /v1/auth/login` token stays valid | `24h` |
 | `AUTH_MAX_SESSIONS_PER_USER` | How many of a user's sessions stay alive at once. A login past the cap evicts that user's oldest session rather than being refused — see `docs/DECISIONS.md` | `10` |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call this API. Unset ⇒ CORS disabled | *(unset)* |
+| `CSRF_SECRET` | Signs the CSRF token for cookie-authenticated writes — see `docs/DECISIONS.md` § "Autenticação: modo duplo". Only `cmd/api` needs it; must be ≥32 bytes and identical across every instance | *(none — required for `cmd/api` to build its CSRF protector; `cmd/migrate`/`cmd/seed` ignore it)* |
+| `COOKIE_INSECURE` | Drops `Secure` from the session and CSRF cookies, for `http://localhost` in dev. Never set in production | `false` |
 | `HSTS_MAX_AGE` | `Strict-Transport-Security` max-age, as a Go duration (e.g. `8760h`). `0` omits the header entirely, for a permanently-plaintext deployment. Never sent with `includeSubDomains` or `preload` | `8760h` (1 year) |
 | `RATE_LIMIT_BURST` / `RATE_LIMIT_PER_SEC` | Global token bucket, keyed by client address, in front of every route except the health probes | `60` / `20` |
 | `AUTH_RATE_LIMIT_BURST` / `AUTH_RATE_LIMIT_PER_SEC` | Tighter bucket for `POST /v1/auth/register` and `POST /v1/auth/login` together | `10` / `0.05` |
@@ -246,11 +248,23 @@ Errors always use the same envelope, `{"error": "description of the problem"}`. 
 
 **Quick walkthrough:**
 
+`register` and `login` are the two routes that can never carry
+`Authorization` — there is no session yet — so, since the dual-auth-mode
+CSRF gate applies to any state-changing request without it (see
+`docs/DECISIONS.md` § "Autenticação: modo duplo"), both need a CSRF token
+first. Every route below that *does* carry `Authorization: Bearer` is
+unaffected and needs none of this — that path is exactly what stays
+`curl`-friendly.
+
 ```bash
-curl -s -X POST localhost:8080/v1/auth/register -H 'Content-Type: application/json' \
+CSRF_TOKEN=$(curl -s -c cookies.txt localhost:8080/v1/auth/csrf-token | jq -r .csrf_token)
+
+curl -s -b cookies.txt -X POST localhost:8080/v1/auth/register -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $CSRF_TOKEN" -H 'Origin: http://localhost:8080' \
   -d '{"email":"alice@example.com","password":"correct horse battery staple"}'
 
-TOKEN=$(curl -s -X POST localhost:8080/v1/auth/login -H 'Content-Type: application/json' \
+TOKEN=$(curl -s -b cookies.txt -X POST localhost:8080/v1/auth/login -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $CSRF_TOKEN" -H 'Origin: http://localhost:8080' \
   -d '{"email":"alice@example.com","password":"correct horse battery staple"}' | jq -r .token)
 
 ID=$(curl -s -X POST localhost:8080/v1/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
@@ -269,3 +283,4 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 - **[docs/DECISIONS.md](docs/DECISIONS.md)** — the decisions a future change could undo without noticing, stated as decisions rather than as descriptions: why auth is a header and not a cookie, why attachment bytes are written before their metadata row, why the content-type allow-list ignores what the client declared, and the deploy topology the rate limiter's design assumes. Read it before implementing a backlog issue; if an issue seems to contradict it, ask rather than choose.
 - **[docs/openapi.yaml](docs/openapi.yaml)** — the full API contract.
 - **[CLAUDE.md](CLAUDE.md)** — conventions and rules for anyone (human or agent) changing this codebase.
+- **[web/README.md](web/README.md)** — the SPA frontend (Vite + React + TypeScript); versioned and released with the rest of this repo, not separately.

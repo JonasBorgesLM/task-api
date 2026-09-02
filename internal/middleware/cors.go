@@ -1,6 +1,10 @@
 package middleware
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/JonasBorgesLM/moat/csrf"
+)
 
 // corsAllowedHeaders and corsAllowedMethods are sent on every preflight
 // response CORS answers. Authorization is listed because bearer tokens
@@ -8,9 +12,15 @@ import "net/http"
 // preflight check rejects the actual request before this API ever sees
 // it. X-Request-Id is listed so a browser client may set it explicitly to
 // correlate its own logs with the server's (see RequestID), the same way
-// a server-to-server caller already can.
+// a server-to-server caller already can. csrf.DefaultHeaderName
+// (X-CSRF-Token) is listed for the same reason Authorization is — a
+// cookie-authenticated browser client sends the CSRF token that way (see
+// CSRF in csrf.go and docs/DECISIONS.md § "Autenticação: modo duplo"),
+// and an unlisted header fails preflight before the real request is ever
+// sent.
+var corsAllowedHeaders = "Authorization, Content-Type, X-Request-Id, " + csrf.DefaultHeaderName
+
 const (
-	corsAllowedHeaders = "Authorization, Content-Type, X-Request-Id"
 	corsAllowedMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 	corsMaxAge         = "600"
 )
@@ -39,6 +49,17 @@ const (
 // its OPTIONS preflight, or a same-origin-policy failure on the browser
 // side reading the actual response) — CORS being enabled for one origin
 // never widens what any other origin can do.
+//
+// Every allowed-origin response also carries
+// Access-Control-Allow-Credentials: true, which is what lets a browser
+// actually send and read the session cookie (see docs/DECISIONS.md §
+// "Autenticação: modo duplo (cookie httpOnly + Bearer)") on a
+// cross-origin request — without it, a fetch made with credentials:
+// "include" fails even though the server would have accepted the cookie.
+// This is safe precisely because the origin is never "*": a browser
+// itself refuses a response that combines a wildcard origin with
+// credentials allowed, so this codebase only ever has to keep not doing
+// that, which the allow-list above already guarantees.
 func CORS(allowedOrigins []string) Middleware {
 	allowed := make(map[string]bool, len(allowedOrigins))
 	for _, origin := range allowedOrigins {
@@ -73,6 +94,18 @@ func CORS(allowedOrigins []string) Middleware {
 			}
 
 			w.Header().Set("Access-Control-Allow-Origin", origin)
+
+			// Set on every response to an allowed origin — preflight and
+			// actual alike, both are required for a browser to complete a
+			// credentialed request (fetch(..., {credentials: "include"}),
+			// what a cookie-authenticated frontend uses). Safe to send
+			// unconditionally here specifically because this branch is only
+			// ever reached for an origin already on the explicit allow-list
+			// — Access-Control-Allow-Origin is never "*" in this codebase
+			// (see the doc comment above), and a browser refuses the
+			// combination of a wildcard origin with credentials allowed. If
+			// that ever changed, this header would have to change with it.
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 
 			if r.Method == http.MethodOptions {
 				w.Header().Set("Access-Control-Allow-Methods", corsAllowedMethods)

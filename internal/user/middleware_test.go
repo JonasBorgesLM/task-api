@@ -40,6 +40,16 @@ func (p *protectedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // middleware logged.
 func serveWithAuth(t *testing.T, svc sessionValidator, authHeader string) (*httptest.ResponseRecorder, *protectedHandler, *bytes.Buffer) {
 	t.Helper()
+	return serveWithCredentials(t, svc, authHeader, "")
+}
+
+// serveWithCredentials is serveWithAuth generalized to also attach a
+// session cookie, for the credentialSource precedence/cookie tests below.
+// cookieValue == "" attaches no cookie at all — see
+// TestRequireAuth_CookiePresentButEmpty_TreatedAsAbsent for the distinct
+// case of a cookie that is present with an empty value.
+func serveWithCredentials(t *testing.T, svc sessionValidator, authHeader, cookieValue string) (*httptest.ResponseRecorder, *protectedHandler, *bytes.Buffer) {
+	t.Helper()
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
@@ -50,6 +60,9 @@ func serveWithAuth(t *testing.T, svc sessionValidator, authHeader string) (*http
 	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
+	}
+	if cookieValue != "" {
+		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cookieValue})
 	}
 
 	w := httptest.NewRecorder()
@@ -273,5 +286,140 @@ func TestRequireAuth_ValidToken_PopulatesContext(t *testing.T) {
 	}
 	if logBuf.Len() != 0 {
 		t.Errorf("a successful auth must not be logged, got: %q", logBuf.String())
+	}
+}
+
+// --- credentialSource: cookie, and precedence against Authorization ---
+//
+// See docs/DECISIONS.md § "Autenticação: modo duplo (cookie httpOnly +
+// Bearer)" for why the cookie exists at all, and CI-3 of
+// docs/changes/dual-auth-mode/plan.md for why Authorization wins when
+// both are present.
+
+func TestRequireAuth_CookieOnly_Authenticates(t *testing.T) {
+	const (
+		wantUserID = "11111111-1111-4111-8111-111111111111"
+		wantToken  = "a-valid-cookie-token"
+	)
+	svc := &fakeService{
+		validateTokenFn: func(token string) (string, error) {
+			if token != wantToken {
+				t.Errorf("ValidateToken got token %q, want %q", token, wantToken)
+			}
+			return wantUserID, nil
+		},
+	}
+
+	w, next, logBuf := serveWithCredentials(t, svc, "", wantToken)
+
+	if !next.called {
+		t.Fatal("wrapped handler was not reached for a valid cookie")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !next.userIDOK || next.gotUserID != wantUserID {
+		t.Errorf("user ID in context = %q (ok=%v), want %q", next.gotUserID, next.userIDOK, wantUserID)
+	}
+	if !next.sessionOK || next.gotToken != wantToken {
+		t.Errorf("session token in context = %q (ok=%v), want %q", next.gotToken, next.sessionOK, wantToken)
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("a successful auth must not be logged, got: %q", logBuf.String())
+	}
+}
+
+func TestRequireAuth_CookieUnknownOrExpired_Returns401(t *testing.T) {
+	// The same ErrNotFound handling Bearer already gets — the credential
+	// source must not change how a bad token is reported.
+	svc := &fakeService{
+		validateTokenFn: func(string) (string, error) { return "", ErrNotFound },
+	}
+
+	w, next, _ := serveWithCredentials(t, svc, "", "some-cookie-token")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+	if next.called {
+		t.Error("wrapped handler must not be reached for an invalid cookie token")
+	}
+}
+
+// TestRequireAuth_HeaderAndCookieBothPresent_HeaderWins is the
+// precedence rule CI-3 introduces, tested explicitly rather than argued:
+// Authorization is what actually reaches ValidateToken, not the cookie,
+// when a request somehow carries both.
+func TestRequireAuth_HeaderAndCookieBothPresent_HeaderWins(t *testing.T) {
+	const (
+		headerToken = "header-token"
+		cookieToken = "cookie-token"
+	)
+	var gotToken string
+	svc := &fakeService{
+		validateTokenFn: func(token string) (string, error) {
+			gotToken = token
+			return "some-user-id", nil
+		},
+	}
+
+	w, next, _ := serveWithCredentials(t, svc, "Bearer "+headerToken, cookieToken)
+
+	if !next.called {
+		t.Fatal("wrapped handler was not reached")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if gotToken != headerToken {
+		t.Errorf("ValidateToken called with %q, want the header token %q — Authorization must win over the cookie", gotToken, headerToken)
+	}
+	if next.gotToken != headerToken {
+		t.Errorf("session token in context = %q, want the header token %q", next.gotToken, headerToken)
+	}
+}
+
+// TestRequireAuth_CookiePresentButEmpty_TreatedAsAbsent and
+// TestRequireAuth_GarbledCookieHeader_TreatedAsAbsent pin "cookie
+// malformado/vazio tratado como ausente (não gera 500)" from CI-3's plan
+// — neither reaches ValidateToken at all, the same way a missing
+// Authorization header never did.
+func TestRequireAuth_CookiePresentButEmpty_TreatedAsAbsent(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	next := &protectedHandler{}
+	handler := RequireAuth(&fakeService{}, logger)(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: ""})
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+	if next.called {
+		t.Error("wrapped handler must not be reached with an empty cookie value")
+	}
+}
+
+func TestRequireAuth_GarbledCookieHeader_TreatedAsAbsent(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	next := &protectedHandler{}
+	handler := RequireAuth(&fakeService{}, logger)(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set("Cookie", ";;;not a valid cookie header;;;")
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d — a garbled Cookie header must not panic or 500", w.Code, http.StatusUnauthorized)
+	}
+	if next.called {
+		t.Error("wrapped handler must not be reached with a garbled Cookie header")
 	}
 }

@@ -1,0 +1,153 @@
+/*
+ * Design tokens — CI-3 of docs/changes/web-frontend/plan.md.
+ *
+ * Every value here is decided once, for a reason recorded inline, and
+ * every component consumes these custom properties rather than a
+ * literal color/size — see tokens.test.ts for the contrast obligation
+ * this file carries. No dark theme yet: nothing downstream needs one,
+ * and CSS custom properties make adding one later (a `[data-theme]`
+ * override block) additive, not a rewrite.
+ *
+ * Anti-requirements this palette was built against (issue #121): no
+ * generic-dashboard aesthetic, no gradient without a reason, no
+ * exaggerated shadow, no color picked without a contrast number behind
+ * it, no arbitrary spacing.
+ */
+
+:root {
+  /* ---------------------------------------------------------------
+   * Color
+   *
+   * A neutral gray scale (page/surface/text) plus one accent hue and
+   * three semantic colors (success/warning/danger). Every text/background
+   * pair below is asserted in tokens.test.ts at >= 4.5:1 (WCAG AA,
+   * normal text) — these are not estimates, they're the exact hex
+   * values that test reads and computes against.
+   * --------------------------------------------------------------- */
+  --color-bg: #ffffff;
+  /* Slightly off-white rather than a second flat white: gives cards/panels
+     a boundary against the page without needing a border on every one. */
+  --color-surface: #f8f9fb;
+  /* Divider weight only — 1.36:1 against --color-bg, deliberately light.
+     Never use this for an interactive control's boundary (an unfocused
+     TextField, a Select, a Checkbox box): WCAG 1.4.11 (Non-text Contrast)
+     requires >= 3:1 there, and this token doesn't clear it. Confirmed by
+     a second, independent read of the CI-3 Figma mirror against the real
+     WCAG contrast formula — see docs/changes/web-frontend/plan.md's CI-5
+     entry for the finding this token resolves. Use
+     --color-border-interactive for that job instead. */
+  --color-border: #d9dde3;
+  /* 3.48:1 against --color-bg, 3.31:1 against --color-surface — clears
+     the 3:1 floor with margin against either background a form control
+     might sit on. This is the only border color CI-5's primitives use
+     for an interactive control's own boundary. */
+  --color-border-interactive: #828a97;
+
+  --color-text-primary: #14181f;
+  --color-text-secondary: #4b5563;
+  /* Disabled text is exempt from the WCAG AA contrast requirement
+     (1.4.3's own carve-out for inactive UI) — deliberately lower than
+     text-secondary so a disabled control reads as unavailable at a
+     glance, not just as another shade of body text. */
+  --color-text-disabled: #9aa1ab;
+
+  /* One accent hue, used for interactive/brand elements only — links,
+     primary buttons, focus rings. Not decorative anywhere else. */
+  --color-accent: #2857d6;
+  --color-accent-hover: #1f45ad;
+  --color-on-accent: #ffffff;
+
+  --color-success: #1d7a4c;
+  --color-warning-bg: #fff6e0;
+  --color-warning-text: #7a5600;
+  --color-danger: #b3261e;
+  --color-on-danger: #ffffff;
+
+  /* ---------------------------------------------------------------
+   * Typography
+   *
+   * System font stack, not a loaded webfont: zero network dependency,
+   * no flash of unstyled/invisible text, and it respects whatever
+   * accessibility font substitution the OS/browser already applies —
+   * all real costs a webfont would add for a utility app that has no
+   * brand-identity reason to need one.
+   * --------------------------------------------------------------- */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Modular scale, ~1.25 ratio, rounded to clean rem values. */
+  --font-size-xs: 0.75rem; /* 12px — captions, helper/error text */
+  --font-size-sm: 0.875rem; /* 14px — form labels, secondary text */
+  --font-size-base: 1rem; /* 16px — body */
+  --font-size-lg: 1.125rem; /* 18px — emphasized body */
+  --font-size-xl: 1.375rem; /* 22px — section heading */
+  --font-size-2xl: 1.75rem; /* 28px — page heading */
+  --font-size-3xl: 2.25rem; /* 36px — display, used sparingly */
+
+  --line-height-tight: 1.25; /* headings */
+  --line-height-normal: 1.5; /* body */
+  --line-height-relaxed: 1.7; /* long-form text (rare in this app) */
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* ---------------------------------------------------------------
+   * Spacing — 4px base grid. Every layout gap/padding uses one of
+   * these; no arbitrary pixel value in component CSS.
+   * --------------------------------------------------------------- */
+  --space-1: 0.25rem; /* 4px */
+  --space-2: 0.5rem; /* 8px */
+  --space-3: 0.75rem; /* 12px */
+  --space-4: 1rem; /* 16px */
+  --space-5: 1.5rem; /* 24px */
+  --space-6: 2rem; /* 32px */
+  --space-8: 3rem; /* 48px */
+  --space-10: 4rem; /* 64px */
+
+  /* ---------------------------------------------------------------
+   * Radius
+   * --------------------------------------------------------------- */
+  --radius-sm: 4px; /* inputs, small controls */
+  --radius-md: 8px; /* buttons, cards */
+  --radius-lg: 12px; /* modals, larger surfaces */
+  --radius-full: 9999px; /* pills, avatars */
+
+  /* ---------------------------------------------------------------
+   * Shadow — two, not a scale of six. Nothing in this app needs more
+   * than "resting" vs. "floating above a scrim"; a longer scale would
+   * be the "sombra exagerada" / decorative-shadow anti-pattern issue
+   * #121 explicitly rules out.
+   * --------------------------------------------------------------- */
+  --shadow-sm: 0 1px 2px rgb(20 24 31 / 6%), 0 1px 1px rgb(20 24 31 / 4%);
+  --shadow-md: 0 4px 12px rgb(20 24 31 / 12%), 0 2px 4px rgb(20 24 31 / 8%);
+
+  /* ---------------------------------------------------------------
+   * Transition — components apply these themselves behind a
+   * prefers-reduced-motion check (see CI-5); the tokens only fix the
+   * timing/easing values so every animated property in the app moves
+   * at the same pace instead of each component picking its own.
+   * --------------------------------------------------------------- */
+  --transition-fast: 120ms;
+  --transition-base: 200ms;
+  --transition-slow: 320ms;
+  --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ---------------------------------------------------------------
+   * Breakpoints — documented here as the source of truth, but a CSS
+   * custom property cannot be read inside an @media condition
+   * (`@media (min-width: var(--breakpoint-md))` is not valid CSS — the
+   * cascade that resolves custom properties runs after media-query
+   * matching, not before). Component `@media` rules hardcode these
+   * same pixel values directly; a JS-side breakpoint check (CI-7+,
+   * once one is actually needed) reads the values below rather than
+   * re-guessing them.
+   * --------------------------------------------------------------- */
+  --breakpoint-sm: 480px; /* mobile */
+  --breakpoint-md: 768px; /* tablet */
+  --breakpoint-lg: 1024px; /* desktop */
+}
