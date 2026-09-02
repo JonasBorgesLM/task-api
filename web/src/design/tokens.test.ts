@@ -65,6 +65,17 @@ const textOnBackgroundPairs: Array<[name: string, fg: string, bg: string]> = [
   ['warning-text on warning-bg', 'color-warning-text', 'color-warning-bg'],
   ['danger on bg', 'color-danger', 'color-bg'],
   ['on-danger on danger', 'color-on-danger', 'color-danger'],
+  // Status/priority pills (Fase 14) — each pair is self-contained (its
+  // own -text on its own -bg), same shape as warning-text on warning-bg
+  // above, never asserted against --color-bg since these pills carry
+  // their own background wherever they render.
+  ['status-pending text on bg', 'color-status-pending-text', 'color-status-pending-bg'],
+  ['status-in-progress text on bg', 'color-status-in-progress-text', 'color-status-in-progress-bg'],
+  ['status-done text on bg', 'color-status-done-text', 'color-status-done-bg'],
+  ['status-cancelled text on bg', 'color-status-cancelled-text', 'color-status-cancelled-bg'],
+  ['priority-low text on bg', 'color-priority-low-text', 'color-priority-low-bg'],
+  ['priority-medium text on bg', 'color-priority-medium-text', 'color-priority-medium-bg'],
+  ['priority-high text on bg', 'color-priority-high-text', 'color-priority-high-bg'],
 ]
 
 describe('design tokens: color contrast (WCAG AA)', () => {

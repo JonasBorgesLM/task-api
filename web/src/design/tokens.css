@@ -63,6 +63,32 @@
   --color-danger: #b3261e;
   --color-on-danger: #ffffff;
 
+  /* Status/priority pills (Fase 14, docs/changes/frontend-redesign) — a
+     pair of tokens each, same -bg/-text pattern as --color-warning-*
+     above, each pair >= 4.5:1 against itself (see tokens.test.ts). These
+     exist so a task's status/priority is scannable by color, not just by
+     the label text — the finding that started this phase.
+
+     status-cancelled and priority-high are deliberately different hues
+     (muted rose vs. saturated red) even though both mean "stopped"/
+     "urgent" in a loose sense — a cancelled task and a high-priority task
+     sitting in the same row must not read as the same color. */
+  --color-status-pending-bg: #eef1f6;
+  --color-status-pending-text: #3d4759;
+  --color-status-in-progress-bg: #e3edff;
+  --color-status-in-progress-text: #1d4fbf;
+  --color-status-done-bg: #e2f5ea;
+  --color-status-done-text: #1d7a4c;
+  --color-status-cancelled-bg: #f5e9ea;
+  --color-status-cancelled-text: #8a3b42;
+
+  --color-priority-low-bg: #e7f0ee;
+  --color-priority-low-text: #356b5e;
+  --color-priority-medium-bg: #fff2d6;
+  --color-priority-medium-text: #8a5a00;
+  --color-priority-high-bg: #fbe4e1;
+  --color-priority-high-text: #a23324;
+
   /* ---------------------------------------------------------------
    * Typography
    *
@@ -73,10 +99,9 @@
    * brand-identity reason to need one.
    * --------------------------------------------------------------- */
   --font-sans:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
-    sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
-  --font-mono:
-    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 
   /* Modular scale, ~1.25 ratio, rounded to clean rem values. */
   --font-size-xs: 0.75rem; /* 12px — captions, helper/error text */
