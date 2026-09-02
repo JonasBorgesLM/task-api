@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { Button } from './components/Button'
+import { PageContainer } from './components/PageContainer'
 import { LoginPage } from './features/auth/LoginPage'
 import { RegisterPage } from './features/auth/RegisterPage'
 import { RequireAuth } from './features/auth/RequireAuth'
@@ -11,12 +12,17 @@ import { TaskList } from './features/tasks/TaskList'
  * replacing CI-6's placeholder. logout/logout-all stay here rather than
  * moving into TaskList — they're session actions, not task-list
  * concerns, and TaskList has no reason to know useAuth exists.
+ *
+ * Wrapped in PageContainer (CI-2 of docs/changes/frontend-redesign) for
+ * the same deliberate content width login/register now use — CI-4 of
+ * that same phase replaces the bare paragraph+buttons below with a real
+ * app-shell; this only fixes the width in the meantime.
  */
 function AuthenticatedHome() {
   const { user, logout, logoutAll } = useAuth()
 
   return (
-    <div>
+    <PageContainer>
       <p>Logged in as {user?.email}</p>
       <Button variant="secondary" onClick={() => void logout()}>
         Log out
@@ -25,7 +31,7 @@ function AuthenticatedHome() {
         Sign out of all devices
       </Button>
       <TaskList />
-    </div>
+    </PageContainer>
   )
 }
 

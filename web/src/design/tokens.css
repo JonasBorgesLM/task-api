@@ -163,6 +163,17 @@
   --easing-standard: cubic-bezier(0.2, 0, 0, 1);
 
   /* ---------------------------------------------------------------
+   * Layout — CI-2 of docs/changes/frontend-redesign. Every screen
+   * previously had no deliberate content width at all: an accidental
+   * ~1126px column came from the leftover Vite scaffold's own #root
+   * rule (see index.css's cleanup in this same change), not from a
+   * choice anyone made. 72rem (1152px) is wide enough that a 15-task
+   * list doesn't feel cramped, narrow enough that a line of body text
+   * doesn't run edge-to-edge on a wide monitor.
+   * --------------------------------------------------------------- */
+  --content-max-width: 72rem;
+
+  /* ---------------------------------------------------------------
    * Breakpoints — documented here as the source of truth, but a CSS
    * custom property cannot be read inside an @media condition
    * (`@media (min-width: var(--breakpoint-md))` is not valid CSS — the

@@ -6,6 +6,7 @@ import { z } from 'zod'
 import type { ApiError } from '../../api/errors'
 import { classifyError } from '../../api/errors'
 import { Button } from '../../components/Button'
+import { PageContainer } from '../../components/PageContainer'
 import { TextField } from '../../components/TextField'
 import { useAuth } from './useAuth'
 
@@ -70,32 +71,34 @@ export function RegisterPage() {
   }
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} noValidate>
-      <h1>Create an account</h1>
-      <TextField
-        label="Email"
-        type="email"
-        autoComplete="email"
-        required
-        error={errors.email?.message}
-        {...register('email')}
-      />
-      <TextField
-        label="Password"
-        type="password"
-        autoComplete="new-password"
-        required
-        hint="At least 8 characters"
-        error={errors.password?.message}
-        {...register('password')}
-      />
-      {submitError && <p role="alert">{submitError}</p>}
-      <Button type="submit" loading={isSubmitting}>
-        Create account
-      </Button>
-      <p>
-        Already have an account? <Link to="/login">Log in</Link>
-      </p>
-    </form>
+    <PageContainer>
+      <form onSubmit={handleSubmit(onSubmit)} noValidate>
+        <h1>Create an account</h1>
+        <TextField
+          label="Email"
+          type="email"
+          autoComplete="email"
+          required
+          error={errors.email?.message}
+          {...register('email')}
+        />
+        <TextField
+          label="Password"
+          type="password"
+          autoComplete="new-password"
+          required
+          hint="At least 8 characters"
+          error={errors.password?.message}
+          {...register('password')}
+        />
+        {submitError && <p role="alert">{submitError}</p>}
+        <Button type="submit" loading={isSubmitting}>
+          Create account
+        </Button>
+        <p>
+          Already have an account? <Link to="/login">Log in</Link>
+        </p>
+      </form>
+    </PageContainer>
   )
 }
