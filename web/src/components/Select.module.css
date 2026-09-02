@@ -16,7 +16,25 @@
   margin-left: var(--space-1);
 }
 
+/* Positions the arrow drawn by .selectWrapper::after below, relative to
+   the select itself rather than the whole .field (which also contains
+   the label). */
+.selectWrapper {
+  position: relative;
+}
+
+/* A plain <select> is a "replaced" form control: browsers apply their
+   own native chrome (border, background gradient, dropdown arrow) that
+   author CSS only partially overrides without `appearance: none` — this
+   is what made Select visually diverge from TextField's <input> despite
+   both declaring the same border/background/padding/font (Fase 14's
+   visual audit finding). `appearance: none` hands all of that back to
+   author CSS; the triangle this rule removes is redrawn deliberately by
+   .selectWrapper::after below instead of left to whatever the browser's
+   own default happens to look like. */
 .select {
+  appearance: none;
+  -webkit-appearance: none;
   font-family: var(--font-sans);
   font-size: var(--font-size-base);
   color: var(--color-text-primary);
@@ -24,6 +42,36 @@
   border: 1px solid var(--color-border-interactive);
   border-radius: var(--radius-sm);
   padding: var(--space-2) var(--space-3);
+  /* Room for the arrow so real option text never runs under it. */
+  padding-right: var(--space-8);
+  width: 100%;
+}
+
+/* A CSS border-triangle, not an inline SVG: an SVG's fill/stroke would
+   either hardcode a literal color (the exact thing assertOnlyTokens
+   exists to catch) or lean on `currentColor` resolving inside a
+   background-image data URI, which is not reliable enough across
+   engines to depend on. A bordered triangle reads color from
+   var(--color-border-interactive) like any other declaration here. */
+.selectWrapper::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: var(--space-3);
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--color-border-interactive);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+/* Keeps the arrow visually consistent with the dimmed input box it sits
+   next to — without this, a disabled select's arrow stays full-opacity
+   while everything else inside .select fades to 0.6. */
+.selectWrapper:has(.select:disabled)::after {
+  opacity: 0.6;
 }
 
 @media (prefers-reduced-motion: no-preference) {

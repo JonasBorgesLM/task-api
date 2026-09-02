@@ -30,16 +30,18 @@ export function Select({ label, error, id, required, className, children, ...res
           </span>
         )}
       </label>
-      <select
-        {...rest}
-        id={fieldId}
-        required={required}
-        aria-invalid={error ? true : undefined}
-        aria-describedby={errorId}
-        className={[styles.select, error && styles.invalid, className].filter(Boolean).join(' ')}
-      >
-        {children}
-      </select>
+      <div className={styles.selectWrapper}>
+        <select
+          {...rest}
+          id={fieldId}
+          required={required}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={errorId}
+          className={[styles.select, error && styles.invalid, className].filter(Boolean).join(' ')}
+        >
+          {children}
+        </select>
+      </div>
       {error && (
         <p id={errorId} className={styles.error} role="alert">
           {error}
