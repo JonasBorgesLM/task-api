@@ -2,7 +2,7 @@
 slug: frontend-redesign
 stage: plan
 tier: full
-items: 11
+items: 13
 sources_mtime:
   docs/changes/frontend-redesign/context.md: 2026-09-02T00:35:00Z
   docs/changes/frontend-redesign/validation.md: 2026-09-03T00:00:00Z
@@ -325,20 +325,113 @@ Ambos ficam candidatos a uma fase futura.
 - **Depende de:** CI-10, CI-9 (o redesenho claro precisa estar
   auditado e estável antes de verificar a versão escura dele).
 
+### CI-12 — `TaskStatusControls`: menu de ações por ícone (padrão Apple)
+
+- **Arquivos:** `web/src/components/Menu.{tsx,module.css,test.tsx}` (novo
+  primitive — nenhum componente de menu/dropdown existe hoje),
+  `web/src/features/tasks/TaskStatusControls.{tsx,module.css,test.tsx}`.
+- **Faz:** troca os até três botões de texto sempre visíveis ("Move to
+  In progress", "Move to Done", "Move to Cancelled") por um único
+  botão-gatilho (ícone, sem texto solto competindo com Edit/Delete) que
+  abre um menu com as transições legais — mesmo padrão de pull-down menu
+  usado em apps macOS/iOS: uma ação por vez, escondida até ser pedida, em
+  vez de toda opção sempre visível. `Menu.tsx` é HTML semântico + ARIA
+  real (`role="menu"`/`"menuitem"`), não um `<select>` disfarçado: abre
+  com Enter/Espaço, navega com as setas, fecha com Escape ou clique fora,
+  devolve o foco ao gatilho ao fechar. Cada item do menu usa um ícone SVG
+  inline pequeno (sem biblioteca de ícones nova — `fill="currentColor"`
+  herda a cor do token que já estiver em uso, mesmo espírito de "sem
+  dependência nova sem necessidade real" que rege o lado Go).
+- **Não faz:** não muda quais transições são legais (mesma tabela de
+  `TaskStatusControls.tsx` já existente) nem o tratamento do 409
+  ambíguo (`AM-5` da Fase 13 já resolvido, issue #153) — só a
+  interação/apresentação.
+- **Testes:** `Menu.test.tsx` (novo primitive — abre/fecha, navegação por
+  teclado, clique fora, Escape, foco devolvido ao gatilho);
+  `TaskStatusControls.test.tsx` atualizado — abre o menu, clica uma
+  transição, chama `onSuccess`; transições ilegais continuam ausentes do
+  menu (mesma tabela `LEGAL_TRANSITIONS`, verificada agora contra os
+  itens do menu em vez dos botões).
+- **Verificação:** `npm test` + `vite preview` (visto rodando, navegação
+  só por teclado incluída).
+- **Depende de:** CI-6.
+
+### CI-13 — Efeitos visuais: blur, elevação, transição, glow, gradiente
+
+- **Arquivos:** `web/src/design/tokens.css` (dois tokens novos —
+  `--color-surface-translucent`, `--color-focus-glow`),
+  `web/src/components/AppShell.module.css`,
+  `web/src/features/tasks/TaskItem.module.css`,
+  `web/src/components/{Button,TextField,Select,Checkbox}.module.css`.
+- **Faz:** cinco efeitos novos (um sexto, shimmer no `Skeleton`, já
+  existia desde CI-5 da Fase 13 — conferido no código antes de propor,
+  não reproposto aqui), todos atrás de
+  `@media (prefers-reduced-motion: no-preference)` onde envolvem
+  movimento, todos usando token em vez de valor literal:
+  1. **Header com desfoque** — `AppShell`'s `.header` ganha
+     `position: sticky` + `backdrop-filter: blur(...)` sobre
+     `--color-surface-translucent` (novo token, o mesmo `--color-surface`
+     com alfa) em vez de opaco — o conteúdo passa por baixo ao rolar a
+     lista.
+  2. **Elevação em hover** — linhas de `TaskItem` ganham `--shadow-md` (já
+     existente, só não usado em hover) ao passar o mouse/foco
+     (`:focus-within` também, para paridade com navegação por teclado).
+  3. **Transição suave de cor nos badges** — `background-color`/`color`
+     dos badges de status/prioridade (`CI-6`) transicionam em vez de
+     trocar abrupto quando uma task muda de status. Inerte até `CI-6`
+     aplicar cor de verdade aos badges — a regra de transição não exige
+     que a cor já varie para existir.
+  4. **Glow sutil no foco** — estende o `:focus-visible` já existente de
+     `Button`/`TextField`/`Select`/`Checkbox` com um `box-shadow` suave
+     (`--color-focus-glow`, novo token — o mesmo `--color-accent` a baixa
+     opacidade), além do anel que já existe (decoração sobre o requisito
+     de WCAG 2.4.11, nunca substituindo o outline que o satisfaz).
+  5. **Gradiente de dois tons no botão primário** — única sugestão que
+     tensiona com "sem gradiente sem motivo" (issue 121): justificada
+     aqui como profundidade no único botão de ação primária da tela, não
+     decoração — dois tons do mesmo `--color-accent`/`--color-accent-hover`
+     (ambos já existentes, nenhuma cor nova), nunca uma cor diferente.
+     Hover/active usam `filter: brightness()` sobre o mesmo gradiente em
+     vez de trocar para uma cor sólida — o gradiente nunca desaparece
+     numa interação.
+- **Não faz:** não aplica nenhum efeito a `variant="secondary"`/
+  `variant="danger"` de `Button` (o gradiente é só do primário) nem
+  introduz uma biblioteca de animação — tudo é CSS puro, já é o padrão do
+  resto do projeto.
+- **Testes:** nenhum teste de comportamento novo (mudança é
+  puramente visual/decorativa, nenhum `role`/estado muda) —
+  `assertOnlyTokens` em cada `.module.css` tocado cobre a ausência de
+  valor literal. Nenhum teste novo em `tokens.test.ts`: os dois tokens
+  novos são decorativos (a mesma isenção que `--shadow-*` já tem), não
+  pares texto/fundo com obrigação de contraste.
+- **Verificação:** `npm test` + `vite preview` (visto rodando — blur ao
+  rolar, hover, foco, gradiente, todos efeitos que só existem de verdade
+  num navegador real, verificados via `getComputedStyle` real, não só
+  lidos no CSS).
+- **Depende de:** CI-4 (header a desfocar precisa existir), CI-6
+  (badges a colorir precisam existir para o efeito 3 ser visível, mesmo
+  que a regra em si seja inerte antes disso).
+
+
 ## Mapa de dependências
 
 ```
 CI-1 ──────────────┐
 CI-2 ──┬── CI-4 ──┐ │
        └── CI-5   │ │
-CI-3 ──────────────┼─ CI-6 ── CI-7
-                    │         │
-                    │         CI-8
-                    │          │
-                    └──────────┴── CI-9 ── CI-11
+CI-3 ──────────────┼─ CI-6 ──┬── CI-7
+                    │         ├── CI-8
+                    │         └── CI-12
+CI-4, CI-6 ─────────┴── CI-13 ─┘
+                                │
+                                └── CI-9 ── CI-11
                                      │       │
-CI-1 ── CI-10 ──────────────────────┴───────┘
+CI-1 ── CI-10 ───────────────────────┴───────┘
 ```
+(`CI-13` depende de `CI-4` e `CI-6` — mostrado à parte acima porque um
+diagrama em texto não representa bem uma aresta que cruza os outros
+ramos; a lista "Depende de" de cada item é a fonte de verdade, não este
+desenho.)
 
 ## Entregáveis
 
@@ -352,6 +445,18 @@ CI-1 ── CI-10 ────────────────────�
       restilizados
 - [ ] `web/src/features/attachments/AttachmentList.{tsx,module.css}` —
       restilizado
+- [ ] `web/src/components/Menu.{tsx,module.css,test.tsx}` — novo,
+      primitive de menu acessível (`CI-12`)
+- [ ] `web/src/features/tasks/TaskStatusControls.{tsx,module.css,test.tsx}`
+      — redesenhado como menu de ícones (`CI-12`)
+- [ ] `web/src/design/tokens.css` — `--color-surface-translucent` e
+      `--color-focus-glow` (`CI-13`)
+- [ ] `web/src/components/AppShell.module.css` — header fixo com
+      desfoque (`CI-13`)
+- [ ] `web/src/features/tasks/TaskItem.module.css` — elevação em hover,
+      transição de cor nos badges (`CI-13`)
+- [ ] `web/src/components/{Button,TextField,Select,Checkbox}.module.css`
+      — glow no foco (`CI-13`)
 - [ ] Auditoria de a11y + E2E reverificadas, registradas no PR de `CI-9`
 - [ ] `web/src/design/tokens.css` + `tokens.test.ts` — paleta escura,
       testada por contraste (`CI-10`)
@@ -374,3 +479,5 @@ CI-1 ── CI-10 ────────────────────�
 | Escopo crescer de volta para filtro/busca ou board no meio da implementação, revertendo a decisão já tomada em `validation.md` | Plano não inclui nenhum `CI` de contrato; qualquer pedido nessa direção durante a implementação volta para `/decide` ou uma fase nova, não uma expansão silenciosa deste plano |
 | Painel de marketing de `CI-5` acaba na frente do formulário na ordem de tabulação, ou vira uma cópia do template de referência em vez de uma peça própria | `CI-5` testa a ordem de tabulação explicitamente; `validation.md`'s `AM-5` registra que só o princípio (token único, acento restrito) se estende, não a paleta/animação do template |
 | Um componente restilizado em `CI-5`–`CI-8` usa uma cor literal em vez de token, e só quebra visualmente quando o tema escuro (`CI-10`) entra em vigor | `assertOnlyTokens` já bloqueia isso no CI de cada componente, antes do tema escuro sequer existir — `CI-11` é a prova final, não a primeira linha de defesa |
+| `Menu.tsx` (`CI-12`) reimplementa foco/teclado incorretamente — trap incompleto, Escape não fecha, foco não volta ao gatilho — e uma transição de status vira inacessível por teclado | `Menu.test.tsx` testa cada um desses casos isoladamente no primitive; `CI-9` reverifica o fluxo real de teclado ponta a ponta depois de integrado em `TaskStatusControls` |
+| Esconder as transições atrás de um menu (`CI-12`) esconde também informação que antes era visível de relance (quais transições existem, não só a atual) | Cada item do menu usa ícone + rótulo (não só ícone) — a informação continua ali, só não ocupa espaço permanente na linha |
