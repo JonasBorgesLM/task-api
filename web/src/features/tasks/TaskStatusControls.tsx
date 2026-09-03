@@ -10,7 +10,10 @@ type Status = Task['status']
 
 const ALL_STATUSES: Status[] = ['pending', 'in_progress', 'done', 'cancelled']
 
-const STATUS_LABELS: Record<Status, string> = {
+// Exported for reuse by TaskList's status filter (CI-15) — a single
+// source of human-readable status text, so the filter dropdown and the
+// transition menu never drift apart on wording.
+export const STATUS_LABELS: Record<Status, string> = {
   pending: 'Pending',
   in_progress: 'In progress',
   done: 'Done',

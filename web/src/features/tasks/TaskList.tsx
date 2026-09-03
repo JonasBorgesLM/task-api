@@ -1,15 +1,26 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '../../components/Button'
 import { Modal } from '../../components/Modal'
+import { Select } from '../../components/Select'
 import { Skeleton } from '../../components/Skeleton'
 import { Toast } from '../../components/Toast'
 import styles from './TaskList.module.css'
+import { STATUS_LABELS } from './TaskStatusControls'
 import { TaskForm } from './TaskForm'
 import { TaskItem } from './TaskItem'
 import type { Task } from './useTasks'
 import { useTasks } from './useTasks'
 
 const SKELETON_ROWS = 5
+
+type StatusFilter = Task['status'] | ''
+type PriorityFilter = Task['priority'] | ''
+
+const PRIORITY_LABELS: Record<Task['priority'], string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+}
 
 /**
  * Four explicit states (loading/empty/error/success) — no generic
@@ -25,6 +36,8 @@ const SKELETON_ROWS = 5
  * building its own.
  */
 export function TaskList() {
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('')
+  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('')
   const {
     status,
     tasks,
@@ -36,10 +49,11 @@ export function TaskList() {
     addTaskLocally,
     updateTaskLocally,
     removeTaskLocally,
-  } = useTasks()
+  } = useTasks(statusFilter, priorityFilter)
   const sentinelRef = useRef<HTMLDivElement>(null)
   const [creating, setCreating] = useState(false)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
+  const isFiltered = statusFilter !== '' || priorityFilter !== ''
 
   // Infinite scroll is a progressive enhancement over the real "Load
   // more" button below, not a replacement for it: IntersectionObserver
@@ -105,6 +119,32 @@ export function TaskList() {
       )}
 
       <div className={styles.header}>
+        <div className={styles.filters}>
+          <Select
+            label="Status"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+          >
+            <option value="">All statuses</option>
+            {(Object.entries(STATUS_LABELS) as [Task['status'], string][]).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </Select>
+          <Select
+            label="Priority"
+            value={priorityFilter}
+            onChange={(e) => setPriorityFilter(e.target.value as PriorityFilter)}
+          >
+            <option value="">All priorities</option>
+            {(Object.entries(PRIORITY_LABELS) as [Task['priority'], string][]).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </Select>
+        </div>
         <Button onClick={() => setCreating(true)}>New task</Button>
       </div>
       <Modal open={creating} onClose={() => setCreating(false)} title="New task">
@@ -122,13 +162,17 @@ export function TaskList() {
         </p>
       )}
 
-      {status === 'empty' && <p className={styles.empty}>You don't have any tasks yet.</p>}
+      {status === 'empty' && (
+        <p className={styles.empty}>
+          {isFiltered ? 'No tasks match this filter.' : "You don't have any tasks yet."}
+        </p>
+      )}
 
       {status === 'success' && (
         <>
           <p className={styles.note}>
-            Sorted by creation date, oldest first. There's no filtering or a different sort order
-            yet — this list always shows everything, in the order the API returns it.
+            Sorted by creation date, oldest first. Filter by status or priority above — there's no
+            free-text search yet.
           </p>
           <ul className={styles.list}>
             {tasks.map((task) => (
