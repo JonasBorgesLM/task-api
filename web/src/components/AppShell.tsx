@@ -49,7 +49,7 @@ export function AppShell({ userEmail, onLogout, onLogoutAll, children }: AppShel
           </div>
         </PageContainer>
       </header>
-      <main>
+      <main className={styles.main}>
         <PageContainer>{children}</PageContainer>
       </main>
     </div>

@@ -8,6 +8,17 @@
   border-bottom: 1px solid var(--color-border);
 }
 
+/* Vertical breathing room for the content area — PageContainer itself
+   only pads horizontally (it's shared with the header row above, which
+   already has its own padding-block and would get doubled up if
+   PageContainer added its own). Without this, whatever TaskList (or any
+   other authenticated content) renders first sits flush against the
+   header's bottom border — reported directly against "New task" after a
+   real test of this build. */
+.main {
+  padding-block: var(--space-6);
+}
+
 .headerRow {
   display: flex;
   align-items: center;
