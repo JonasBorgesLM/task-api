@@ -8,6 +8,22 @@
   background-color: var(--color-surface);
 }
 
+/* Hover/focus-within elevation — Fase 14 CI-13. --shadow-md already
+   existed (Fase 13 CI-3); this is the first place it's used as a hover
+   state rather than a resting one. focus-within, not just hover: a
+   keyboard user tabbing into a row's buttons gets the same "this row is
+   active" signal a mouse user gets from hovering it. */
+@media (prefers-reduced-motion: no-preference) {
+  .item {
+    transition: box-shadow var(--transition-base) var(--easing-standard);
+  }
+}
+
+.item:hover,
+.item:focus-within {
+  box-shadow: var(--shadow-md);
+}
+
 .itemHeader {
   display: flex;
   align-items: center;
@@ -38,6 +54,20 @@
   background-color: var(--color-bg);
   color: var(--color-text-secondary);
   border: 1px solid var(--color-border);
+}
+
+/* Fase 14 CI-13 — inert today: this .badge is still plain
+   background-color/color (CI-6 hasn't applied the status/priority color
+   tokens from CI-1 yet), so there's nothing to transition between. Once
+   CI-6 lands, a task's badge swaps color when its row re-renders with a
+   new status/priority (React keeps the same DOM node, only the class/
+   text changes), and this rule makes that swap a fade instead of a cut. */
+@media (prefers-reduced-motion: no-preference) {
+  .badge {
+    transition:
+      background-color var(--transition-base) var(--easing-standard),
+      color var(--transition-base) var(--easing-standard);
+  }
 }
 
 .description {

@@ -89,6 +89,23 @@
   --color-priority-high-bg: #fbe4e1;
   --color-priority-high-text: #a23324;
 
+  /* Fase 14 CI-13 (docs/changes/frontend-redesign) — decorative-only
+     tokens, exempt from the WCAG contrast obligation above the same way
+     --shadow-* already is: neither is text.
+
+     --color-surface-translucent is exactly --color-surface (#f8f9fb =
+     rgb(248 249 251)) at 85% alpha — used only behind backdrop-filter:
+     blur() (AppShell's sticky header), where full opacity would defeat
+     the point of blurring what scrolls underneath.
+
+     --color-focus-glow is exactly --color-accent (#2857d6 =
+     rgb(40 87 214)) at 20% alpha — a soft halo added to the existing
+     :focus-visible outline on Button/TextField/Select/Checkbox, never a
+     replacement for it (the 2px outline is what WCAG 2.4.11 actually
+     requires; the glow is decoration on top). */
+  --color-surface-translucent: rgb(248 249 251 / 85%);
+  --color-focus-glow: rgb(40 87 214 / 20%);
+
   /* ---------------------------------------------------------------
    * Typography
    *

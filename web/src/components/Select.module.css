@@ -76,7 +76,9 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .select {
-    transition: border-color var(--transition-fast) var(--easing-standard);
+    transition:
+      border-color var(--transition-fast) var(--easing-standard),
+      box-shadow var(--transition-fast) var(--easing-standard);
   }
 }
 
@@ -84,6 +86,7 @@
   outline: 2px solid var(--color-accent);
   outline-offset: 1px;
   border-color: var(--color-accent);
+  box-shadow: 0 0 0 4px var(--color-focus-glow);
 }
 
 .select:disabled {
