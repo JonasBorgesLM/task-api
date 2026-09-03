@@ -21,7 +21,7 @@ import (
 type fakeService struct {
 	createTaskFn       func(userID, title, description, priority string) (Task, error)
 	getTaskFn          func(userID, id string) (Task, error)
-	listTasksFn        func(userID string, limit, offset int) ([]Task, error)
+	listTasksFn        func(userID string, limit, offset int, status, priority string) ([]Task, error)
 	updateTaskFn       func(userID, id, title, description, priority string) (Task, error)
 	deleteTaskFn       func(userID, id string) error
 	completeTaskFn     func(userID, id string) (Task, error)
@@ -29,7 +29,7 @@ type fakeService struct {
 
 	// Call recording.
 	createCalledWith     [4]string // [userID, title, description, priority]
-	listCalledWith       [3]any    // [userID, limit, offset]
+	listCalledWith       [5]any    // [userID, limit, offset, status, priority]
 	updateCalledWith     [5]string // [userID, id, title, description, priority]
 	completeCalledWith   [2]string // [userID, id]
 	deleteCalledWith     [2]string // [userID, id]
@@ -51,10 +51,10 @@ func (f *fakeService) GetTask(_ context.Context, userID, id string) (Task, error
 	return Task{}, nil
 }
 
-func (f *fakeService) ListTasks(_ context.Context, userID string, limit, offset int) ([]Task, error) {
-	f.listCalledWith = [3]any{userID, limit, offset}
+func (f *fakeService) ListTasks(_ context.Context, userID string, limit, offset int, status, priority string) ([]Task, error) {
+	f.listCalledWith = [5]any{userID, limit, offset, status, priority}
 	if f.listTasksFn != nil {
-		return f.listTasksFn(userID, limit, offset)
+		return f.listTasksFn(userID, limit, offset, status, priority)
 	}
 	return []Task{}, nil
 }
@@ -260,7 +260,7 @@ func TestCreateTask_Handler_IgnoresProtectedFields(t *testing.T) {
 func TestListTasks_Handler_ReturnsOK(t *testing.T) {
 	tasks := []Task{sampleTask(), sampleTask()}
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int) ([]Task, error) { return tasks, nil },
+		listTasksFn: func(userID string, limit, offset int, status, priority string) ([]Task, error) { return tasks, nil },
 	}
 	h := newHandlerWithFake(svc)
 
@@ -279,7 +279,7 @@ func TestListTasks_Handler_ReturnsOK(t *testing.T) {
 
 func TestListTasks_Handler_EmptyIsArray(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int) ([]Task, error) { return nil, nil },
+		listTasksFn: func(userID string, limit, offset int, status, priority string) ([]Task, error) { return nil, nil },
 	}
 	h := newHandlerWithFake(svc)
 
@@ -302,31 +302,37 @@ func TestListTasks_Handler_EmptyIsArray(t *testing.T) {
 	}
 }
 
-// TestListTasks_Handler_PassesUserIDLimitOffsetToService verifies that
-// Handler parses "limit"/"offset" from the query string, reads the
-// authenticated userID from context, and passes all three straight
-// through to Service.ListTasks — the actual windowing (which IDs come
-// back for a given limit/offset) now happens inside Repository.FindAll,
-// and is tested there directly: see TestFindAll_Pagination in
-// memory_repository_test.go and TestPostgres_FindAll_Pagination in
-// postgres_repository_test.go.
-func TestListTasks_Handler_PassesUserIDLimitOffsetToService(t *testing.T) {
+// TestListTasks_Handler_PassesUserIDLimitOffsetFiltersToService verifies
+// that Handler parses "limit"/"offset"/"status"/"priority" from the query
+// string, reads the authenticated userID from context, and passes all
+// five straight through to Service.ListTasks — the actual windowing/
+// filtering (which IDs come back for a given limit/offset/status/priority)
+// now happens inside Repository.FindAll, and is tested there directly:
+// see TestFindAll_Pagination/TestFindAll_FiltersByStatusAndPriority in
+// memory_repository_test.go and their PostgreSQL counterparts.
+func TestListTasks_Handler_PassesUserIDLimitOffsetFiltersToService(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int) ([]Task, error) { return []Task{}, nil },
+		listTasksFn: func(userID string, limit, offset int, status, priority string) ([]Task, error) { return []Task{}, nil },
 	}
 	h := newHandlerWithFake(svc)
 
 	cases := []struct {
-		name       string
-		query      string
-		wantLimit  int
-		wantOffset int
+		name         string
+		query        string
+		wantLimit    int
+		wantOffset   int
+		wantStatus   string
+		wantPriority string
 	}{
-		{"no params means no limit, zero offset", "", -1, 0},
-		{"limit only", "?limit=2", 2, 0},
-		{"offset only", "?offset=3", -1, 3},
-		{"limit and offset", "?limit=2&offset=1", 2, 1},
-		{"limit zero", "?limit=0", 0, 0},
+		{"no params means no limit, zero offset, no filter", "", -1, 0, "", ""},
+		{"limit only", "?limit=2", 2, 0, "", ""},
+		{"offset only", "?offset=3", -1, 3, "", ""},
+		{"limit and offset", "?limit=2&offset=1", 2, 1, "", ""},
+		{"limit zero", "?limit=0", 0, 0, "", ""},
+		{"status only", "?status=pending", -1, 0, "pending", ""},
+		{"priority only", "?priority=high", -1, 0, "", "high"},
+		{"status and priority combined", "?status=done&priority=low", -1, 0, "done", "low"},
+		{"status, priority, limit and offset combined", "?status=done&priority=low&limit=2&offset=1", 2, 1, "done", "low"},
 	}
 
 	for _, tc := range cases {
@@ -337,9 +343,9 @@ func TestListTasks_Handler_PassesUserIDLimitOffsetToService(t *testing.T) {
 				t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
 			}
 
-			want := [3]any{testUserID, tc.wantLimit, tc.wantOffset}
+			want := [5]any{testUserID, tc.wantLimit, tc.wantOffset, tc.wantStatus, tc.wantPriority}
 			if svc.listCalledWith != want {
-				t.Errorf("ListTasks() called with (userID, limit, offset) = %v, want %v", svc.listCalledWith, want)
+				t.Errorf("ListTasks() called with (userID, limit, offset, status, priority) = %v, want %v", svc.listCalledWith, want)
 			}
 		})
 	}
@@ -347,7 +353,9 @@ func TestListTasks_Handler_PassesUserIDLimitOffsetToService(t *testing.T) {
 
 func TestListTasks_Handler_InvalidPaginationParams(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int) ([]Task, error) { return []Task{{ID: "1"}}, nil },
+		listTasksFn: func(userID string, limit, offset int, status, priority string) ([]Task, error) {
+			return []Task{{ID: "1"}}, nil
+		},
 	}
 	h := newHandlerWithFake(svc)
 
@@ -366,6 +374,28 @@ func TestListTasks_Handler_InvalidPaginationParams(t *testing.T) {
 				t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
 			}
 		})
+	}
+}
+
+// TestListTasks_Handler_InvalidFilterIs400 verifies that a Service error
+// for an unrecognized status/priority filter value (ErrInvalidInput) maps
+// to 400 through handleServiceError, the same as any other invalid-input
+// rejection — Service.ListTasks itself validates the values (see
+// TestListTasks_UnknownStatusFilterIsInvalidInput/
+// TestListTasks_UnknownPriorityFilterIsInvalidInput in service_test.go);
+// this only confirms the handler's wiring passes the error through.
+func TestListTasks_Handler_InvalidFilterIs400(t *testing.T) {
+	svc := &fakeService{
+		listTasksFn: func(userID string, limit, offset int, status, priority string) ([]Task, error) {
+			return nil, fmt.Errorf("%w: status must be one of pending, in_progress, done, cancelled", ErrInvalidInput)
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(t, h.listTasks, http.MethodGet, "/tasks?status=archived", "")
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("listTasks with invalid status filter = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }
 
@@ -778,7 +808,7 @@ func TestLoggingStrategy_NotFound_ProducesOnlyAccessLog(t *testing.T) {
 func TestRegisterRoutes(t *testing.T) {
 	svc := &fakeService{
 		createTaskFn:       func(_, _, _, _ string) (Task, error) { return sampleTask(), nil },
-		listTasksFn:        func(_ string, _, _ int) ([]Task, error) { return []Task{sampleTask()}, nil },
+		listTasksFn:        func(_ string, _, _ int, _, _ string) ([]Task, error) { return []Task{sampleTask()}, nil },
 		getTaskFn:          func(_, _ string) (Task, error) { return sampleTask(), nil },
 		updateTaskFn:       func(_, _, _, _, _ string) (Task, error) { return sampleTask(), nil },
 		completeTaskFn:     func(_, _ string) (Task, error) { return sampleTask(), nil },
