@@ -6,8 +6,9 @@ import { z } from 'zod'
 import type { ApiError } from '../../api/errors'
 import { classifyError } from '../../api/errors'
 import { Button } from '../../components/Button'
-import { PageContainer } from '../../components/PageContainer'
 import { TextField } from '../../components/TextField'
+import { AuthLayout } from './AuthLayout'
+import styles from './AuthLayout.module.css'
 import { useAuth } from './useAuth'
 
 // Mirrors docs/openapi.yaml's RegisterRequest constraints exactly — the
@@ -71,9 +72,8 @@ export function RegisterPage() {
   }
 
   return (
-    <PageContainer>
-      <form onSubmit={handleSubmit(onSubmit)} noValidate>
-        <h1>Create an account</h1>
+    <AuthLayout title="Create an account">
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className={styles.form}>
         <TextField
           label="Email"
           type="email"
@@ -99,6 +99,6 @@ export function RegisterPage() {
           Already have an account? <Link to="/login">Log in</Link>
         </p>
       </form>
-    </PageContainer>
+    </AuthLayout>
   )
 }
