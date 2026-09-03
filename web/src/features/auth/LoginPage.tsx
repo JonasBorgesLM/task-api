@@ -6,8 +6,9 @@ import { z } from 'zod'
 import type { ApiError } from '../../api/errors'
 import { classifyError } from '../../api/errors'
 import { Button } from '../../components/Button'
-import { PageContainer } from '../../components/PageContainer'
 import { TextField } from '../../components/TextField'
+import styles from './AuthLayout.module.css'
+import { AuthLayout } from './AuthLayout'
 import { useAuth } from './useAuth'
 
 // Deliberately no email-format/length validation here (unlike
@@ -75,9 +76,8 @@ export function LoginPage() {
   }
 
   return (
-    <PageContainer>
-      <form onSubmit={handleSubmit(onSubmit)} noValidate>
-        <h1>Log in</h1>
+    <AuthLayout title="Log in">
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className={styles.form}>
         {state?.justRegistered && <p role="status">Account created — log in below.</p>}
         <TextField
           label="Email"
@@ -101,6 +101,6 @@ export function LoginPage() {
           Don't have an account? <Link to="/register">Create one</Link>
         </p>
       </form>
-    </PageContainer>
+    </AuthLayout>
   )
 }

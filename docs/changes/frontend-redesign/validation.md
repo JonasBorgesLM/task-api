@@ -28,6 +28,11 @@ issues:
     status: open
     blocking: false
     summary: "Filtro/busca de tasks já é item deliberadamente adiado em ARCHITECTURE.md § Future Improvements"
+  - id: AM-5
+    status: resolved
+    blocking: true
+    summary: "Usuário pediu para aplicar cor/efeitos de um template de landing page externo — tema escuro entra nesta fase?"
+    resolved_by: "usuário decidiu, depois de avisado sobre o custo real (paleta escura nova, contraste WCAG refeito do zero, mecanismo de troca — nada disso preparado hoje): sim, tema escuro de verdade. Fica como CI-10/CI-11 novos nesta mesma fase, não uma cópia literal do template (dark-por-padrão + laranja + animação pesada não se aplica a uma ferramenta de uso diário) — só o princípio de token semântico + acento único que tokens.css já usa, estendido para um segundo conjunto de valores."
 sources_mtime:
   docs/changes/frontend-redesign/context.md: 2026-09-02T00:35:00Z
   docs/DECISIONS.md: 2026-09-02T00:20:34Z
@@ -40,8 +45,11 @@ sources_mtime:
 
 **status: clean** — 0 questões abertas. `AM-2` fechou por decisão explícita
 do usuário ("não" a board/kanban nesta fase); `AM-3`/`AM-4` fecharam por
-recomendação padrão (reversível, sinalizada como tal). `AM-1` fechou
-originalmente como "não" e foi **reaberta e refechada** depois de
+recomendação padrão (reversível, sinalizada como tal); `AM-5` (adicionada
+depois do plano inicial — ver abaixo) fechou por decisão explícita do
+usuário: tema escuro de verdade, dois `CI`s novos (`CI-10`/`CI-11`), não a
+cópia literal do template de referência que motivou a pergunta. `AM-1`
+fechou originalmente como "não" e foi **reaberta e refechada** depois de
 `CI-1`–`CI-13` implementados e testados na prática — usuário pediu filtro de
 verdade, que entra como `CI-14`/`CI-15` (ver seção própria abaixo). Próximo:
 `/change-plan frontend-redesign` (replanejamento incremental — os `CI`s já
@@ -91,6 +99,24 @@ implementados/planejados não mudam).
   indicação de view atual, menu do usuário com logout); busca
   global/avatar/tema ficam fora até um pedido concreto existir, mesmo
   espírito de "sem abstração por antecipação" de `CLAUDE.md`.
+
+### AM-5 — Tema escuro
+- **Contexto:** usuário compartilhou um template de landing page externo
+  (Lovable, curso — dark-por-padrão, acento laranja, animação de
+  scroll-reveal pesada) pedindo para "aplicar o padrão de cores e efeitos".
+  Avaliação antes de perguntar: a maior parte do template não se aplica a
+  uma ferramenta de produtividade de uso diário — dark-por-padrão e
+  animação pesada pesam contra usabilidade num app que fica aberto o dia
+  inteiro, e `tokens.css` foi construído deliberadamente contra "sombra
+  exagerada, gradiente sem motivo" (issue #121). O que É genuinamente
+  aproveitável — token semântico + um acento único usado com mais
+  confiança — já é o que este projeto já faz.
+- **Fechada por:** decisão explícita do usuário, depois de avisado do custo
+  real: tema escuro de verdade entra nesta fase, como trabalho novo e
+  próprio (`CI-10`/`CI-11`), não como cópia literal do template. Nenhuma
+  cor/efeito do template é usada tal como está — o princípio (token
+  semântico, um acento por vez) é o que se estende, não a paleta laranja
+  nem a animação pesada dele.
 
 ## Item já deliberadamente adiado
 
