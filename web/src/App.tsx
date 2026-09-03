@@ -1,6 +1,5 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
-import { Button } from './components/Button'
-import { PageContainer } from './components/PageContainer'
+import { AppShell } from './components/AppShell'
 import { LoginPage } from './features/auth/LoginPage'
 import { RegisterPage } from './features/auth/RegisterPage'
 import { RequireAuth } from './features/auth/RequireAuth'
@@ -13,25 +12,24 @@ import { TaskList } from './features/tasks/TaskList'
  * moving into TaskList — they're session actions, not task-list
  * concerns, and TaskList has no reason to know useAuth exists.
  *
- * Wrapped in PageContainer (CI-2 of docs/changes/frontend-redesign) for
- * the same deliberate content width login/register now use — CI-4 of
- * that same phase replaces the bare paragraph+buttons below with a real
- * app-shell; this only fixes the width in the meantime.
+ * Renders inside AppShell (CI-4 of docs/changes/frontend-redesign) —
+ * this component still owns the logout logic (via useAuth), it just
+ * hands the actions to the shell instead of rendering its own buttons.
+ * "Logged in as {email}" is gone as visible text (see App.test.tsx) —
+ * the shell shows the email in its user menu instead, so the same
+ * information isn't announced twice on the page.
  */
 function AuthenticatedHome() {
   const { user, logout, logoutAll } = useAuth()
 
   return (
-    <PageContainer>
-      <p>Logged in as {user?.email}</p>
-      <Button variant="secondary" onClick={() => void logout()}>
-        Log out
-      </Button>
-      <Button variant="secondary" onClick={() => void logoutAll()}>
-        Sign out of all devices
-      </Button>
+    <AppShell
+      userEmail={user?.email}
+      onLogout={() => void logout()}
+      onLogoutAll={() => void logoutAll()}
+    >
       <TaskList />
-    </PageContainer>
+    </AppShell>
   )
 }
 
