@@ -33,6 +33,16 @@ issues:
     blocking: true
     summary: "Usuário pediu para aplicar cor/efeitos de um template de landing page externo — tema escuro entra nesta fase?"
     resolved_by: "usuário decidiu, depois de avisado sobre o custo real (paleta escura nova, contraste WCAG refeito do zero, mecanismo de troca — nada disso preparado hoje): sim, tema escuro de verdade. Fica como CI-10/CI-11 novos nesta mesma fase, não uma cópia literal do template (dark-por-padrão + laranja + animação pesada não se aplica a uma ferramenta de uso diário) — só o princípio de token semântico + acento único que tokens.css já usa, estendido para um segundo conjunto de valores."
+  - id: AM-6
+    status: resolved
+    blocking: false
+    summary: "Usuário pediu que os botões de transição de status virem ícones, 'no padrão que a Apple usa' — o que isso significa concretamente?"
+    resolved_by: "decisão direta (pedido explícito, não recomendação): três botões de texto sempre visíveis viram um único botão-gatilho que abre um menu de ícone+rótulo por transição legal — o padrão de pull-down menu que apps macOS/iOS usam para 'uma ação por vez, escondida até ser pedida'. Exige um primitive novo (Menu.tsx, nenhum componente de menu/dropdown existe hoje) — por isso vira CI-12 própria, dependente de CI-6 em vez de dentro dela."
+  - id: AM-7
+    status: resolved
+    blocking: false
+    summary: "Usuário pediu para 'levantar uma forma' de efeitos visuais mais atuais/tecnológicos — quais, especificamente?"
+    resolved_by: "proposta de seis efeitos apresentada (shimmer no Skeleton, header com backdrop-filter, elevação em hover, transição de cor nos badges, glow no foco, gradiente de dois tons no botão primário), cada um justificado contra a disciplina existente de tokens.css. Usuário respondeu 'implemente tudo e registre'. Ao implementar: shimmer já existia desde CI-5 da Fase 13 (conferido no código, não reproposto) — os outros cinco entram como CI-13."
 sources_mtime:
   docs/changes/frontend-redesign/context.md: 2026-09-02T00:35:00Z
   docs/DECISIONS.md: 2026-09-02T00:20:34Z
@@ -45,14 +55,16 @@ sources_mtime:
 
 **status: clean** — 0 questões abertas. `AM-2` fechou por decisão explícita
 do usuário ("não" a board/kanban nesta fase); `AM-3`/`AM-4` fecharam por
-recomendação padrão (reversível, sinalizada como tal); `AM-5` (adicionada
-depois do plano inicial — ver abaixo) fechou por decisão explícita do
-usuário: tema escuro de verdade, dois `CI`s novos (`CI-10`/`CI-11`), não a
-cópia literal do template de referência que motivou a pergunta. `AM-1`
-fechou originalmente como "não" e foi **reaberta e refechada** depois de
-`CI-1`–`CI-13` implementados e testados na prática — usuário pediu filtro de
-verdade, que entra como `CI-14`/`CI-15` (ver seção própria abaixo). Próximo:
-`/change-plan frontend-redesign` (replanejamento incremental — os `CI`s já
+recomendação padrão (reversível, sinalizada como tal); `AM-5`/`AM-6`/`AM-7`
+(adicionadas depois do plano inicial — ver abaixo) fecharam por decisão
+explícita do usuário: tema escuro de verdade (`CI-10`/`CI-11`), menu de
+ícones para `TaskStatusControls` (`CI-12`), e seis efeitos visuais
+(`CI-13`) — nenhum deles cópia literal do template de referência que
+motivou o pedido de cor. `AM-1` fechou originalmente como "não" e foi
+**reaberta e refechada** depois de `CI-1`–`CI-13` implementados e testados
+na prática — usuário pediu filtro de verdade, que entra como `CI-14`/
+`CI-15` (ver seção própria abaixo). Próximo: `/change-plan
+frontend-redesign` (replanejamento incremental — os `CI`s já
 implementados/planejados não mudam).
 
 ## Checagens sem achados
@@ -117,6 +129,32 @@ implementados/planejados não mudam).
   cor/efeito do template é usada tal como está — o princípio (token
   semântico, um acento por vez) é o que se estende, não a paleta laranja
   nem a animação pesada dele.
+
+### AM-6 — Menu de ícones para transição de status
+- **Contexto:** pedido explícito para trocar os botões "Move to X" por
+  ícones, "no padrão que a Apple usa" — não uma recomendação a resolver,
+  uma decisão de interação já tomada pelo usuário.
+- **Fechada por:** um único botão-gatilho por task, abrindo um menu com
+  ícone+rótulo por transição legal — o padrão de pull-down menu real
+  (não um `<select>` disfarçado) que apps macOS/iOS usam para esconder
+  ações até serem pedidas. Exige `Menu.tsx`, primitive novo (nenhum menu/
+  dropdown existe hoje), por isso vira `CI-12` própria — dependente de
+  `CI-6` (mesmo componente, `TaskItem`/`TaskStatusControls`), não
+  encaixada dentro dela.
+
+### AM-7 — Efeitos visuais
+- **Contexto:** pedido para "levantar uma forma" de deixar a página mais
+  atual/tecnológica — pedido de proposta, não de decisão já tomada.
+- **Fechada por:** seis efeitos propostos e aprovados em bloco. Shimmer no
+  `Skeleton` já existia desde CI-5 da Fase 13 — conferido no código antes
+  de implementar, não reproposto; os outros cinco (`CI-13`): header fixo
+  com `backdrop-filter`, elevação em hover nos cards de task, transição
+  suave de cor nos badges de status, glow sutil no anel de foco, e um
+  gradiente de dois tons (mesma cor de acento) só no botão primário — o
+  único item que tensiona com "sem gradiente sem
+  motivo" (issue 121), justificado como profundidade no único CTA
+  primário da tela, não decoração espalhada. Todo efeito com movimento
+  fica atrás de `prefers-reduced-motion`. `CI-13`.
 
 ## Item já deliberadamente adiado
 

@@ -17,7 +17,9 @@
   .button {
     transition:
       background-color var(--transition-fast) var(--easing-standard),
-      opacity var(--transition-fast) var(--easing-standard);
+      opacity var(--transition-fast) var(--easing-standard),
+      box-shadow var(--transition-fast) var(--easing-standard),
+      filter var(--transition-fast) var(--easing-standard);
   }
 }
 
@@ -28,23 +30,38 @@
 
 /* :focus-visible only — a mouse click doesn't need a ring, but keyboard
    navigation always does. Offset so the ring doesn't overlap the
-   button's own border/background. */
+   button's own border/background. The box-shadow glow (Fase 14 CI-13) is
+   decoration layered on top of the outline, never a substitute for it —
+   the 2px outline alone is what satisfies WCAG 2.4.11's visibility
+   requirement; removing it and keeping only the glow would be a real
+   accessibility regression, not a style choice. */
 .button:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
+  box-shadow: 0 0 0 6px var(--color-focus-glow);
 }
 
+/* Two-tone gradient — Fase 14 CI-13, the one effect that deliberately
+   tensions with "no gradient without a reason" (tokens.css's own
+   anti-requirements, issue 121). The reason: depth on the single
+   primary call-to-action on a given screen, not decoration spread
+   around — every other variant (secondary/danger) stays flat. Both
+   stops are --color-accent/--color-accent-hover, tokens that already
+   existed for this exact button before this change; no new color is
+   introduced. Hover/active use filter: brightness() on the same
+   gradient instead of swapping to a flat color, so the gradient itself
+   never disappears mid-interaction. */
 .primary {
-  background-color: var(--color-accent);
+  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-hover) 100%);
   color: var(--color-on-accent);
 }
 
 .primary:hover:not(:disabled) {
-  background-color: var(--color-accent-hover);
+  filter: brightness(1.08);
 }
 
 .primary:active:not(:disabled) {
-  background-color: var(--color-accent-hover);
+  filter: brightness(0.94);
 }
 
 .secondary {
