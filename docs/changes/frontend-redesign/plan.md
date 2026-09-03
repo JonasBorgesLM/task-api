@@ -2,10 +2,10 @@
 slug: frontend-redesign
 stage: plan
 tier: full
-items: 9
+items: 11
 sources_mtime:
   docs/changes/frontend-redesign/context.md: 2026-09-02T00:35:00Z
-  docs/changes/frontend-redesign/validation.md: 2026-09-02T00:45:00Z
+  docs/changes/frontend-redesign/validation.md: 2026-09-03T00:00:00Z
 ---
 
 # frontend-redesign — Plano
@@ -140,25 +140,41 @@ Ambos ficam candidatos a uma fase futura.
 - **Verificação:** `npm test`.
 - **Depende de:** CI-2.
 
-### CI-5 — Login/Register: cartão e identidade visual
+### CI-5 — Login/Register: layout split-screen com painel de marketing
 
 - **Arquivos:** `web/src/features/auth/LoginPage.tsx`,
-  `RegisterPage.tsx`, `AuthLayout.module.css` (novo, compartilhado pelas
-  duas) — mais os testes existentes de ambas.
-- **Faz:** as duas telas ganham um cartão real (fundo, borda, sombra,
-  padding — mesma linguagem visual de `Modal.module.css`), largura
-  consistente (`CI-2`), nome do app acima do formulário, e a hierarquia
-  tipográfica do `<h1>` usa `--font-size-2xl`/`--font-weight-semibold` em
-  vez do padrão do navegador (achado #9 da auditoria: hoje é o maior
-  elemento da tela, ~64px, sem peso de fonte aplicado).
+  `RegisterPage.tsx`, `AuthLayout.tsx` (novo — antes só se previa o CSS
+  module, o layout de duas colunas justifica um componente de verdade),
+  `AuthLayout.module.css` (novo, compartilhado pelas duas) — mais os
+  testes existentes de ambas.
+- **Faz:** layout de duas colunas em telas largas (empilha em uma coluna
+  só abaixo de `--breakpoint-md`, o formulário sempre primeiro no DOM —
+  nunca depende de layout visual para ordem de leitura/tab): a coluna do
+  formulário ganha um cartão real (fundo, borda, sombra, padding — mesma
+  linguagem visual de `Modal.module.css`), nome do app acima, hierarquia
+  tipográfica real no `<h1>` (`--font-size-2xl`/`--font-weight-semibold`
+  em vez do padrão do navegador — achado #9 da auditoria: hoje é o maior
+  elemento da tela, ~64px, sem peso de fonte aplicado). A segunda coluna é
+  um painel de marketing descrevendo o produto — nome, proposta de valor
+  curta, três ou quatro destaques reais (CRUD de task com transição de
+  status, anexos com preview/download, sessão dupla cookie+Bearer segura)
+  — usando só os tokens já existentes (acento único, sem gradiente/sombra
+  decorativa, mesma disciplina de "issue #121"), não uma cópia do
+  template de referência que motivou o pedido (ver
+  `docs/changes/frontend-redesign/validation.md`'s `AM-5`).
 - **Não faz:** não muda nenhuma regra de validação (`registerSchema`/
   `loginSchema` em `RegisterPage.tsx`/`LoginPage.tsx` ficam intactas) — só
-  a casca visual ao redor do formulário existente.
+  a casca visual ao redor do formulário existente. O painel de marketing é
+  puramente apresentacional — `aria-hidden` ou decorativo o bastante para
+  não competir com a ordem de tabulação do formulário real.
 - **Testes:** `LoginPage.test.tsx`, `RegisterPage.test.tsx` — os testes
   existentes continuam passando sem alteração de asserção (mudança é
   puramente visual, não muda `role`/`label` de nada); `assertOnlyTokens`
-  no `AuthLayout.module.css` novo.
-- **Verificação:** `npm test`.
+  no `AuthLayout.module.css` novo; um teste novo confirma que o painel de
+  marketing não aparece antes do formulário na ordem de tabulação.
+- **Verificação:** `npm test` + `vite preview` (visto rodando em desktop e
+  mobile — o empilhamento em coluna única é comportamento real, não só
+  CSS lido).
 - **Depende de:** CI-2.
 
 ### CI-6 — `TaskItem`: badges coloridos, ações agrupadas, delete comedido
@@ -256,6 +272,59 @@ Ambos ficam candidatos a uma fase futura.
   código.
 - **Depende de:** CI-1, CI-2, CI-3, CI-4, CI-5, CI-6, CI-7, CI-8.
 
+### CI-10 — Tema escuro: paleta e tokens
+
+- **Arquivos:** `web/src/design/tokens.css`, `web/src/design/tokens.test.ts`.
+- **Faz:** um segundo conjunto de valores para todo token de cor já
+  existente (neutros, acento, status/prioridade de `CI-1`), sob
+  `@media (prefers-color-scheme: dark)` como padrão automático **e**
+  `:root[data-theme="dark"]`/`:root[data-theme="light"]` para uma escolha
+  explícita do usuário vencer a preferência do sistema — mesmo mecanismo
+  aditivo que o comentário original de `tokens.css` já previa ("CSS custom
+  properties make adding one later ... additive, not a rewrite"). Cada par
+  texto/fundo do tema escuro passa pelo mesmo teste de contraste WCAG AA
+  que o tema claro já tem — não é o mesmo número reaproveitado, é medido
+  de novo para os valores escuros. **Não é o template de referência**: sem
+  o laranja dele, sem gradiente, sem sombra decorativa — mesma disciplina
+  de "issue #121" que já rege o tema claro, aplicada a uma segunda
+  paleta.
+- **Não faz:** não decide como o usuário troca de tema (isso é `CI-11`) e
+  não aplica nada a nenhum componente ainda — só define os valores.
+- **Testes:** `tokens.test.ts` — um teste de contraste por par do tema
+  escuro, mesmo padrão dos pares claros existentes.
+- **Verificação:** `npm test`.
+- **Depende de:** CI-1.
+
+### CI-11 — Tema escuro: alternância, aplicação e auditoria
+
+- **Arquivos:** `web/src/components/ThemeToggle.{tsx,module.css,test.tsx}`
+  (novo — vive no menu do usuário de `AppShell`), um hook/contexto pequeno
+  para persistir a escolha explícita (`localStorage`, preferência de UI,
+  não credencial — não conflita com a restrição de `docs/DECISIONS.md`
+  sobre nunca guardar sessão lá).
+- **Faz:** alternância real entre claro/escuro/"seguir o sistema", com o
+  sistema como padrão até uma escolha explícita existir. Como todo
+  componente desde `CI-5`+ já consome tokens em vez de cor literal
+  (verificado por `assertOnlyTokens` em cada um), a expectativa é que
+  **nenhum componente existente precise de mudança de código** — só os
+  novos valores de `CI-10` entrando em vigor. Se algum precisar, é sinal
+  de um token literal escapando do sistema, corrigido aqui.
+  Reverifica de verdade (não por inspeção) a auditoria de acessibilidade
+  automatizada e uma navegação manual só por teclado, desta vez com o
+  tema escuro ativo — mesmo padrão de "visto rodando" de `CI-9`.
+- **Não faz:** não adiciona uma terceira opção de tema além de
+  claro/escuro/sistema. Não é um redesign do tema escuro além do que
+  `CI-10` já define — é a alternância e a verificação de que o resto do
+  app realmente segue os tokens sem precisar de ajuste manual.
+- **Testes:** `ThemeToggle.test.tsx` — alterna o atributo `data-theme`,
+  persiste em `localStorage`, respeita `prefers-color-scheme` como padrão
+  na ausência de escolha explícita. Resultado da auditoria/navegação
+  registrado no PR, mesmo formato de `CI-9`.
+- **Verificação:** `npm test` + execução real (axe-core + teclado) com o
+  tema escuro ativo, resultado colado no PR.
+- **Depende de:** CI-10, CI-9 (o redesenho claro precisa estar
+  auditado e estável antes de verificar a versão escura dele).
+
 ## Mapa de dependências
 
 ```
@@ -266,7 +335,9 @@ CI-3 ──────────────┼─ CI-6 ── CI-7
                     │         │
                     │         CI-8
                     │          │
-                    └──────────┴── CI-9
+                    └──────────┴── CI-9 ── CI-11
+                                     │       │
+CI-1 ── CI-10 ──────────────────────┴───────┘
 ```
 
 ## Entregáveis
@@ -282,6 +353,12 @@ CI-3 ──────────────┼─ CI-6 ── CI-7
 - [ ] `web/src/features/attachments/AttachmentList.{tsx,module.css}` —
       restilizado
 - [ ] Auditoria de a11y + E2E reverificadas, registradas no PR de `CI-9`
+- [ ] `web/src/design/tokens.css` + `tokens.test.ts` — paleta escura,
+      testada por contraste (`CI-10`)
+- [ ] `web/src/components/ThemeToggle.{tsx,module.css,test.tsx}` — novo,
+      alternância claro/escuro/sistema (`CI-11`)
+- [ ] Auditoria de a11y + navegação por teclado reverificadas com o tema
+      escuro ativo, registradas no PR de `CI-11`
 - [ ] `CHANGELOG.md` — entrada nova quando esta fase for lançada
 - [ ] `docs/ARCHITECTURE.md` — **sem alteração** (filtro/busca continua
       adiado, board não vira item novo por não ter sido decidido nesta fase)
@@ -295,3 +372,5 @@ CI-3 ──────────────┼─ CI-6 ── CI-7
 | Reduzir o peso visual do estado vazio de anexos (`CI-8`) sem querer torna "Upload file" inacessível por teclado | `CI-8` mantém o controle visível e alcançável; `CI-9` reverifica o fluxo de teclado ponta a ponta |
 | App shell novo (`CI-4`) esconde ou duplica a lógica de `logout`/`logout-all` que `useAuth` já expõe | `CI-4` só move a apresentação para dentro do shell — `useAuth()` continua a única fonte da lógica, testado em `AppShell.test.tsx` |
 | Escopo crescer de volta para filtro/busca ou board no meio da implementação, revertendo a decisão já tomada em `validation.md` | Plano não inclui nenhum `CI` de contrato; qualquer pedido nessa direção durante a implementação volta para `/decide` ou uma fase nova, não uma expansão silenciosa deste plano |
+| Painel de marketing de `CI-5` acaba na frente do formulário na ordem de tabulação, ou vira uma cópia do template de referência em vez de uma peça própria | `CI-5` testa a ordem de tabulação explicitamente; `validation.md`'s `AM-5` registra que só o princípio (token único, acento restrito) se estende, não a paleta/animação do template |
+| Um componente restilizado em `CI-5`–`CI-8` usa uma cor literal em vez de token, e só quebra visualmente quando o tema escuro (`CI-10`) entra em vigor | `assertOnlyTokens` já bloqueia isso no CI de cada componente, antes do tema escuro sequer existir — `CI-11` é a prova final, não a primeira linha de defesa |
