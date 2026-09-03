@@ -135,7 +135,7 @@ implementados/planejados não mudam).
   suave de cor nos badges de status, glow sutil no anel de foco, e um
   gradiente de dois tons (mesma cor de acento) só no botão primário — o
   único item que tensiona com "sem gradiente sem
-  motivo" (issue #121), justificado como profundidade no único CTA
+  motivo" (issue 121), justificado como profundidade no único CTA
   primário da tela, não decoração espalhada. Todo efeito com movimento
   fica atrás de `prefers-reduced-motion`. `CI-13`.
 

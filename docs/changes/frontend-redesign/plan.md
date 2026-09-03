@@ -5,7 +5,7 @@ tier: full
 items: 13
 sources_mtime:
   docs/changes/frontend-redesign/context.md: 2026-09-02T00:35:00Z
-  docs/changes/frontend-redesign/validation.md: 2026-09-04T00:15:00Z
+  docs/changes/frontend-redesign/validation.md: 2026-09-03T00:00:00Z
 ---
 
 # frontend-redesign — Plano
@@ -197,11 +197,9 @@ Ambos ficam candidatos a uma fase futura.
      como uma única linha de botões sem relação (achado #8).
   4. `description` deixa de estar centralizado (estava destoando do resto,
      alinhado à esquerda — achado #10).
-- **Não faz:** não muda a *interação* de `TaskStatusControls` (os até três
-  botões continuam botões aqui) — o redesenho para um menu por ícone é
-  `CI-12`, separado porque exige um primitive novo (`Menu`) que este item
-  não precisa. `CI-6` só muda a apresentação visual dos grupos ao redor
-  dela.
+- **Não faz:** não muda a lógica de `TaskStatusControls` (quais transições
+  são legais continua vindo do mesmo lugar) — só a apresentação visual dos
+  grupos ao redor dela.
 - **Testes:** `TaskItem.test.tsx` — atualiza a asserção que hoje espera
   `variant="danger"` no botão de linha (se existir) para `secondary`,
   mantém a asserção do botão de confirmação como `danger`; nenhum teste
@@ -252,6 +250,80 @@ Ambos ficam candidatos a uma fase futura.
   visual). `assertOnlyTokens` no CSS module.
 - **Verificação:** `npm test`.
 - **Depende de:** CI-6.
+
+### CI-9 — Acessibilidade e E2E reverificados contra o redesenho
+
+- **Arquivos:** nenhum arquivo novo fixo — depende do que a reverificação
+  encontrar (mesmo formato de CI-10 da Fase 13).
+- **Faz:** repete, de verdade, a auditoria de acessibilidade automatizada
+  (axe-core, três larguras, mesmo escopo de telas de CI-10 da Fase 13) e a
+  suíte E2E completa (`npx playwright test` contra `docker compose up`,
+  CI-11 da Fase 13) contra as telas redesenhadas — cor/contraste/hierarquia
+  são exatamente o tipo de mudança que poderia introduzir uma regressão que
+  a passagem limpa original de CI-10 não previa. Corrige qualquer achado
+  real antes de fechar a fase.
+- **Não faz:** não é um redesign — é verificação e ajuste do que
+  `CI-1`–`CI-8` desta fase produziram, mesmo espírito de CI-10 da Fase 13.
+- **Testes:** o próprio resultado da auditoria e da suíte E2E, registrado
+  no PR (execução real, resultado colado — não é um `npm test` no sentido
+  usual).
+- **Verificação:** execução real do axe-core + `npx playwright test` contra
+  `docker compose up` + navegação manual só por teclado — não leitura de
+  código.
+- **Depende de:** CI-1, CI-2, CI-3, CI-4, CI-5, CI-6, CI-7, CI-8.
+
+### CI-10 — Tema escuro: paleta e tokens
+
+- **Arquivos:** `web/src/design/tokens.css`, `web/src/design/tokens.test.ts`.
+- **Faz:** um segundo conjunto de valores para todo token de cor já
+  existente (neutros, acento, status/prioridade de `CI-1`), sob
+  `@media (prefers-color-scheme: dark)` como padrão automático **e**
+  `:root[data-theme="dark"]`/`:root[data-theme="light"]` para uma escolha
+  explícita do usuário vencer a preferência do sistema — mesmo mecanismo
+  aditivo que o comentário original de `tokens.css` já previa ("CSS custom
+  properties make adding one later ... additive, not a rewrite"). Cada par
+  texto/fundo do tema escuro passa pelo mesmo teste de contraste WCAG AA
+  que o tema claro já tem — não é o mesmo número reaproveitado, é medido
+  de novo para os valores escuros. **Não é o template de referência**: sem
+  o laranja dele, sem gradiente, sem sombra decorativa — mesma disciplina
+  de "issue #121" que já rege o tema claro, aplicada a uma segunda
+  paleta.
+- **Não faz:** não decide como o usuário troca de tema (isso é `CI-11`) e
+  não aplica nada a nenhum componente ainda — só define os valores.
+- **Testes:** `tokens.test.ts` — um teste de contraste por par do tema
+  escuro, mesmo padrão dos pares claros existentes.
+- **Verificação:** `npm test`.
+- **Depende de:** CI-1.
+
+### CI-11 — Tema escuro: alternância, aplicação e auditoria
+
+- **Arquivos:** `web/src/components/ThemeToggle.{tsx,module.css,test.tsx}`
+  (novo — vive no menu do usuário de `AppShell`), um hook/contexto pequeno
+  para persistir a escolha explícita (`localStorage`, preferência de UI,
+  não credencial — não conflita com a restrição de `docs/DECISIONS.md`
+  sobre nunca guardar sessão lá).
+- **Faz:** alternância real entre claro/escuro/"seguir o sistema", com o
+  sistema como padrão até uma escolha explícita existir. Como todo
+  componente desde `CI-5`+ já consome tokens em vez de cor literal
+  (verificado por `assertOnlyTokens` em cada um), a expectativa é que
+  **nenhum componente existente precise de mudança de código** — só os
+  novos valores de `CI-10` entrando em vigor. Se algum precisar, é sinal
+  de um token literal escapando do sistema, corrigido aqui.
+  Reverifica de verdade (não por inspeção) a auditoria de acessibilidade
+  automatizada e uma navegação manual só por teclado, desta vez com o
+  tema escuro ativo — mesmo padrão de "visto rodando" de `CI-9`.
+- **Não faz:** não adiciona uma terceira opção de tema além de
+  claro/escuro/sistema. Não é um redesign do tema escuro além do que
+  `CI-10` já define — é a alternância e a verificação de que o resto do
+  app realmente segue os tokens sem precisar de ajuste manual.
+- **Testes:** `ThemeToggle.test.tsx` — alterna o atributo `data-theme`,
+  persiste em `localStorage`, respeita `prefers-color-scheme` como padrão
+  na ausência de escolha explícita. Resultado da auditoria/navegação
+  registrado no PR, mesmo formato de `CI-9`.
+- **Verificação:** `npm test` + execução real (axe-core + teclado) com o
+  tema escuro ativo, resultado colado no PR.
+- **Depende de:** CI-10, CI-9 (o redesenho claro precisa estar
+  auditado e estável antes de verificar a versão escura dele).
 
 ### CI-12 — `TaskStatusControls`: menu de ações por ícone (padrão Apple)
 
@@ -340,86 +412,6 @@ Ambos ficam candidatos a uma fase futura.
   (badges a colorir precisam existir para o efeito 3 ser visível, mesmo
   que a regra em si seja inerte antes disso).
 
-### CI-9 — Acessibilidade e E2E reverificados contra o redesenho
-
-- **Arquivos:** nenhum arquivo novo fixo — depende do que a reverificação
-  encontrar (mesmo formato de CI-10 da Fase 13).
-- **Faz:** repete, de verdade, a auditoria de acessibilidade automatizada
-  (axe-core, três larguras, mesmo escopo de telas de CI-10 da Fase 13) e a
-  suíte E2E completa (`npx playwright test` contra `docker compose up`,
-  CI-11 da Fase 13) contra as telas redesenhadas — cor/contraste/hierarquia
-  são exatamente o tipo de mudança que poderia introduzir uma regressão que
-  a passagem limpa original de CI-10 não previa. `Menu.tsx` (`CI-12`) é
-  código de teclado/foco novo, o tipo de coisa que mais se beneficia de
-  verificação real em vez de leitura. `CI-13`'s `backdrop-filter` e
-  animações são o tipo de efeito que mais precisa ser visto rodando, não
-  só lido — inclui checar que `prefers-reduced-motion: reduce` de
-  verdade desliga o shimmer/transições. Corrige qualquer achado real
-  antes de fechar a fase.
-- **Não faz:** não é um redesign — é verificação e ajuste do que
-  `CI-1`–`CI-8`, `CI-12` e `CI-13` desta fase produziram, mesmo espírito
-  de CI-10 da Fase 13.
-- **Testes:** o próprio resultado da auditoria e da suíte E2E, registrado
-  no PR (execução real, resultado colado — não é um `npm test` no sentido
-  usual).
-- **Verificação:** execução real do axe-core + `npx playwright test` contra
-  `docker compose up` + navegação manual só por teclado — não leitura de
-  código.
-- **Depende de:** CI-1, CI-2, CI-3, CI-4, CI-5, CI-6, CI-7, CI-8, CI-12,
-  CI-13.
-
-### CI-10 — Tema escuro: paleta e tokens
-
-- **Arquivos:** `web/src/design/tokens.css`, `web/src/design/tokens.test.ts`.
-- **Faz:** um segundo conjunto de valores para todo token de cor já
-  existente (neutros, acento, status/prioridade de `CI-1`), sob
-  `@media (prefers-color-scheme: dark)` como padrão automático **e**
-  `:root[data-theme="dark"]`/`:root[data-theme="light"]` para uma escolha
-  explícita do usuário vencer a preferência do sistema — mesmo mecanismo
-  aditivo que o comentário original de `tokens.css` já previa ("CSS custom
-  properties make adding one later ... additive, not a rewrite"). Cada par
-  texto/fundo do tema escuro passa pelo mesmo teste de contraste WCAG AA
-  que o tema claro já tem — não é o mesmo número reaproveitado, é medido
-  de novo para os valores escuros. **Não é o template de referência**: sem
-  o laranja dele, sem gradiente, sem sombra decorativa — mesma disciplina
-  de "issue #121" que já rege o tema claro, aplicada a uma segunda
-  paleta.
-- **Não faz:** não decide como o usuário troca de tema (isso é `CI-11`) e
-  não aplica nada a nenhum componente ainda — só define os valores.
-- **Testes:** `tokens.test.ts` — um teste de contraste por par do tema
-  escuro, mesmo padrão dos pares claros existentes.
-- **Verificação:** `npm test`.
-- **Depende de:** CI-1.
-
-### CI-11 — Tema escuro: alternância, aplicação e auditoria
-
-- **Arquivos:** `web/src/components/ThemeToggle.{tsx,module.css,test.tsx}`
-  (novo — vive no menu do usuário de `AppShell`), um hook/contexto pequeno
-  para persistir a escolha explícita (`localStorage`, preferência de UI,
-  não credencial — não conflita com a restrição de `docs/DECISIONS.md`
-  sobre nunca guardar sessão lá).
-- **Faz:** alternância real entre claro/escuro/"seguir o sistema", com o
-  sistema como padrão até uma escolha explícita existir. Como todo
-  componente desde `CI-5`+ já consome tokens em vez de cor literal
-  (verificado por `assertOnlyTokens` em cada um), a expectativa é que
-  **nenhum componente existente precise de mudança de código** — só os
-  novos valores de `CI-10` entrando em vigor. Se algum precisar, é sinal
-  de um token literal escapando do sistema, corrigido aqui.
-  Reverifica de verdade (não por inspeção) a auditoria de acessibilidade
-  automatizada e uma navegação manual só por teclado, desta vez com o
-  tema escuro ativo — mesmo padrão de "visto rodando" de `CI-9`.
-- **Não faz:** não adiciona uma terceira opção de tema além de
-  claro/escuro/sistema. Não é um redesign do tema escuro além do que
-  `CI-10` já define — é a alternância e a verificação de que o resto do
-  app realmente segue os tokens sem precisar de ajuste manual.
-- **Testes:** `ThemeToggle.test.tsx` — alterna o atributo `data-theme`,
-  persiste em `localStorage`, respeita `prefers-color-scheme` como padrão
-  na ausência de escolha explícita. Resultado da auditoria/navegação
-  registrado no PR, mesmo formato de `CI-9`.
-- **Verificação:** `npm test` + execução real (axe-core + teclado) com o
-  tema escuro ativo, resultado colado no PR.
-- **Depende de:** CI-10, CI-9 (o redesenho claro precisa estar
-  auditado e estável antes de verificar a versão escura dele).
 
 ## Mapa de dependências
 
