@@ -61,7 +61,7 @@ describe('App routing', () => {
 
     renderApp('/')
 
-    expect(await screen.findByText('Logged in as alice@example.com')).toBeInTheDocument()
+    expect(await screen.findByText('alice@example.com')).toBeInTheDocument()
     expect(await screen.findByText("You don't have any tasks yet.")).toBeInTheDocument()
   })
 
@@ -124,7 +124,7 @@ describe('App routing', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, []))
     await user.click(screen.getByRole('button', { name: 'Log in' }))
 
-    expect(await screen.findByText('Logged in as alice@example.com')).toBeInTheDocument()
+    expect(await screen.findByText('alice@example.com')).toBeInTheDocument()
     expect(await screen.findByText("You don't have any tasks yet.")).toBeInTheDocument()
 
     // Logout — clears state, and RequireAuth (still mounted at /)

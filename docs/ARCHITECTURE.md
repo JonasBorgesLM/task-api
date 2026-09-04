@@ -266,7 +266,7 @@ Deliberately deferred — either not yet needed at this project's scale, or a de
 
 - **Application-level metrics** — `GET /debug/vars` gives baseline Go runtime stats; request count/latency/error-rate per route needs dedicated instrumentation (e.g. Prometheus).
 - **Distributed tracing** — OpenTelemetry, for end-to-end request tracing.
-- **Task filtering and search** — filter `GET /tasks` by `status`/`priority`, or search by title (the natural point to also add matching indexes).
+- **Task search by title** — `GET /tasks` gained `status`/`priority` query-param filtering (Fase 14, `CI-14`/`CI-15` — see `docs/changes/frontend-redesign/`); free-text search by title remains deferred, since nobody has asked for it yet. The natural point to also add a matching index once it is.
 - **Distributed rate limiting** — all three tiers use `moat/ratelimit`'s in-process store, so each replica enforces its own budget and the effective limit behind a load balancer is N times the configured one. `ratelimit.WithStore` takes a shared backend (the library ships a Redis one as a separate module) for a deployment where that matters.
 - **API versioning** (`/v1/tasks`) — worth introducing before shipping a real external client (mobile app, third-party integration) that can't update in lockstep with the API.
 - **BFF (Backend-for-Frontend) layer** — not justified yet with a single core resource, but the natural next architectural step once there's more than one downstream service to aggregate, or once a web client and a mobile client need meaningfully different payload shapes (dashboard aggregation vs. lean/offline-friendly responses). The groundwork is already compatible: stable core API, token-based auth, ownership already enforced server-side.

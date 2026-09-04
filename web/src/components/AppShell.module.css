@@ -1,0 +1,78 @@
+.shell {
+  min-height: 100vh;
+  background-color: var(--color-bg);
+}
+
+/* Sticky + translucent-blur — Fase 14 CI-13. Sticky is what makes the
+   blur mean anything: a header that never sees content scroll under it
+   has nothing to blur. Falls back to an opaque --color-surface where
+   backdrop-filter isn't supported at all (old Firefox, some in-app
+   webviews) — @supports guards the translucent/blur pair together so
+   neither applies without the other; a translucent header over nothing
+   blurred would just look like a rendering bug. */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background-color: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+@supports (backdrop-filter: blur(1px)) {
+  .header {
+    background-color: var(--color-surface-translucent);
+    backdrop-filter: blur(8px);
+  }
+}
+
+/* Vertical breathing room for the content area — PageContainer itself
+   only pads horizontally (it's shared with the header row above, which
+   already has its own padding-block and would get doubled up if
+   PageContainer added its own). Without this, whatever TaskList (or any
+   other authenticated content) renders first sits flush against the
+   header's bottom border — reported directly against "New task" after a
+   real test of this build. */
+.main {
+  padding-block: var(--space-6);
+}
+
+.headerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding-block: var(--space-3);
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.appName {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.currentSection {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-accent);
+}
+
+.userMenu {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.userEmail {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}

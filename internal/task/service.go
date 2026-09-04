@@ -173,13 +173,29 @@ func (s *Service) GetTask(ctx context.Context, userID, id string) (Task, error) 
 // windowed to at most limit results starting at offset. limit < 0 means
 // "no limit" — every task from offset onward is returned.
 //
+// status and priority are the caller's raw, unvalidated query values; an
+// empty string means "no filter on this field" (the same "not provided"
+// sentinel CreateTask/UpdateTask's priority already uses), and a non-empty
+// value that doesn't name a known Status/Priority returns ErrInvalidInput
+// without touching Repository. Both filters combine with AND when present.
+//
 // The ordering and the limit/offset window are both enforced by
 // Repository.FindAll itself (see its doc comment), not re-derived here:
 // pushing them down to storage means a PostgreSQL-backed Repository can
 // apply ORDER BY/LIMIT/OFFSET in the query instead of fetching every row
-// into the process on every call just to discard most of them.
-func (s *Service) ListTasks(ctx context.Context, userID string, limit, offset int) ([]Task, error) {
-	tasks, err := s.repo.FindAll(ctx, userID, limit, offset)
+// into the process on every call just to discard most of them. The
+// status/priority filters follow the same reasoning — see FindAll.
+func (s *Service) ListTasks(ctx context.Context, userID string, limit, offset int, status, priority string) ([]Task, error) {
+	st, err := validateStatusFilter(status)
+	if err != nil {
+		return nil, err
+	}
+	p, err := validatePriorityFilter(priority)
+	if err != nil {
+		return nil, err
+	}
+
+	tasks, err := s.repo.FindAll(ctx, userID, limit, offset, st, p)
 	if err != nil {
 		return nil, fmt.Errorf("list tasks: %w", err)
 	}
@@ -374,6 +390,38 @@ func validateTitleAndDescription(title, description string) (string, string, err
 func validatePriority(priority string, fallback Priority) (Priority, error) {
 	if priority == "" {
 		return fallback, nil
+	}
+	p := Priority(priority)
+	if !validPriorities[p] {
+		return "", fmt.Errorf("%w: priority must be one of low, medium, high", ErrInvalidInput)
+	}
+	return p, nil
+}
+
+// validateStatusFilter returns "" (no filter) if status is empty, or
+// status itself if it names a known Status; otherwise ErrInvalidInput.
+// Unlike validatePriority, there is no fallback value to substitute — an
+// empty filter stays empty, it does not default to some particular status.
+func validateStatusFilter(status string) (Status, error) {
+	if status == "" {
+		return "", nil
+	}
+	s := Status(status)
+	if !validStatuses[s] {
+		return "", fmt.Errorf("%w: status must be one of pending, in_progress, done, cancelled", ErrInvalidInput)
+	}
+	return s, nil
+}
+
+// validatePriorityFilter is validatePriority's counterpart for filtering:
+// it returns "" (no filter) if priority is empty, or priority itself if it
+// names a known Priority; otherwise ErrInvalidInput. Kept separate from
+// validatePriority because that function's empty-string case defaults to a
+// caller-supplied fallback Priority (medium on create, the existing value
+// on update) — semantics that don't apply to "no filter on this field".
+func validatePriorityFilter(priority string) (Priority, error) {
+	if priority == "" {
+		return "", nil
 	}
 	p := Priority(priority)
 	if !validPriorities[p] {

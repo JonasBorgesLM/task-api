@@ -130,13 +130,86 @@ describe('TaskList', () => {
     expect(screen.getByText('high')).toBeInTheDocument()
   })
 
-  it('success: is explicit that sort/filter is fixed — no UI implying capability the API lacks', () => {
+  it('success: shows a page title and a count of what is actually loaded', () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask(), makeTask({ id: 't2' })] })
+    render(<TaskList />)
+
+    expect(screen.getByRole('heading', { name: 'Tasks' })).toBeInTheDocument()
+    expect(screen.getByText('2')).toBeInTheDocument()
+  })
+
+  it('the count gets a "+" when hasMore is true — never a fake total the API never gave', () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask()], hasMore: true })
+    render(<TaskList />)
+
+    expect(screen.getByText('1+')).toBeInTheDocument()
+  })
+
+  it('loading/empty/error states show the page title but no count (nothing loaded yet)', () => {
+    mockTasksResult({ status: 'loading' })
+    render(<TaskList />)
+    expect(screen.queryByRole('heading', { name: 'Tasks' })).not.toBeInTheDocument()
+
+    mockTasksResult({ status: 'empty', tasks: [] })
+    render(<TaskList />)
+    expect(screen.getByRole('heading', { name: 'Tasks' })).toBeInTheDocument()
+    expect(screen.queryByText('0')).not.toBeInTheDocument()
+  })
+
+  it('success: sort order is fixed (no sort control), but status/priority filters exist', () => {
     mockTasksResult({ status: 'success', tasks: [makeTask()] })
     render(<TaskList />)
 
     expect(screen.getByText(/sorted by creation date/i)).toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: /sort/i })).not.toBeInTheDocument()
-    expect(screen.queryByRole('combobox', { name: /filter/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Status' })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Priority' })).toBeInTheDocument()
+  })
+
+  it('changing the status filter re-calls useTasks with the new value', async () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask()] })
+    const user = userEvent.setup()
+    render(<TaskList />)
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'In progress')
+
+    expect(useTasks).toHaveBeenLastCalledWith('in_progress', '')
+  })
+
+  it('changing the priority filter re-calls useTasks with the new value', async () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask()] })
+    const user = userEvent.setup()
+    render(<TaskList />)
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Priority' }), 'Low')
+
+    expect(useTasks).toHaveBeenLastCalledWith('', 'low')
+  })
+
+  it('picking "All statuses" again clears the status filter', async () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask()] })
+    const user = userEvent.setup()
+    render(<TaskList />)
+
+    const statusSelect = screen.getByRole('combobox', { name: 'Status' })
+    await user.selectOptions(statusSelect, 'Done')
+    expect(useTasks).toHaveBeenLastCalledWith('done', '')
+
+    await user.selectOptions(statusSelect, 'All statuses')
+    expect(useTasks).toHaveBeenLastCalledWith('', '')
+  })
+
+  it('empty: shows a filter-specific message once a filter is active', async () => {
+    mockTasksResult({ status: 'empty', tasks: [] })
+    const user = userEvent.setup()
+    render(<TaskList />)
+
+    expect(screen.getByText("You don't have any tasks yet.")).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Priority' }), 'High')
+
+    expect(screen.getByText('No tasks match this filter.')).toBeInTheDocument()
+    expect(screen.queryByText("You don't have any tasks yet.")).not.toBeInTheDocument()
   })
 
   it('shows "Load more" when hasMore is true, and calls loadMore on click', async () => {

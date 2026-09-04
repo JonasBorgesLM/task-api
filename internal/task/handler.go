@@ -22,7 +22,7 @@ const maxRequestBodyBytes = 1 << 20 // 1 MiB
 type taskService interface {
 	CreateTask(ctx context.Context, userID, title, description, priority string) (Task, error)
 	GetTask(ctx context.Context, userID, id string) (Task, error)
-	ListTasks(ctx context.Context, userID string, limit, offset int) ([]Task, error)
+	ListTasks(ctx context.Context, userID string, limit, offset int, status, priority string) ([]Task, error)
 	UpdateTask(ctx context.Context, userID, id, title, description, priority string) (Task, error)
 	DeleteTask(ctx context.Context, userID, id string) error
 	CompleteTask(ctx context.Context, userID, id string) (Task, error)
@@ -101,18 +101,23 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, r, http.StatusCreated, task)
 }
 
-// listTasks handles GET /tasks. It accepts two optional query parameters,
-// applied as a pagination window over Service's deterministic ordering
-// (oldest first, ties broken by ID):
+// listTasks handles GET /tasks. It accepts four optional query parameters,
+// applied as filter + a pagination window over Service's deterministic
+// ordering (oldest first, ties broken by ID):
 //
 //   - limit: maximum number of tasks to return.
 //   - offset: number of tasks to skip before collecting up to limit.
+//   - status: only return tasks with this status (pending/in_progress/
+//     done/cancelled).
+//   - priority: only return tasks with this priority (low/medium/high).
 //
-// Both default to "return everything" when absent, so existing callers
-// that never pass them see no change in behavior. limit/offset are passed
-// through to Service.ListTasks (and from there to Repository), rather than
-// applied here after fetching every task — see Repository's doc comment
-// for why that matters.
+// All four default to "no filter/no limit" when absent, so existing
+// callers that never pass them see no change in behavior. status/priority
+// are passed through as the raw query string — Service.ListTasks is what
+// validates them (see its doc comment for why an unknown value is a 400
+// rather than silently ignored) — and, like limit/offset, all the way
+// through to Repository.FindAll rather than applied here after fetching
+// every task; see Repository's doc comment for why that matters.
 func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 	limit, offset, err := parsePagination(r.URL.Query())
 	if err != nil {
@@ -122,7 +127,8 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 
 	userID, _ := middleware.UserIDFromContext(r.Context())
 
-	tasks, err := h.svc.ListTasks(r.Context(), userID, limit, offset)
+	query := r.URL.Query()
+	tasks, err := h.svc.ListTasks(r.Context(), userID, limit, offset, query.Get("status"), query.Get("priority"))
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return

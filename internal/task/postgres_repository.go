@@ -104,9 +104,9 @@ func (r *postgresRepository) FindByID(ctx context.Context, id, userID string) (T
 	return task, nil
 }
 
-// FindAll returns userID's tasks ordered by (created_at, id) — per
-// Repository's contract — windowed to at most limit results starting at
-// offset.
+// FindAll returns userID's tasks, optionally filtered by status/priority,
+// ordered by (created_at, id) — per Repository's contract — windowed to at
+// most limit results starting at offset.
 //
 // The window is applied in the query itself (LIMIT/OFFSET), not by
 // fetching every row and slicing in Go: for a table with far more rows
@@ -117,13 +117,17 @@ func (r *postgresRepository) FindByID(ctx context.Context, id, userID string) (T
 // equivalent to omitting LIMIT entirely. The WHERE user_id = $1 + ORDER BY
 // lets this use idx_tasks_user_id_created_at_id instead of an in-database
 // sort or a full-table scan as the table grows.
-func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, offset int) ([]Task, error) {
-	const query = `
+//
+// status/priority ("" meaning "no filter on this field") are added to the
+// WHERE clause conditionally, each as its own parameterized comparison —
+// never string-interpolated — so an empty filter reads exactly as if it
+// were never sent, and a filter still benefits from
+// idx_tasks_user_id_created_at_id rather than forcing a different plan.
+func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, offset int, status Status, priority Priority) ([]Task, error) {
+	query := `
 		SELECT id::text, user_id::text, title, description, status, priority, created_at, updated_at, version
 		FROM tasks
 		WHERE user_id = $1::uuid
-		ORDER BY created_at, id
-		LIMIT $2::bigint OFFSET $3::bigint
 	`
 
 	// limit < 0 ("no limit") must reach the query as SQL NULL, not as a
@@ -132,8 +136,21 @@ func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, 
 	if limit >= 0 {
 		limitArg = limit
 	}
+	args := []any{userID}
 
-	rows, err := r.db.QueryContext(ctx, query, userID, limitArg, offset)
+	if status != "" {
+		args = append(args, string(status))
+		query += fmt.Sprintf(" AND status = $%d", len(args))
+	}
+	if priority != "" {
+		args = append(args, string(priority))
+		query += fmt.Sprintf(" AND priority = $%d", len(args))
+	}
+
+	args = append(args, limitArg, offset)
+	query += fmt.Sprintf(" ORDER BY created_at, id LIMIT $%d::bigint OFFSET $%d::bigint", len(args)-1, len(args))
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find all tasks: %w", err)
 	}

@@ -8,6 +8,22 @@
   background-color: var(--color-surface);
 }
 
+/* Hover/focus-within elevation — Fase 14 CI-13. --shadow-md already
+   existed (Fase 13 CI-3); this is the first place it's used as a hover
+   state rather than a resting one. focus-within, not just hover: a
+   keyboard user tabbing into a row's buttons gets the same "this row is
+   active" signal a mouse user gets from hovering it. */
+@media (prefers-reduced-motion: no-preference) {
+  .item {
+    transition: box-shadow var(--transition-base) var(--easing-standard);
+  }
+}
+
+.item:hover,
+.item:focus-within {
+  box-shadow: var(--shadow-md);
+}
+
 .itemHeader {
   display: flex;
   align-items: center;
@@ -35,9 +51,59 @@
   font-weight: var(--font-weight-medium);
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-full);
-  background-color: var(--color-bg);
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
+}
+
+/* Status/priority pairs from CI-1's tokens.css — each already passes the
+   same WCAG AA contrast test the neutral tokens have (tokens.test.ts),
+   so no border is needed to keep the pill legible against the card's own
+   --color-surface. */
+.statusPending {
+  background-color: var(--color-status-pending-bg);
+  color: var(--color-status-pending-text);
+}
+
+.statusInProgress {
+  background-color: var(--color-status-in-progress-bg);
+  color: var(--color-status-in-progress-text);
+}
+
+.statusDone {
+  background-color: var(--color-status-done-bg);
+  color: var(--color-status-done-text);
+}
+
+.statusCancelled {
+  background-color: var(--color-status-cancelled-bg);
+  color: var(--color-status-cancelled-text);
+}
+
+.priorityLow {
+  background-color: var(--color-priority-low-bg);
+  color: var(--color-priority-low-text);
+}
+
+.priorityMedium {
+  background-color: var(--color-priority-medium-bg);
+  color: var(--color-priority-medium-text);
+}
+
+.priorityHigh {
+  background-color: var(--color-priority-high-bg);
+  color: var(--color-priority-high-text);
+}
+
+/* Fase 14 CI-13 — inert today: this .badge is still plain
+   background-color/color (CI-6 hasn't applied the status/priority color
+   tokens from CI-1 yet), so there's nothing to transition between. Once
+   CI-6 lands, a task's badge swaps color when its row re-renders with a
+   new status/priority (React keeps the same DOM node, only the class/
+   text changes), and this rule makes that swap a fade instead of a cut. */
+@media (prefers-reduced-motion: no-preference) {
+  .badge {
+    transition:
+      background-color var(--transition-base) var(--easing-standard),
+      color var(--transition-base) var(--easing-standard);
+  }
 }
 
 .description {
@@ -47,12 +113,18 @@
   margin: 0;
 }
 
+/* border-top + padding-top matches .attachments' own separator below —
+   the three zones (title/description, status+actions, attachments) read
+   as related-but-distinct groups instead of one undifferentiated run of
+   buttons. */
 .footer {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
   flex-wrap: wrap;
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-3);
 }
 
 .actions {

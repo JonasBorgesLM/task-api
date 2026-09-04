@@ -251,7 +251,7 @@ func TestPostgres_FindAll_OrderedByCreatedAtThenID(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), userID, -1, 0)
+	got, err := repo.FindAll(context.Background(), userID, -1, 0, "", "")
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestPostgres_FindAll_OrderedByCreatedAtThenID(t *testing.T) {
 func TestPostgres_FindAll_Empty(t *testing.T) {
 	repo, _, userID := newPostgresTestRepo(t)
 
-	got, err := repo.FindAll(context.Background(), userID, -1, 0)
+	got, err := repo.FindAll(context.Background(), userID, -1, 0, "", "")
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestPostgres_FindAll_ScopedToUser(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), userID, -1, 0)
+	got, err := repo.FindAll(context.Background(), userID, -1, 0, "", "")
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -338,7 +338,72 @@ func TestPostgres_FindAll_Pagination(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := repo.FindAll(context.Background(), userID, tc.limit, tc.offset)
+			got, err := repo.FindAll(context.Background(), userID, tc.limit, tc.offset, "", "")
+			if err != nil {
+				t.Fatalf("FindAll() unexpected error: %v", err)
+			}
+
+			gotTitles := make([]string, len(got))
+			for i, task := range got {
+				gotTitles[i] = task.Title
+			}
+			if len(gotTitles) != len(tc.wantTitles) {
+				t.Fatalf("FindAll() titles = %v, want %v", gotTitles, tc.wantTitles)
+			}
+			for i := range tc.wantTitles {
+				if gotTitles[i] != tc.wantTitles[i] {
+					t.Errorf("FindAll() titles = %v, want %v", gotTitles, tc.wantTitles)
+				}
+			}
+		})
+	}
+}
+
+// TestPostgres_FindAll_FiltersByStatusAndPriority mirrors
+// TestFindAll_FiltersByStatusAndPriority in memory_repository_test.go —
+// both Repository implementations must answer identically, per
+// .claude/rules/go-repository-parity.md.
+func TestPostgres_FindAll_FiltersByStatusAndPriority(t *testing.T) {
+	repo, _, userID := newPostgresTestRepo(t)
+
+	seed := []struct {
+		title    string
+		status   Status
+		priority Priority
+	}{
+		{"1", StatusPending, PriorityLow},
+		{"2", StatusPending, PriorityHigh},
+		{"3", StatusDone, PriorityLow},
+		{"4", StatusDone, PriorityHigh},
+	}
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	for i, s := range seed {
+		task := newPostgresTestTask(t, userID, s.title)
+		task.Status = s.status
+		task.Priority = s.priority
+		task.CreatedAt = base.Add(time.Duration(i) * time.Second)
+		task.UpdatedAt = task.CreatedAt
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name       string
+		status     Status
+		priority   Priority
+		wantTitles []string
+	}{
+		{"no filter", "", "", []string{"1", "2", "3", "4"}},
+		{"status only", StatusDone, "", []string{"3", "4"}},
+		{"priority only", "", PriorityHigh, []string{"2", "4"}},
+		{"status and priority combined (AND)", StatusDone, PriorityHigh, []string{"4"}},
+		{"filter matches nothing", StatusCancelled, "", []string{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repo.FindAll(context.Background(), userID, -1, 0, tc.status, tc.priority)
 			if err != nil {
 				t.Fatalf("FindAll() unexpected error: %v", err)
 			}

@@ -473,6 +473,65 @@ func TestIntegration_ListTasks_Pagination(t *testing.T) {
 	}
 }
 
+// TestIntegration_ListTasks_FiltersByStatusAndPriority drives the real
+// stack through the status/priority query params end to end: create a
+// task, transition it, and confirm GET /tasks?status=.../priority=...
+// returns exactly the matching set, with the two filters combining as
+// AND when both are present.
+func TestIntegration_ListTasks_FiltersByStatusAndPriority(t *testing.T) {
+	srv, token := newIntegrationServer(t)
+
+	createResp := doRequest(t, srv, token, http.MethodPost, "/tasks", `{"title":"A","priority":"high"}`)
+	assertStatus(t, createResp, http.StatusCreated)
+	var created Task
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created task: %v", err)
+	}
+
+	doneResp := doRequest(t, srv, token, http.MethodPatch, "/tasks/"+created.ID+"/status", `{"status":"in_progress"}`)
+	assertStatus(t, doneResp, http.StatusOK)
+
+	lowPendingResp := doRequest(t, srv, token, http.MethodPost, "/tasks", `{"title":"B","priority":"low"}`)
+	assertStatus(t, lowPendingResp, http.StatusCreated)
+
+	statusOnly := doRequest(t, srv, token, http.MethodGet, "/tasks?status=in_progress", "")
+	assertStatus(t, statusOnly, http.StatusOK)
+	if got := decodeTasks(t, statusOnly); len(got) != 1 || got[0].ID != created.ID {
+		t.Errorf("GET /tasks?status=in_progress = %+v, want only %q", got, created.ID)
+	}
+
+	priorityOnly := doRequest(t, srv, token, http.MethodGet, "/tasks?priority=high", "")
+	assertStatus(t, priorityOnly, http.StatusOK)
+	if got := decodeTasks(t, priorityOnly); len(got) != 1 || got[0].ID != created.ID {
+		t.Errorf("GET /tasks?priority=high = %+v, want only %q", got, created.ID)
+	}
+
+	combined := doRequest(t, srv, token, http.MethodGet, "/tasks?status=in_progress&priority=high", "")
+	assertStatus(t, combined, http.StatusOK)
+	if got := decodeTasks(t, combined); len(got) != 1 || got[0].ID != created.ID {
+		t.Errorf("GET /tasks?status=in_progress&priority=high = %+v, want only %q", got, created.ID)
+	}
+
+	noMatch := doRequest(t, srv, token, http.MethodGet, "/tasks?status=in_progress&priority=low", "")
+	assertStatus(t, noMatch, http.StatusOK)
+	if got := decodeTasks(t, noMatch); len(got) != 0 {
+		t.Errorf("GET /tasks?status=in_progress&priority=low = %+v, want none", got)
+	}
+}
+
+// TestIntegration_ListTasks_InvalidFilterIs400 confirms an unrecognized
+// status/priority filter value is rejected with 400, the same as any
+// other invalid-input rejection, rather than silently ignored or treated
+// as "no match".
+func TestIntegration_ListTasks_InvalidFilterIs400(t *testing.T) {
+	srv, token := newIntegrationServer(t)
+
+	resp := doRequest(t, srv, token, http.MethodGet, "/tasks?status=archived", "")
+
+	assertStatus(t, resp, http.StatusBadRequest)
+	assertJSONContentType(t, resp)
+}
+
 // --- GET /tasks/{id} ---
 
 func TestIntegration_GetTask_NotFound(t *testing.T) {

@@ -63,6 +63,49 @@
   --color-danger: #b3261e;
   --color-on-danger: #ffffff;
 
+  /* Status/priority pills (Fase 14, docs/changes/frontend-redesign) — a
+     pair of tokens each, same -bg/-text pattern as --color-warning-*
+     above, each pair >= 4.5:1 against itself (see tokens.test.ts). These
+     exist so a task's status/priority is scannable by color, not just by
+     the label text — the finding that started this phase.
+
+     status-cancelled and priority-high are deliberately different hues
+     (muted rose vs. saturated red) even though both mean "stopped"/
+     "urgent" in a loose sense — a cancelled task and a high-priority task
+     sitting in the same row must not read as the same color. */
+  --color-status-pending-bg: #eef1f6;
+  --color-status-pending-text: #3d4759;
+  --color-status-in-progress-bg: #e3edff;
+  --color-status-in-progress-text: #1d4fbf;
+  --color-status-done-bg: #e2f5ea;
+  --color-status-done-text: #1d7a4c;
+  --color-status-cancelled-bg: #f5e9ea;
+  --color-status-cancelled-text: #8a3b42;
+
+  --color-priority-low-bg: #e7f0ee;
+  --color-priority-low-text: #356b5e;
+  --color-priority-medium-bg: #fff2d6;
+  --color-priority-medium-text: #8a5a00;
+  --color-priority-high-bg: #fbe4e1;
+  --color-priority-high-text: #a23324;
+
+  /* Fase 14 CI-13 (docs/changes/frontend-redesign) — decorative-only
+     tokens, exempt from the WCAG contrast obligation above the same way
+     --shadow-* already is: neither is text.
+
+     --color-surface-translucent is exactly --color-surface (#f8f9fb =
+     rgb(248 249 251)) at 85% alpha — used only behind backdrop-filter:
+     blur() (AppShell's sticky header), where full opacity would defeat
+     the point of blurring what scrolls underneath.
+
+     --color-focus-glow is exactly --color-accent (#2857d6 =
+     rgb(40 87 214)) at 20% alpha — a soft halo added to the existing
+     :focus-visible outline on Button/TextField/Select/Checkbox, never a
+     replacement for it (the 2px outline is what WCAG 2.4.11 actually
+     requires; the glow is decoration on top). */
+  --color-surface-translucent: rgb(248 249 251 / 85%);
+  --color-focus-glow: rgb(40 87 214 / 20%);
+
   /* ---------------------------------------------------------------
    * Typography
    *
@@ -73,10 +116,9 @@
    * brand-identity reason to need one.
    * --------------------------------------------------------------- */
   --font-sans:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
-    sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
-  --font-mono:
-    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 
   /* Modular scale, ~1.25 ratio, rounded to clean rem values. */
   --font-size-xs: 0.75rem; /* 12px — captions, helper/error text */
@@ -136,6 +178,17 @@
   --transition-base: 200ms;
   --transition-slow: 320ms;
   --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ---------------------------------------------------------------
+   * Layout — CI-2 of docs/changes/frontend-redesign. Every screen
+   * previously had no deliberate content width at all: an accidental
+   * ~1126px column came from the leftover Vite scaffold's own #root
+   * rule (see index.css's cleanup in this same change), not from a
+   * choice anyone made. 72rem (1152px) is wide enough that a 15-task
+   * list doesn't feel cramped, narrow enough that a line of body text
+   * doesn't run edge-to-edge on a wide monitor.
+   * --------------------------------------------------------------- */
+  --content-max-width: 72rem;
 
   /* ---------------------------------------------------------------
    * Breakpoints — documented here as the source of truth, but a CSS

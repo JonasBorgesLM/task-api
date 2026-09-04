@@ -17,6 +17,23 @@ export interface TaskItemProps {
   onDeleted: (id: string) => void
 }
 
+// CSS module imports are index-signature typed, so noUncheckedIndexedAccess
+// (a deliberate floor — see tsconfig.app.json) marks every property access
+// string | undefined even for a class known to exist. `?? ''` at the call
+// site handles that structurally instead of asserting it away.
+const STATUS_BADGE_CLASS: Record<Task['status'], string | undefined> = {
+  pending: styles.statusPending,
+  in_progress: styles.statusInProgress,
+  done: styles.statusDone,
+  cancelled: styles.statusCancelled,
+}
+
+const PRIORITY_BADGE_CLASS: Record<Task['priority'], string | undefined> = {
+  low: styles.priorityLow,
+  medium: styles.priorityMedium,
+  high: styles.priorityHigh,
+}
+
 function messageForDeleteError(error: ApiError): string {
   switch (error.kind) {
     case 'not_found':
@@ -64,8 +81,12 @@ export function TaskItem({ task, onUpdated, onDeleted }: TaskItemProps) {
       <div className={styles.itemHeader}>
         <h3 className={styles.title}>{task.title}</h3>
         <div className={styles.badges}>
-          <span className={styles.badge}>{task.status}</span>
-          <span className={styles.badge}>{task.priority}</span>
+          <span className={`${styles.badge} ${STATUS_BADGE_CLASS[task.status] ?? ''}`}>
+            {task.status}
+          </span>
+          <span className={`${styles.badge} ${PRIORITY_BADGE_CLASS[task.priority] ?? ''}`}>
+            {task.priority}
+          </span>
         </div>
       </div>
       {task.description && <p className={styles.description}>{task.description}</p>}
@@ -75,7 +96,7 @@ export function TaskItem({ task, onUpdated, onDeleted }: TaskItemProps) {
           <Button variant="secondary" onClick={() => setEditing(true)}>
             Edit
           </Button>
-          <Button variant="danger" onClick={() => setConfirmingDelete(true)}>
+          <Button variant="secondary" onClick={() => setConfirmingDelete(true)}>
             Delete
           </Button>
         </div>
