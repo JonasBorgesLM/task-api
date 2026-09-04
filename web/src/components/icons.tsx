@@ -164,3 +164,21 @@ export function ShieldIcon() {
     </svg>
   )
 }
+
+/** Chevron left — the previous page. */
+export function ChevronLeftIcon() {
+  return (
+    <svg {...SHARED_PROPS}>
+      <path d="M9.75 3.5L5.5 8l4.25 4.5" />
+    </svg>
+  )
+}
+
+/** Chevron right — the next page. */
+export function ChevronRightIcon() {
+  return (
+    <svg {...SHARED_PROPS}>
+      <path d="M6.25 3.5L10.5 8l-4.25 4.5" />
+    </svg>
+  )
+}

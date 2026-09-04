@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { apiFetch } from '../../api/client'
 import type { ApiError } from '../../api/errors'
 import { classifyError } from '../../api/errors'
@@ -10,43 +10,59 @@ export type TasksStatus = 'loading' | 'empty' | 'error' | 'success'
 
 export interface UseTasksResult {
   status: TasksStatus
+  /** The current page's tasks — never an accumulation of the pages before it. */
   tasks: Task[]
   error: ApiError | null
-  /** True once a page came back with more than PAGE_SIZE items — see the module doc comment. */
-  hasMore: boolean
-  isLoadingMore: boolean
-  loadMore: () => void
+  /** 1-based, for display. There is no total, so there is no "of N" — see the module doc comment. */
+  page: number
+  /** True when a page came back with more than PAGE_SIZE items — see the module doc comment. */
+  hasNextPage: boolean
+  hasPreviousPage: boolean
+  isPaging: boolean
+  nextPage: () => void
+  previousPage: () => void
   reload: () => void
   /**
-   * Local-only mutations for CI-8 (create/edit/delete/status change) —
-   * none of them re-fetch. A full reload() after every mutation would
-   * be simpler, but it would also throw away everything the user
-   * scrolled past via loadMore(), for no reason: the mutation response
-   * already carries the updated Task, so patching the array in place is
-   * both cheaper and less disruptive.
+   * Edits patch the current page in place: the mutation response already
+   * carries the updated Task, and an edit changes neither the size of
+   * the result set nor its created_at ordering, so the window this page
+   * represents is still the right one.
+   *
+   * Create and delete do change the set, and therefore which rows fall
+   * inside the window — so they re-fetch the page rather than splicing
+   * an 11th row into a page of ten. Cheap now that a page is ten rows
+   * rather than everything scrolled past.
    */
   addTaskLocally: (task: Task) => void
   updateTaskLocally: (task: Task) => void
   removeTaskLocally: (id: string) => void
 }
 
-// No hard reason this has to be exactly 20 — it's a reasonable page size,
-// exported so the test can assert against the same constant rather than
-// a magic number duplicated in the test file.
-export const PAGE_SIZE = 20
+// Ten rows a page — small enough that the whole page is on screen at
+// once, which is the point of paging rather than accumulating. Exported
+// so the tests assert against the same constant rather than a magic
+// number duplicated in a test file.
+export const PAGE_SIZE = 10
 
 /**
+ * Discrete pages, forwards and back — one window of PAGE_SIZE rows at a
+ * time, never an accumulation. Replaces the accumulate-and-scroll model
+ * this hook shipped with: that one grew without bound, so a long list
+ * meant an ever-heavier page and no way to get back to where you were.
+ *
  * GET /v1/tasks has no total count in its response — no X-Total-Count
  * header, no envelope (see docs/openapi.yaml: it returns a bare Task[]).
  * There is structurally no way to render "page 3 of 12", and pretending
- * otherwise would be lying about what the API can tell the client. This
- * hook uses the "ask for one extra" technique instead (AM-4, see
- * docs/changes/web-frontend/plan.md's CI-7 entry and validation.md):
- * request `limit + 1`. If exactly `limit + 1` come back, there is at
- * least one more page — display only the first `limit` and set
- * hasMore=true; the (limit+1)th item is discarded, never rendered, and
- * re-requested (as item 1 of the next page) when the caller asks for
- * more.
+ * otherwise would be lying about what the API can tell the client. So
+ * the pager shows which page you are on and whether another exists, and
+ * nothing it cannot know.
+ *
+ * Whether another exists comes from the "ask for one extra" technique
+ * (AM-4, see docs/changes/web-frontend/plan.md's CI-7 entry and
+ * validation.md): request `limit + 1`. If `limit + 1` come back, there
+ * is at least one more page — render the first `limit` and set
+ * hasNextPage; the extra row is discarded, never rendered, and
+ * re-requested as row 1 of the next page.
  */
 /**
  * statusFilter/priorityFilter mirror GET /v1/tasks's own query params
@@ -60,13 +76,16 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
   const [tasks, setTasks] = useState<Task[]>([])
   const [phase, setPhase] = useState<'loading' | 'loaded' | 'error'>('loading')
   const [error, setError] = useState<ApiError | null>(null)
-  const [hasMore, setHasMore] = useState(false)
-  const [isLoadingMore, setIsLoadingMore] = useState(false)
-  const nextOffset = useRef(0)
+  const [hasNextPage, setHasNextPage] = useState(false)
+  // 0-based internally, 1-based only where it is shown.
+  const [pageIndex, setPageIndex] = useState(0)
 
   const fetchPage = useCallback(
-    async (offset: number, append: boolean) => {
-      const params = new URLSearchParams({ limit: String(PAGE_SIZE + 1), offset: String(offset) })
+    async (index: number) => {
+      const params = new URLSearchParams({
+        limit: String(PAGE_SIZE + 1),
+        offset: String(index * PAGE_SIZE),
+      })
       if (statusFilter) params.set('status', statusFilter)
       if (priorityFilter) params.set('priority', priorityFilter)
 
@@ -78,13 +97,19 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
       }
       const page = (await response.json()) as Task[]
       const more = page.length > PAGE_SIZE
-      const visible = more ? page.slice(0, PAGE_SIZE) : page
 
-      setTasks((previous) => (append ? [...previous, ...visible] : visible))
-      setHasMore(more)
+      // Deleting the last row of the last page leaves you standing on a
+      // page that no longer exists. Step back rather than showing an
+      // empty list with a Previous button as the only way out.
+      if (page.length === 0 && index > 0) {
+        setPageIndex(index - 1)
+        return
+      }
+
+      setTasks(more ? page.slice(0, PAGE_SIZE) : page)
+      setHasNextPage(more)
       setError(null)
       setPhase('loaded')
-      nextOffset.current = offset + visible.length
     },
     [statusFilter, priorityFilter],
   )
@@ -97,46 +122,69 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
   // useCallback deps above), which is what makes this effect also
   // re-fetch — from offset 0, discarding whatever was scrolled past —
   // every time the caller changes either filter, not just on mount.
+  // Changing a filter changes what page 1 even means, so the window
+  // resets — during render, not in an effect. As an effect this raced
+  // the fetch below: both run on a filter change, and the fetch saw the
+  // *previous* pageIndex, firing a request for (say) offset 10 of the
+  // newly filtered set before the reset landed and it re-fired at
+  // offset 0. Adjusting state during render instead means the fetch
+  // effect never observes the stale page at all — React's documented
+  // way to derive state from changed inputs.
+  const filterKey = `${statusFilter}|${priorityFilter}`
+  const [lastFilterKey, setLastFilterKey] = useState(filterKey)
+  if (filterKey !== lastFilterKey) {
+    setLastFilterKey(filterKey)
+    setPageIndex(0)
+  }
+
   useEffect(() => {
     setPhase('loading')
-    void fetchPage(0, false)
-  }, [fetchPage])
+    void fetchPage(pageIndex)
+  }, [fetchPage, pageIndex])
 
-  const loadMore = useCallback(() => {
-    if (isLoadingMore || !hasMore) return
-    setIsLoadingMore(true)
-    void fetchPage(nextOffset.current, true).finally(() => setIsLoadingMore(false))
-  }, [fetchPage, hasMore, isLoadingMore])
+  // A page is in flight exactly when the fetch effect above is loading
+  // one. Derived rather than tracked: as its own state it needed an
+  // effect to clear it, which is the "cascading render" this codebase's
+  // linter rightly complains about — and a second source of truth for
+  // something `phase` already knows.
+  const isPaging = phase === 'loading'
+
+  const nextPage = useCallback(() => {
+    if (!hasNextPage) return
+    setPageIndex((index) => index + 1)
+  }, [hasNextPage])
+
+  const previousPage = useCallback(() => {
+    setPageIndex((index) => Math.max(0, index - 1))
+  }, [])
 
   const reload = useCallback(() => {
     setPhase('loading')
-    void fetchPage(0, false)
-  }, [fetchPage])
+    void fetchPage(pageIndex)
+  }, [fetchPage, pageIndex])
 
-  // Appended at the end, matching the list's own created_at-ascending
-  // order for the common case (viewing the first, un-paginated page). A
-  // newly created task is always the newest, so it belongs after
-  // everything currently loaded — this can only misplace it relative to
-  // not-yet-loaded pages if the caller has already scrolled past page 1,
-  // a deliberately accepted, minor edge case rather than a reload().
-  const addTaskLocally = useCallback((task: Task) => {
-    setTasks((previous) => [...previous, task])
-  }, [])
+  // A new task is the newest, so under created_at-ascending ordering it
+  // belongs on the *last* page — which is usually not the one being
+  // looked at. Splicing it into the current page would show an eleventh
+  // row on a page of ten and put it in the wrong place besides, so the
+  // page is re-fetched instead. (The task argument stays in the
+  // signature: the caller has it, and this hook owning the decision of
+  // what to do with it is the point.)
+  const addTaskLocally = useCallback(() => {
+    void fetchPage(pageIndex)
+  }, [fetchPage, pageIndex])
 
   const updateTaskLocally = useCallback((task: Task) => {
     setTasks((previous) => previous.map((t) => (t.id === task.id ? task : t)))
   }, [])
 
-  // nextOffset shifts back by one to keep loadMore's offset roughly
-  // aligned with the server-side dataset, which just got one row
-  // shorter. Not exact under multiple concurrent deletes, but correct
-  // for the common single-delete case, and a drift here only ever
-  // costs a duplicate or skipped row on the *next* loadMore — never a
-  // wrong row in what's already rendered.
-  const removeTaskLocally = useCallback((id: string) => {
-    setTasks((previous) => previous.filter((t) => t.id !== id))
-    nextOffset.current = Math.max(0, nextOffset.current - 1)
-  }, [])
+  // A delete pulls every later row one place forward, so the window
+  // this page represents now holds a different set — re-fetch rather
+  // than leave a nine-row page with a tenth row sitting on the next one
+  // that will never be seen.
+  const removeTaskLocally = useCallback(() => {
+    void fetchPage(pageIndex)
+  }, [fetchPage, pageIndex])
 
   const status: TasksStatus =
     phase === 'loading'
@@ -151,9 +199,12 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
     status,
     tasks,
     error,
-    hasMore,
-    isLoadingMore,
-    loadMore,
+    page: pageIndex + 1,
+    hasNextPage,
+    hasPreviousPage: pageIndex > 0,
+    isPaging,
+    nextPage,
+    previousPage,
     reload,
     addTaskLocally,
     updateTaskLocally,

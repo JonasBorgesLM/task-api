@@ -14,8 +14,8 @@ const STATUS_ORDER: Task['status'][] = ['pending', 'in_progress', 'done', 'cance
 const PRIORITY_ORDER: Task['priority'][] = ['high', 'medium', 'low']
 
 export interface TaskStatsProps {
+  /** The current page's tasks — what this panel counts, and all it claims to. */
   tasks: Task[]
-  hasMore: boolean
   /** True when a status/priority filter is narrowing the list. */
   isFiltered: boolean
 }
@@ -39,14 +39,13 @@ function countBy<K extends string>(tasks: Task[], key: (t: Task) => K): Record<s
  * (Escape, outside click, focus back to the trigger) rather than its
  * markup.
  *
- * Every number counts the tasks this client has actually loaded, never
- * a server-side total — GET /v1/tasks does not return one (see
- * useTasks.tsx). So the panel says "loaded", says "at least" when
- * another page is waiting, and says so plainly when a filter means
- * these are only the matching ones. A confident-looking total the API
- * never sent would be the one thing worse than no total at all.
+ * Every number counts the page on screen, never a server-side total —
+ * GET /v1/tasks does not return one (see useTasks.tsx). So the panel
+ * says "on this page", and says so plainly when a filter means these
+ * are only the matching ones. A confident-looking total the API never
+ * sent would be the one thing worse than no total at all.
  */
-export function TaskStats({ tasks, hasMore, isFiltered }: TaskStatsProps) {
+export function TaskStats({ tasks, isFiltered }: TaskStatsProps) {
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -78,7 +77,7 @@ export function TaskStats({ tasks, hasMore, isFiltered }: TaskStatsProps) {
 
   const byStatus = countBy(tasks, (t) => t.status)
   const byPriority = countBy(tasks, (t) => t.priority)
-  const total = `${tasks.length}${hasMore ? '+' : ''}`
+  const total = String(tasks.length)
 
   return (
     <div className={styles.wrapper}>
@@ -88,7 +87,7 @@ export function TaskStats({ tasks, hasMore, isFiltered }: TaskStatsProps) {
         className={styles.trigger}
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        aria-label={`Task counts (${tasks.length}${hasMore ? ' or more' : ''} loaded)`}
+        aria-label={`Task counts (${tasks.length} on this page)`}
         onClick={() => setOpen((value) => !value)}
       >
         <InfoIcon />
@@ -99,7 +98,7 @@ export function TaskStats({ tasks, hasMore, isFiltered }: TaskStatsProps) {
           <p className={styles.total}>
             <span className={styles.totalValue}>{total}</span>
             <span className={styles.totalLabel}>
-              {hasMore ? 'loaded so far' : 'tasks'}
+              on this page
               {isFiltered ? ', matching the filter' : ''}
             </span>
           </p>

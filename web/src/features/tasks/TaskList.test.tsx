@@ -46,9 +46,12 @@ function mockTasksResult(overrides: Partial<ReturnType<typeof useTasks>>) {
     status: 'success',
     tasks: [],
     error: null,
-    hasMore: false,
-    isLoadingMore: false,
-    loadMore: vi.fn(),
+    page: 1,
+    hasNextPage: false,
+    hasPreviousPage: false,
+    isPaging: false,
+    nextPage: vi.fn(),
+    previousPage: vi.fn(),
     reload: vi.fn(),
     addTaskLocally: vi.fn(),
     updateTaskLocally: vi.fn(),
@@ -135,23 +138,24 @@ describe('TaskList', () => {
   // The page title and its always-visible count were dropped in the
   // design review: the title named the only screen this app has, and
   // the count now lives one glyph away, in the counts panel.
-  it('the counts button names how many are loaded, without opening anything', () => {
+  it('the counts button names how many are on the page, without opening anything', () => {
     mockTasksResult({ status: 'success', tasks: [makeTask(), makeTask({ id: 't2' })] })
     render(<TaskList />)
 
-    expect(screen.getByRole('button', { name: 'Task counts (2 loaded)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Task counts (2 on this page)' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Tasks' })).not.toBeInTheDocument()
   })
 
-  it('the count says "or more" when hasMore is true — never a fake total the API never gave', async () => {
-    mockTasksResult({ status: 'success', tasks: [makeTask()], hasMore: true })
+  // The panel counts the page on screen and says so. It never implies a
+  // total, because GET /v1/tasks does not return one.
+  it('the counts panel describes the page on screen, not a total', async () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask()], hasNextPage: true })
     const user = userEvent.setup()
     render(<TaskList />)
 
-    await user.click(screen.getByRole('button', { name: 'Task counts (1 or more loaded)' }))
+    await user.click(screen.getByRole('button', { name: 'Task counts (1 on this page)' }))
 
-    expect(screen.getByText('1+')).toBeInTheDocument()
-    expect(screen.getByText('loaded so far')).toBeInTheDocument()
+    expect(screen.getByText('on this page')).toBeInTheDocument()
   })
 
   it('the counts panel breaks the loaded tasks down by status and priority', async () => {
@@ -243,22 +247,61 @@ describe('TaskList', () => {
     expect(screen.queryByText("You don't have any tasks yet.")).not.toBeInTheDocument()
   })
 
-  it('shows "Load more" when hasMore is true, and calls loadMore on click', async () => {
-    const loadMore = vi.fn()
-    mockTasksResult({ status: 'success', tasks: [makeTask()], hasMore: true, loadMore })
+  it('Next is offered when another page exists, and calls nextPage on click', async () => {
+    const nextPage = vi.fn()
+    mockTasksResult({ status: 'success', tasks: [makeTask()], hasNextPage: true, nextPage })
     const user = userEvent.setup()
     render(<TaskList />)
 
-    const button = screen.getByRole('button', { name: 'Load more' })
+    const button = screen.getByRole('button', { name: 'Next' })
     await user.click(button)
-    expect(loadMore).toHaveBeenCalledOnce()
+    expect(nextPage).toHaveBeenCalledOnce()
   })
 
-  it('hides "Load more" when hasMore is false — the limit+1 technique found no extra item', () => {
-    mockTasksResult({ status: 'success', tasks: [makeTask()], hasMore: false })
+  it('Previous is offered once off the first page, and calls previousPage on click', async () => {
+    const previousPage = vi.fn()
+    mockTasksResult({
+      status: 'success',
+      tasks: [makeTask()],
+      page: 3,
+      hasPreviousPage: true,
+      previousPage,
+    })
+    const user = userEvent.setup()
     render(<TaskList />)
 
-    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
+    expect(screen.getByText('Page 3')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Previous' }))
+
+    expect(previousPage).toHaveBeenCalledOnce()
+  })
+
+  it('disables the direction that has nowhere to go', async () => {
+    mockTasksResult({
+      status: 'success',
+      tasks: [makeTask()],
+      hasPreviousPage: false,
+      hasNextPage: true,
+    })
+    render(<TaskList />)
+
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
+  })
+
+  // A single page needs no pager at all — the limit+1 technique found no
+  // extra item, and there is nothing behind it.
+  it('hides the pager entirely when the whole result set fits one page', () => {
+    mockTasksResult({
+      status: 'success',
+      tasks: [makeTask()],
+      hasNextPage: false,
+      hasPreviousPage: false,
+    })
+    render(<TaskList />)
+
+    expect(screen.queryByRole('navigation', { name: 'Task pages' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
   })
 
   it('offers "New task" even with zero tasks — creating the first one isn\'t blocked by the empty state', () => {

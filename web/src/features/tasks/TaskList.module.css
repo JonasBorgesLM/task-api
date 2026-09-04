@@ -67,8 +67,18 @@
   color: var(--color-danger);
 }
 
-.loadMore {
+.pager {
   display: flex;
+  align-items: center;
   justify-content: center;
+  gap: var(--space-4);
   padding: var(--space-2);
+}
+
+.pageNumber {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
 }

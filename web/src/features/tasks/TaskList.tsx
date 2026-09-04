@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { Button } from '../../components/Button'
-import { ChevronDownIcon, PlusIcon, RefreshIcon } from '../../components/icons'
+import { ChevronLeftIcon, ChevronRightIcon, PlusIcon, RefreshIcon } from '../../components/icons'
 import { Modal } from '../../components/Modal'
 import { Select } from '../../components/Select'
 import { Skeleton } from '../../components/Skeleton'
@@ -44,37 +44,20 @@ export function TaskList() {
     status,
     tasks,
     error,
-    hasMore,
-    isLoadingMore,
-    loadMore,
+    page,
+    hasNextPage,
+    hasPreviousPage,
+    isPaging,
+    nextPage,
+    previousPage,
     reload,
     addTaskLocally,
     updateTaskLocally,
     removeTaskLocally,
   } = useTasks(statusFilter, priorityFilter)
-  const sentinelRef = useRef<HTMLDivElement>(null)
   const [creating, setCreating] = useState(false)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const isFiltered = statusFilter !== '' || priorityFilter !== ''
-
-  // Infinite scroll is a progressive enhancement over the real "Load
-  // more" button below, not a replacement for it: IntersectionObserver
-  // has no keyboard equivalent, so a keyboard/screen-reader user relies
-  // on the button either way. Feature-detected rather than assumed
-  // present — this project's jsdom test environment does not implement
-  // it, and this effect simply does nothing there, which is correct:
-  // the button alone is what the tests exercise.
-  useEffect(() => {
-    if (!hasMore || typeof IntersectionObserver === 'undefined') return
-    const sentinel = sentinelRef.current
-    if (!sentinel) return
-
-    const observer = new IntersectionObserver((entries) => {
-      if (entries[0]?.isIntersecting) loadMore()
-    })
-    observer.observe(sentinel)
-    return () => observer.disconnect()
-  }, [hasMore, loadMore])
 
   function handleCreated(task: Task) {
     setCreating(false)
@@ -158,7 +141,7 @@ export function TaskList() {
           </Select>
         </div>
 
-        <TaskStats tasks={tasks} hasMore={hasMore} isFiltered={isFiltered} />
+        <TaskStats tasks={tasks} isFiltered={isFiltered} />
 
         <Button onClick={() => setCreating(true)}>
           <PlusIcon />
@@ -199,13 +182,30 @@ export function TaskList() {
               />
             ))}
           </ul>
-          {hasMore && (
-            <div className={styles.loadMore} ref={sentinelRef}>
-              <Button variant="secondary" onClick={loadMore} loading={isLoadingMore}>
-                <ChevronDownIcon />
-                Load more
+
+          {/* A page number and two directions, and nothing the API can't
+              tell this client: GET /v1/tasks returns no total, so there
+              is no "of 12" to render and no last-page jump to offer.
+              Next is enabled only when the extra row this page asked
+              for actually came back — see useTasks. */}
+          {(hasPreviousPage || hasNextPage) && (
+            <nav className={styles.pager} aria-label="Task pages">
+              <Button
+                variant="secondary"
+                onClick={previousPage}
+                disabled={!hasPreviousPage || isPaging}
+              >
+                <ChevronLeftIcon />
+                Previous
               </Button>
-            </div>
+              <span className={styles.pageNumber} aria-live="polite">
+                Page {page}
+              </span>
+              <Button variant="secondary" onClick={nextPage} disabled={!hasNextPage || isPaging}>
+                Next
+                <ChevronRightIcon />
+              </Button>
+            </nav>
           )}
         </>
       )}
