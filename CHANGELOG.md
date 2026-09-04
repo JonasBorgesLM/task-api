@@ -6,7 +6,16 @@ versionamento seguindo [Semantic Versioning](https://semver.org/lang/pt-BR/).
 Este é o primeiro release versionado do projeto — não há tags anteriores.
 `v1.0.0` marca o ponto em que a API passa a ter contrato estável (`/v1`).
 
-## [Não lançado]
+## [1.5.0] — a definir na tag
+
+Passe de revisão de design sobre a SPA (identidade visual, paginação,
+filtros múltiplos) — PR #194. **Minor, não major:** a única mudança de
+contrato é aditiva e retrocompatível (`status`/`priority` passam a
+aceitar ocorrências repetidas em `GET /v1/tasks`); uma ocorrência única
+se comporta exatamente como antes, nenhuma rota, campo ou código de
+status existente muda, e um cliente que nunca repete um parâmetro não
+percebe diferença alguma. O resto do lote é frontend, fora do contrato
+da API.
 
 ### Adicionado
 - `GET /v1/tasks` aceita `status` e `priority` **repetidos**
@@ -34,6 +43,12 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   canceladas ficam fora da visão inicial e entram com um clique. Sem
   mudança de comportamento observável na API além do parâmetro repetido
   descrito acima.
+- `web/` — identidade visual própria (papel, tinta, um único conjunto de
+  ícones) e a cor de destaque passa a ser a do ícone da própria página
+  (`public/favicon.svg`). Cada task abre sob demanda: fechada, a linha é
+  título, estado e ações; descrição e anexos ficam a um clique. Nada
+  disso é observável por um cliente da API — ver `docs/openapi.yaml`
+  para o que de fato mudou no contrato.
 
 ## [1.4.0] — a definir na tag
 
