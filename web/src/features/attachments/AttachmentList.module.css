@@ -56,9 +56,24 @@
   padding: var(--space-2);
 }
 
+/* Fase 14 CI-8 — Upload stays exactly as visible/keyboard-reachable as
+   ever; putting it in this row with its (conditional) caption is what
+   shrinks the empty state's total footprint, not any change to Upload
+   itself. Always rendered (not just when empty) so Upload's parent
+   element never changes shape between renders — see AttachmentList.tsx. */
+.uploadRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* font-size-xs (was -sm) — a smaller, quieter caption is what "reduce
+   visual weight" means here (plan.md CI-8): still fully legible against
+   --color-text-secondary's existing contrast, just less loud when it
+   repeats across every empty task in the list. */
 .empty {
   font-family: var(--font-sans);
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
   margin: 0;
 }
