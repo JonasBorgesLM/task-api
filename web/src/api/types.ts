@@ -135,7 +135,7 @@ export interface paths {
         };
         /**
          * List the authenticated caller's tasks
-         * @description Returns the authenticated caller's own tasks — never another user's — ordered by `created_at` ascending (oldest first; ties broken by `id`). The Repository guarantees this ordering and applies the ownership filter and `limit`/`offset` itself (pushed into the SQL query for the PostgreSQL-backed store: `WHERE user_id = … ORDER BY … LIMIT … OFFSET …`), rather than the Service fetching everything and filtering/paginating in memory. `limit` and `offset` are optional; omitting both returns every task the caller owns. Returns an empty JSON array, never `null`, when the caller has no tasks or when `offset` is past the end of the list.
+         * @description Returns the authenticated caller's own tasks — never another user's — ordered by `created_at` ascending (oldest first; ties broken by `id`). The Repository guarantees this ordering and applies the ownership filter, `status`/`priority` filters, and `limit`/`offset` itself (pushed into the SQL query for the PostgreSQL-backed store: `WHERE user_id = … AND status = … AND priority = … ORDER BY … LIMIT … OFFSET …`), rather than the Service fetching everything and filtering/paginating in memory. `limit`, `offset`, `status` and `priority` are all optional; omitting every one of them returns every task the caller owns. `status` and `priority` combine with AND when both are present (e.g. `?status=pending&priority=high` returns only tasks that are both). Returns an empty JSON array, never `null`, when the caller has no tasks, when `offset` is past the end of the list, or when the filter matches nothing.
          */
         get: operations["listTasks"];
         put?: never;
@@ -962,10 +962,20 @@ export interface operations {
                  */
                 limit?: number;
                 /**
-                 * @description Number of tasks to skip before collecting `limit` results. Sending the parameter with an empty value (`?offset=`) is treated as omitting it, not as an error.
+                 * @description Number of tasks to skip before collecting `limit` results. Sending the parameter with an empty value (`?offset=`) is treated as omitting it, not as an error. Applied after `status`/`priority` filtering, the same way a SQL `WHERE … LIMIT … OFFSET …` would window the filtered result, not the full table.
                  * @example 0
                  */
                 offset?: number;
+                /**
+                 * @description Only return tasks with this status. Sending the parameter with an empty value (`?status=`) is treated as omitting it, not as an error.
+                 * @example pending
+                 */
+                status?: components["schemas"]["Status"];
+                /**
+                 * @description Only return tasks with this priority. Sending the parameter with an empty value (`?priority=`) is treated as omitting it, not as an error.
+                 * @example high
+                 */
+                priority?: components["schemas"]["Priority"];
             };
             header?: never;
             path?: never;
@@ -973,7 +983,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Success. The array is empty (`[]`) if the caller has no tasks, or if `offset` is past the end of the list. */
+            /** @description Success. The array is empty (`[]`) if the caller has no tasks, if `offset` is past the end of the list, or if `status`/`priority` match nothing. */
             200: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
@@ -983,18 +993,13 @@ export interface operations {
                     "application/json": components["schemas"]["Task"][];
                 };
             };
-            /** @description `limit` or `offset` is present but not a non-negative integer. */
+            /** @description `limit`/`offset` is present but not a non-negative integer, or `status`/`priority` is present but not one of the values in their respective enum. */
             400: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "error": "invalid input: limit must be a non-negative integer"
-                     *     }
-                     */
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
