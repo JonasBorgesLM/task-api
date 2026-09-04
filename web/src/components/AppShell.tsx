@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { Button } from './Button'
 import styles from './AppShell.module.css'
 import { PageContainer } from './PageContainer'
+import { ThemeToggle } from './ThemeToggle'
 
 export interface AppShellProps {
   userEmail: string | undefined
@@ -18,12 +19,13 @@ export interface AppShellProps {
  * buttons plus the list — no name, no landmarks, nothing that read as a
  * product rather than a test page.
  *
- * Deliberately v1-minimal: no global search, no avatar, no theme
- * switcher — see docs/changes/frontend-redesign/validation.md's AM-4 for
- * why those wait for a concrete need. "Tasks" in the nav is a static
- * current-section label, not a link — this app has exactly one
- * authenticated destination today, and a nav item that goes nowhere else
- * would be a fake affordance, not real wayfinding.
+ * Deliberately v1-minimal: no global search, no avatar — see
+ * docs/changes/frontend-redesign/validation.md's AM-4 for why those wait
+ * for a concrete need. A theme switcher was the one AM-4 exclusion that
+ * did get a concrete request (AM-5/CI-11) and lives here now. "Tasks" in
+ * the nav is a static current-section label, not a link — this app has
+ * exactly one authenticated destination today, and a nav item that goes
+ * nowhere else would be a fake affordance, not real wayfinding.
  */
 export function AppShell({ userEmail, onLogout, onLogoutAll, children }: AppShellProps) {
   return (
@@ -38,6 +40,7 @@ export function AppShell({ userEmail, onLogout, onLogoutAll, children }: AppShel
               </span>
             </nav>
             <div className={styles.userMenu}>
+              <ThemeToggle />
               <span className={styles.userEmail}>{userEmail}</span>
               <Button variant="secondary" onClick={onLogout}>
                 Log out

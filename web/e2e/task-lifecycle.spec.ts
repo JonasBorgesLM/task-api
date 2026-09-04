@@ -26,8 +26,9 @@ test('create, edit, transition status, then delete a task with confirmation', as
   await page.getByRole('button', { name: 'Save changes' }).click()
   await expect(editedHeading).toBeVisible()
 
-  // --- Status transition ---
-  await page.getByRole('button', { name: 'Move to In progress' }).click()
+  // --- Status transition (Fase 14 CI-12: icon-trigger pull-down menu) ---
+  await page.getByRole('button', { name: /Change status of/ }).click()
+  await page.getByRole('menuitem', { name: 'Move to In progress' }).click()
   await expect(page.getByText('in_progress')).toBeVisible()
 
   // --- Delete, requires confirmation ---

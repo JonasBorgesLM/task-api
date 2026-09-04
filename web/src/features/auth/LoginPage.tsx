@@ -97,8 +97,11 @@ export function LoginPage() {
         <Button type="submit" loading={isSubmitting}>
           Log in
         </Button>
-        <p>
-          Don't have an account? <Link to="/register">Create one</Link>
+        <p className={styles.switchLink}>
+          Don't have an account?{' '}
+          <Link to="/register" className={styles.switchLinkAnchor}>
+            Create one
+          </Link>
         </p>
       </form>
     </AuthLayout>

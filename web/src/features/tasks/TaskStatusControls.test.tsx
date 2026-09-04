@@ -36,6 +36,10 @@ function makeTask(status: Task['status']): Task {
   }
 }
 
+async function openMenu(user: ReturnType<typeof userEvent.setup>, taskTitle: string) {
+  await user.click(screen.getByRole('button', { name: new RegExp(`Change status of "${taskTitle}"`) }))
+}
+
 describe('TaskStatusControls', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn())
@@ -46,41 +50,40 @@ describe('TaskStatusControls', () => {
     vi.unstubAllGlobals()
   })
 
-  it('pending: all three other statuses are legal targets', () => {
+  it('pending: the menu lists all three other statuses as legal targets', async () => {
+    const user = userEvent.setup()
     render(<TaskStatusControls task={makeTask('pending')} onSuccess={vi.fn()} />)
 
-    expect(screen.getByRole('button', { name: 'Move to In progress' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Move to Done' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Move to Cancelled' })).toBeEnabled()
+    await openMenu(user, 'Buy groceries')
+
+    expect(screen.getByRole('menuitem', { name: 'Move to In progress' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Move to Done' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Move to Cancelled' })).toBeInTheDocument()
   })
 
-  it('done: only pending and in_progress are legal — cancelled is disabled, not clickable', () => {
+  it('done: only pending and in_progress are legal — cancelled is absent from the menu entirely', async () => {
+    const user = userEvent.setup()
     render(<TaskStatusControls task={makeTask('done')} onSuccess={vi.fn()} />)
 
-    expect(screen.getByRole('button', { name: 'Move to Pending' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Move to In progress' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Move to Cancelled' })).toBeDisabled()
+    await openMenu(user, 'Buy groceries')
+
+    expect(screen.getByRole('menuitem', { name: 'Move to Pending' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Move to In progress' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Move to Cancelled' })).not.toBeInTheDocument()
   })
 
-  it('cancelled: only pending is legal — done and in_progress are disabled', () => {
-    render(<TaskStatusControls task={makeTask('cancelled')} onSuccess={vi.fn()} />)
-
-    expect(screen.getByRole('button', { name: 'Move to Pending' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Move to In progress' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Move to Done' })).toBeDisabled()
-  })
-
-  it('clicking a disabled (illegal) button never fires a request', async () => {
-    const fetchMock = vi.mocked(fetch)
+  it('cancelled: only pending is legal — done and in_progress are absent from the menu', async () => {
     const user = userEvent.setup()
     render(<TaskStatusControls task={makeTask('cancelled')} onSuccess={vi.fn()} />)
 
-    await user.click(screen.getByRole('button', { name: 'Move to Done' }))
+    await openMenu(user, 'Buy groceries')
 
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(screen.getByRole('menuitem', { name: 'Move to Pending' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Move to In progress' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Move to Done' })).not.toBeInTheDocument()
   })
 
-  it('clicking a legal transition PATCHes /status and calls onSuccess with the result', async () => {
+  it('selecting a legal transition PATCHes /status and calls onSuccess with the result', async () => {
     const fetchMock = vi.mocked(fetch)
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { csrf_token: 'tok' }))
     const updated = makeTask('in_progress')
@@ -89,7 +92,8 @@ describe('TaskStatusControls', () => {
     const user = userEvent.setup()
     render(<TaskStatusControls task={makeTask('pending')} onSuccess={onSuccess} />)
 
-    await user.click(screen.getByRole('button', { name: 'Move to In progress' }))
+    await openMenu(user, 'Buy groceries')
+    await user.click(screen.getByRole('menuitem', { name: 'Move to In progress' }))
 
     await vi.waitFor(() => expect(onSuccess).toHaveBeenCalledWith(updated))
     const [url, init] = fetchMock.mock.calls[1]!
@@ -99,7 +103,7 @@ describe('TaskStatusControls', () => {
 
   it('a 409 on a transition the client considered legal is still handled — the mirror is not trusted blindly', async () => {
     // Deliberately tricks the client-side mirror: pending → done is
-    // legal per LEGAL_TRANSITIONS, so the button is enabled, but the
+    // legal per LEGAL_TRANSITIONS, so the menu offers it, but the
     // server disagrees here anyway (simulating a stale mirror — e.g.
     // another tab already moved this task to 'cancelled' first).
     const fetchMock = vi.mocked(fetch)
@@ -113,7 +117,8 @@ describe('TaskStatusControls', () => {
     const user = userEvent.setup()
     render(<TaskStatusControls task={makeTask('pending')} onSuccess={onSuccess} />)
 
-    await user.click(screen.getByRole('button', { name: 'Move to Done' }))
+    await openMenu(user, 'Buy groceries')
+    await user.click(screen.getByRole('menuitem', { name: 'Move to Done' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/no longer allowed/i)
     expect(onSuccess).not.toHaveBeenCalled()
@@ -128,10 +133,30 @@ describe('TaskStatusControls', () => {
     const user = userEvent.setup()
     render(<TaskStatusControls task={makeTask('pending')} onSuccess={vi.fn()} />)
 
-    await user.click(screen.getByRole('button', { name: 'Move to Done' }))
+    await openMenu(user, 'Buy groceries')
+    await user.click(screen.getByRole('menuitem', { name: 'Move to Done' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Someone else changed this task at the same time. Please try again.',
     )
+  })
+
+  it('while a transition is in flight, the trigger is disabled and marked busy', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { csrf_token: 'tok' }))
+    let resolveTransition!: (value: Response) => void
+    fetchMock.mockReturnValueOnce(new Promise((resolve) => (resolveTransition = resolve)))
+    const user = userEvent.setup()
+    render(<TaskStatusControls task={makeTask('pending')} onSuccess={vi.fn()} />)
+
+    await openMenu(user, 'Buy groceries')
+    await user.click(screen.getByRole('menuitem', { name: 'Move to Done' }))
+
+    const trigger = screen.getByRole('button', { name: /Change status of "Buy groceries"/ })
+    expect(trigger).toBeDisabled()
+    expect(trigger).toHaveAttribute('aria-busy', 'true')
+
+    resolveTransition(jsonResponse(200, makeTask('done')))
+    await vi.waitFor(() => expect(trigger).not.toBeDisabled())
   })
 })
