@@ -12,6 +12,12 @@ test('uploading a file and downloading it back returns the exact same bytes', as
     page.getByRole('heading', { name: 'Task with an attachment', level: 3 }),
   ).toBeVisible()
 
+  // A row's detail — description and attachments — is behind its own
+  // disclosure now (design audit: the upload control used to repeat on
+  // every row of the list).
+  // exact: the status trigger's own label quotes the task title too.
+  await page.getByRole('button', { name: 'Task with an attachment', exact: true }).click()
+
   const fileContent = `e2e attachment fixture — ${Date.now()}`
   await page.getByLabel('Choose a file to upload').setInputFiles({
     name: 'e2e-fixture.txt',
@@ -44,6 +50,8 @@ test('deleting an attachment removes it from the list', async ({ page }) => {
   await expect(
     page.getByRole('heading', { name: 'Task for attachment delete', level: 3 }),
   ).toBeVisible()
+
+  await page.getByRole('button', { name: 'Task for attachment delete', exact: true }).click()
 
   await page.getByLabel('Choose a file to upload').setInputFiles({
     name: 'to-delete.txt',

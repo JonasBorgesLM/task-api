@@ -125,9 +125,11 @@ describe('TaskList', () => {
     render(<TaskList />)
 
     expect(screen.getByRole('heading', { name: 'Buy groceries' })).toBeInTheDocument()
-    expect(screen.getByText('Milk, eggs, bread')).toBeInTheDocument()
     expect(screen.getByText('pending')).toBeInTheDocument()
     expect(screen.getByText('high')).toBeInTheDocument()
+    // Descriptions live behind each row's own disclosure now — see
+    // TaskItem.test.tsx for that behaviour.
+    expect(screen.queryByText('Milk, eggs, bread')).not.toBeInTheDocument()
   })
 
   // The page title and its always-visible count were dropped in the

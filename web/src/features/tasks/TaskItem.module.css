@@ -12,7 +12,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-4);
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--color-border);
   border-left-width: var(--space-1);
   border-left-style: solid;
@@ -75,10 +75,55 @@
   margin: 0;
 }
 
-/* The ruled writing area — title and description only. 1.75rem rhythm
-   with the text sitting on the lines, and a trailing rule or two below
-   the last line so the sheet reads as partly filled rather than as
-   exactly as tall as its content.
+/* A title with nothing to open still lines up with the ones that do —
+   the chevron's width, so the marks in a list start on the same
+   vertical. */
+.titleStatic {
+  padding-left: calc(16px + var(--space-2));
+}
+
+/* The button is the title: no chrome of its own, inheriting the
+   heading's type so the only visible affordance is the chevron. */
+.disclosure {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.disclosure:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.chevron {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--color-accent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chevron {
+    transition: transform var(--transition-fast) var(--easing-standard);
+  }
+}
+
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+/* The ruled writing area — everything the disclosure opens. 1.75rem
+   rhythm with the text sitting on the lines, and a trailing rule or two
+   below the last line so the sheet reads as partly filled rather than
+   as exactly as tall as its content.
 
    background-image, not a border per line: one paint, and it reflows
    with the card, where stacked borders would need an element per line
