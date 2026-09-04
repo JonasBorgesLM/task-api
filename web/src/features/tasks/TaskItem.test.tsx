@@ -105,7 +105,8 @@ describe('TaskItem', () => {
     const user = userEvent.setup()
     renderItem({ onUpdated })
 
-    await user.click(screen.getByRole('button', { name: 'Move to In progress' }))
+    await user.click(screen.getByRole('button', { name: /Change status of/ }))
+    await user.click(screen.getByRole('menuitem', { name: 'Move to In progress' }))
 
     await vi.waitFor(() => expect(onUpdated).toHaveBeenCalledWith(updated))
   })
