@@ -48,7 +48,15 @@ export const PAGE_SIZE = 20
  * re-requested (as item 1 of the next page) when the caller asks for
  * more.
  */
-export function useTasks(): UseTasksResult {
+/**
+ * statusFilter/priorityFilter mirror GET /v1/tasks's own query params
+ * (docs/openapi.yaml) — "" means "no filter on this field", the same
+ * sentinel the backend uses (CI-14). Passed as separate primitive
+ * strings rather than a single filters object so fetchPage's useCallback
+ * dependency array compares by value, not by a new object identity on
+ * every render.
+ */
+export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult {
   const [tasks, setTasks] = useState<Task[]>([])
   const [phase, setPhase] = useState<'loading' | 'loaded' | 'error'>('loading')
   const [error, setError] = useState<ApiError | null>(null)
@@ -56,29 +64,41 @@ export function useTasks(): UseTasksResult {
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const nextOffset = useRef(0)
 
-  const fetchPage = useCallback(async (offset: number, append: boolean) => {
-    const response = await apiFetch(`/v1/tasks?limit=${PAGE_SIZE + 1}&offset=${offset}`)
-    if (!response.ok) {
-      setError(await classifyError(response))
-      setPhase('error')
-      return
-    }
-    const page = (await response.json()) as Task[]
-    const more = page.length > PAGE_SIZE
-    const visible = more ? page.slice(0, PAGE_SIZE) : page
+  const fetchPage = useCallback(
+    async (offset: number, append: boolean) => {
+      const params = new URLSearchParams({ limit: String(PAGE_SIZE + 1), offset: String(offset) })
+      if (statusFilter) params.set('status', statusFilter)
+      if (priorityFilter) params.set('priority', priorityFilter)
 
-    setTasks((previous) => (append ? [...previous, ...visible] : visible))
-    setHasMore(more)
-    setError(null)
-    setPhase('loaded')
-    nextOffset.current = offset + visible.length
-  }, [])
+      const response = await apiFetch(`/v1/tasks?${params.toString()}`)
+      if (!response.ok) {
+        setError(await classifyError(response))
+        setPhase('error')
+        return
+      }
+      const page = (await response.json()) as Task[]
+      const more = page.length > PAGE_SIZE
+      const visible = more ? page.slice(0, PAGE_SIZE) : page
+
+      setTasks((previous) => (append ? [...previous, ...visible] : visible))
+      setHasMore(more)
+      setError(null)
+      setPhase('loaded')
+      nextOffset.current = offset + visible.length
+    },
+    [statusFilter, priorityFilter],
+  )
 
   // oxlint's set-state-in-effect rule flags this — it can't see through
   // the async boundary inside fetchPage. Fetching on mount is exactly
   // the "synchronizing with an external system" (the server) the rule's
-  // own guidance carves out; accepted, not a bug.
+  // own guidance carves out; accepted, not a bug. fetchPage's identity
+  // changes whenever statusFilter/priorityFilter change (see its own
+  // useCallback deps above), which is what makes this effect also
+  // re-fetch — from offset 0, discarding whatever was scrolled past —
+  // every time the caller changes either filter, not just on mount.
   useEffect(() => {
+    setPhase('loading')
     void fetchPage(0, false)
   }, [fetchPage])
 

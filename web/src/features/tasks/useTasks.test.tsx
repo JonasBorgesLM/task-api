@@ -207,4 +207,53 @@ describe('useTasks', () => {
     expect(result.current.status).toBe('empty')
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
+
+  it('omits status/priority from the request when both are the default empty string', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(1)))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    const requestedUrl = String(fetchMock.mock.calls[0]![0])
+    expect(requestedUrl).not.toContain('status=')
+    expect(requestedUrl).not.toContain('priority=')
+  })
+
+  it('includes status/priority in the request when non-empty', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(1)))
+
+    const { result } = renderHook(() => useTasks('pending', 'high'))
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    const requestedUrl = String(fetchMock.mock.calls[0]![0])
+    expect(requestedUrl).toContain('status=pending')
+    expect(requestedUrl).toContain('priority=high')
+  })
+
+  it('changing a filter re-fetches from offset 0, discarding whatever was scrolled past', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE + 1, 0)))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE)))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(2)))
+
+    const { result, rerender } = renderHook(({ status }: { status: string }) => useTasks(status), {
+      initialProps: { status: '' },
+    })
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    await act(async () => {
+      result.current.loadMore()
+    })
+    await waitFor(() => expect(result.current.tasks).toHaveLength(PAGE_SIZE + 5))
+
+    rerender({ status: 'done' })
+
+    await waitFor(() => expect(result.current.tasks).toHaveLength(2))
+    const thirdCall = fetchMock.mock.calls[2]!
+    const thirdUrl = String(thirdCall[0])
+    expect(thirdUrl).toContain('offset=0')
+    expect(thirdUrl).toContain('status=done')
+  })
 })
