@@ -20,7 +20,12 @@ test('logging in with the right credentials reaches the authenticated task list'
   await page.getByRole('button', { name: 'Log in' }).click()
 
   await page.waitForURL('/')
-  await expect(page.getByText(`Logged in as ${email}`)).toBeVisible()
+  // AppShell's user menu shows the bare email, not "Logged in as
+  // {email}" — that prefix was deliberately dropped in Fase 14's CI-4
+  // (see App.tsx's own doc comment): the shell already establishes
+  // "this is your account" through the menu's position/context, so
+  // announcing it a second time in the text itself would be redundant.
+  await expect(page.getByText(email)).toBeVisible()
 })
 
 test('a wrong password is rejected with the same message as an unknown email (anti-enumeration)', async ({
