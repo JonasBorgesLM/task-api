@@ -34,6 +34,15 @@ const PRIORITY_BADGE_CLASS: Record<Task['priority'], string | undefined> = {
   high: styles.priorityHigh,
 }
 
+// The card's own left edge, tinted by priority — the scan-a-list-fast
+// pattern Trello/ClickUp/monday all use. Same three tokens the priority
+// badge already uses, so the stripe and the pill can never disagree.
+const PRIORITY_STRIPE_CLASS: Record<Task['priority'], string | undefined> = {
+  low: styles.stripeLow,
+  medium: styles.stripeMedium,
+  high: styles.stripeHigh,
+}
+
 function messageForDeleteError(error: ApiError): string {
   switch (error.kind) {
     case 'not_found':
@@ -77,9 +86,16 @@ export function TaskItem({ task, onUpdated, onDeleted }: TaskItemProps) {
   }
 
   return (
-    <li className={styles.item}>
-      <div className={styles.itemHeader}>
-        <h3 className={styles.title}>{task.title}</h3>
+    <li className={`${styles.item} ${PRIORITY_STRIPE_CLASS[task.priority] ?? ''}`}>
+      {/* Chips left, controls right, both above the title (design
+          review). Actions lead the card rather than closing it — they're
+          the reason a row is interactive at all, and burying them under
+          the description meant the eye travelled past the content to
+          reach them on every row. The badges share the line because a
+          right-aligned action group over a right-aligned badge group
+          stair-stepped down the card's edge with an empty channel
+          beside both. */}
+      <div className={styles.topRow}>
         <div className={styles.badges}>
           <span className={`${styles.badge} ${STATUS_BADGE_CLASS[task.status] ?? ''}`}>
             {task.status}
@@ -88,19 +104,18 @@ export function TaskItem({ task, onUpdated, onDeleted }: TaskItemProps) {
             {task.priority}
           </span>
         </div>
-      </div>
-      {task.description && <p className={styles.description}>{task.description}</p>}
-      <div className={styles.footer}>
-        <TaskStatusControls task={task} onSuccess={onUpdated} />
         <div className={styles.actions}>
+          <TaskStatusControls task={task} onSuccess={onUpdated} />
           <Button variant="secondary" onClick={() => setEditing(true)}>
             Edit
           </Button>
-          <Button variant="secondary" onClick={() => setConfirmingDelete(true)}>
+          <Button variant="dangerQuiet" onClick={() => setConfirmingDelete(true)}>
             Delete
           </Button>
         </div>
       </div>
+      <h3 className={styles.title}>{task.title}</h3>
+      {task.description && <p className={styles.description}>{task.description}</p>}
 
       {/* Entire section absent, not just disabled, when attachments are
           off for this account — see plan.md's CI-9 test requirement.

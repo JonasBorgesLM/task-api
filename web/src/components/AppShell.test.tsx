@@ -38,7 +38,7 @@ describe('AppShell', () => {
     expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument()
   })
 
-  it('"Log out" calls onLogout, "Sign out of all devices" calls onLogoutAll', async () => {
+  it('"Log out" is behind the account menu and calls onLogout directly', async () => {
     const onLogout = vi.fn()
     const onLogoutAll = vi.fn()
     const user = userEvent.setup()
@@ -48,12 +48,79 @@ describe('AppShell', () => {
       </AppShell>,
     )
 
-    await user.click(screen.getByRole('button', { name: 'Log out' }))
+    // Not in the header until the menu is opened — that's the point of
+    // consolidating them behind one trigger.
+    expect(screen.queryByRole('menuitem', { name: 'Log out' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Account: alice@example.com' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Log out' }))
+
     expect(onLogout).toHaveBeenCalledOnce()
     expect(onLogoutAll).not.toHaveBeenCalled()
+  })
 
-    await user.click(screen.getByRole('button', { name: 'Sign out of all devices' }))
+  it('"Sign out of all devices" asks for confirmation first — no call until confirmed', async () => {
+    const onLogoutAll = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={onLogoutAll}>
+        <p>content</p>
+      </AppShell>,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Account: alice@example.com' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Sign out of all devices' }))
+
+    const dialog = screen.getByRole('dialog', { name: 'Sign out of all devices?' })
+    expect(dialog).toBeInTheDocument()
+    // The dialog has to actually explain the consequence, not just ask.
+    expect(dialog).toHaveTextContent(/every other device or browser/i)
+    expect(onLogoutAll).not.toHaveBeenCalled()
+  })
+
+  it('cancelling the sign-out-everywhere confirmation closes it without calling onLogoutAll', async () => {
+    const onLogoutAll = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={onLogoutAll}>
+        <p>content</p>
+      </AppShell>,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Account: alice@example.com' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Sign out of all devices' }))
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(onLogoutAll).not.toHaveBeenCalled()
+  })
+
+  it('confirming the dialog calls onLogoutAll and closes it', async () => {
+    const onLogoutAll = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={onLogoutAll}>
+        <p>content</p>
+      </AppShell>,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Account: alice@example.com' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Sign out of all devices' }))
+    await user.click(screen.getByRole('button', { name: 'Sign out everywhere' }))
+
     expect(onLogoutAll).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('no longer renders a static "Tasks" section label beside the product name', () => {
+    render(
+      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={vi.fn()}>
+        <p>content</p>
+      </AppShell>,
+    )
+
+    expect(screen.getByRole('navigation', { name: 'Main' })).toHaveTextContent('Task API')
+    expect(screen.getByRole('navigation', { name: 'Main' })).not.toHaveTextContent('Tasks')
   })
 
   it('renders its children inside the main landmark', () => {

@@ -113,6 +113,18 @@
   --color-surface-translucent: rgb(248 249 251 / 85%);
   --color-focus-glow: rgb(40 87 214 / 20%);
 
+  /* Page background wash — decorative, exempt from the contrast
+     obligation the same way --shadow-* is (it is not text, and nothing
+     is ever placed directly on the tinted end: cards, the header and
+     the auth panels all paint their own opaque surface over it).
+     Deliberately shallow — a hint of the accent hue at the top settling
+     into the flat --color-bg well before the fold. tokens.css's own
+     anti-requirements (issue #121) rule out "gradient without a
+     reason"; the reason here is depth behind a single flat column of
+     cards, and the moment it competes with them for attention it has
+     gone too far. */
+  --gradient-page: linear-gradient(180deg, #eaf0fb 0%, #ffffff 38%);
+
   /* ---------------------------------------------------------------
    * Dark theme palette (Fase 14, CI-10) — private values only, never
    * consumed by a component directly (nothing below reads a
@@ -184,6 +196,10 @@
      construction: --dark-color-surface/-accent at reduced alpha. */
   --dark-color-surface-translucent: rgb(23 27 35 / 85%);
   --dark-color-focus-glow: rgb(126 162 255 / 20%);
+  /* Same construction as the light wash, one theme down: a lift at the
+     top settling into --dark-color-bg. Kept even shallower — a dark
+     surface shows banding far more readily than a light one. */
+  --dark-gradient-page: linear-gradient(180deg, #171d2a 0%, #0d0f13 38%);
 
   /* ---------------------------------------------------------------
    * Typography
@@ -344,6 +360,14 @@
 
     --color-surface-translucent: var(--dark-color-surface-translucent);
     --color-focus-glow: var(--dark-color-focus-glow);
+    --gradient-page: var(--dark-gradient-page);
+
+    /* Native chrome the app does not draw itself — scrollbars, the
+       <select> popup, form control internals — follows the theme only
+       if it is told to. index.css sets the light default; without this
+       line the dark theme kept light scrollbars and a light dropdown
+       over its own dark surfaces. */
+    color-scheme: dark;
   }
 }
 
@@ -385,4 +409,6 @@
 
   --color-surface-translucent: var(--dark-color-surface-translucent);
   --color-focus-glow: var(--dark-color-focus-glow);
+  --gradient-page: var(--dark-gradient-page);
+  color-scheme: dark;
 }

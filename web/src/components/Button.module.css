@@ -83,6 +83,21 @@
   opacity: 0.9;
 }
 
+/* Same shape as .secondary, danger's color instead of neutral text —
+   destructive at a glance, quiet enough to repeat once per row. Fills
+   only on hover, so the solid treatment still means "this is the click
+   that does it". */
+.dangerQuiet {
+  background-color: transparent;
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+}
+
+.dangerQuiet:hover:not(:disabled) {
+  background-color: var(--color-danger);
+  color: var(--color-on-danger);
+}
+
 .spinner {
   width: 1em;
   height: 1em;

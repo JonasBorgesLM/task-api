@@ -118,6 +118,11 @@ export function TaskList() {
         />
       )}
 
+      {/* Title, count, both filters and the create button on one line
+          (design review). They were three stacked rows of chrome above
+          a list that is the actual content; the filters carry no
+          visible caption either, since "All statuses"/"All priorities"
+          already say what each one does. */}
       <div className={styles.pageHeader}>
         <div className={styles.titleGroup}>
           <h2 className={styles.title}>Tasks</h2>
@@ -131,34 +136,39 @@ export function TaskList() {
             </span>
           )}
         </div>
-        <Button onClick={() => setCreating(true)}>New task</Button>
-      </div>
 
-      <div className={styles.filters}>
-        <Select
-          label="Status"
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-        >
-          <option value="">All statuses</option>
-          {(Object.entries(STATUS_LABELS) as [Task['status'], string][]).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </Select>
-        <Select
-          label="Priority"
-          value={priorityFilter}
-          onChange={(e) => setPriorityFilter(e.target.value as PriorityFilter)}
-        >
-          <option value="">All priorities</option>
-          {(Object.entries(PRIORITY_LABELS) as [Task['priority'], string][]).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </Select>
+        <div className={styles.filters}>
+          <Select
+            label="Status"
+            labelHidden
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+          >
+            <option value="">All statuses</option>
+            {(Object.entries(STATUS_LABELS) as [Task['status'], string][]).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </Select>
+          <Select
+            label="Priority"
+            labelHidden
+            value={priorityFilter}
+            onChange={(e) => setPriorityFilter(e.target.value as PriorityFilter)}
+          >
+            <option value="">All priorities</option>
+            {(Object.entries(PRIORITY_LABELS) as [Task['priority'], string][]).map(
+              ([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ),
+            )}
+          </Select>
+        </div>
+
+        <Button onClick={() => setCreating(true)}>New task</Button>
       </div>
       <Modal open={creating} onClose={() => setCreating(false)} title="New task">
         <TaskForm onCancel={() => setCreating(false)} onSuccess={handleCreated} />
@@ -183,10 +193,6 @@ export function TaskList() {
 
       {status === 'success' && (
         <>
-          <p className={styles.note}>
-            Sorted by creation date, oldest first. Filter by status or priority above — there's no
-            free-text search yet.
-          </p>
           <ul className={styles.list}>
             {tasks.map((task) => (
               <TaskItem

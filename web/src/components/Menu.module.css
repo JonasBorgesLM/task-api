@@ -60,6 +60,15 @@
   box-shadow: var(--shadow-md);
 }
 
+/* Opens leftward from the trigger instead of rightward — for a trigger
+   sitting near the viewport's right edge (the header's theme and
+   account menus), the default would push the popup off-screen, which
+   is exactly what it did before this rule existed. */
+.menuAlignEnd {
+  left: auto;
+  right: 0;
+}
+
 .menuItem {
   display: flex;
   align-items: center;
@@ -88,4 +97,13 @@
 .menuItem:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
+}
+
+/* margin-left: auto pushes the checkmark to the row's trailing edge, the
+   way a native OS pull-down marks its active entry — the label stays
+   left-aligned with every other item's regardless of text length. */
+.check {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--color-accent);
 }

@@ -12,11 +12,12 @@
  */
 
 :root {
-  /* Only light is implemented (see tokens.css's own doc comment) —
-     declaring "light dark" here, as the scaffold did, tells the browser
-     to render native controls (scrollbar, <select>, checkbox) in dark
-     colors under a dark OS preference while the rest of the page stays
-     hardcoded light. Nothing else in this app corrects that mismatch. */
+  /* The light default. tokens.css's two dark-theme activation blocks
+     override this to `dark`, which is what keeps native chrome the app
+     doesn't draw itself — scrollbars, the <select> popup — in step with
+     the theme. Before the dark theme existed this was hardcoded light
+     on purpose; leaving it that way afterwards left light scrollbars
+     over a dark page. */
   color-scheme: light;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -32,7 +33,15 @@ body {
      component-level styling of its own (a bare <h1>, a plain <p>) falls
      back to the browser's UA stylesheet default — serif headings, in
      Chrome/Safari/Firefox alike — rather than tokens.css's font stack. */
+  /* --color-bg underneath as the honest fallback, the wash painted over
+     it. background-attachment: fixed pins the gradient to the viewport,
+     so a long task list scrolls against a stable background instead of
+     dragging the tint down the page with it; min-height keeps it
+     covering the full viewport on a short page too. */
   background-color: var(--color-bg);
+  background-image: var(--gradient-page);
+  background-attachment: fixed;
+  min-height: 100vh;
   color: var(--color-text-primary);
   font-family: var(--font-sans);
 }

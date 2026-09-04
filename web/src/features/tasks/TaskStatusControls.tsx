@@ -39,6 +39,27 @@ const LEGAL_TRANSITIONS: Record<Status, Status[]> = {
   cancelled: ['pending'],
 }
 
+// Tints each glyph with the same token its status badge already uses, so
+// the icon in the trigger and the pill in the header are visibly the
+// same fact — the status-color convention Linear and Asana both lean on.
+// StatusIcon strokes with currentColor, so setting color on the wrapper
+// is all it takes; Menu's own neutral trigger color stays untouched for
+// every other consumer.
+const STATUS_ICON_CLASS: Record<Status, string | undefined> = {
+  pending: styles.iconPending,
+  in_progress: styles.iconInProgress,
+  done: styles.iconDone,
+  cancelled: styles.iconCancelled,
+}
+
+function TintedStatusIcon({ status }: { status: Status }) {
+  return (
+    <span className={STATUS_ICON_CLASS[status] ?? ''}>
+      <StatusIcon status={status} />
+    </span>
+  )
+}
+
 function messageForError(error: ApiError): string {
   if (error.kind === 'conflict') {
     if (error.reason === 'invalid_transition') {
@@ -86,7 +107,7 @@ export function TaskStatusControls({ task, onSuccess }: TaskStatusControlsProps)
   const items: MenuItem[] = LEGAL_TRANSITIONS[task.status].map((target) => ({
     key: target,
     label: `Move to ${STATUS_LABELS[target]}`,
-    icon: <StatusIcon status={target} />,
+    icon: <TintedStatusIcon status={target} />,
     onSelect: () => void handleTransition(target),
   }))
 
@@ -98,7 +119,7 @@ export function TaskStatusControls({ task, onSuccess }: TaskStatusControlsProps)
           pendingTarget !== null ? (
             <span className={styles.spinner} aria-hidden="true" />
           ) : (
-            <StatusIcon status={task.status} />
+            <TintedStatusIcon status={task.status} />
           )
         }
         items={items}

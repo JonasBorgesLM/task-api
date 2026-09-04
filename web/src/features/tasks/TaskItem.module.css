@@ -1,18 +1,28 @@
+/* border-left is the priority stripe's slot — width is declared here so
+   every card reserves the same space and only the color varies below;
+   a card whose stripe changed the padding would jump on every priority
+   edit. */
 .item {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-4);
   border: 1px solid var(--color-border);
+  border-left-width: var(--space-1);
+  border-left-style: solid;
   border-radius: var(--radius-md);
   background-color: var(--color-surface);
+  box-shadow: var(--shadow-sm);
 }
 
-/* Hover/focus-within elevation — Fase 14 CI-13. --shadow-md already
-   existed (Fase 13 CI-3); this is the first place it's used as a hover
-   state rather than a resting one. focus-within, not just hover: a
-   keyboard user tabbing into a row's buttons gets the same "this row is
-   active" signal a mouse user gets from hovering it. */
+/* Hover/focus-within elevation — Fase 14 CI-13, deepened in the design
+   review: cards now rest at --shadow-sm and rise to --shadow-md, rather
+   than sitting flat until touched. The change is what reads as "these
+   are objects on a surface" instead of "these are boxes drawn with
+   borders" — the elevation language every comparable product uses.
+   focus-within, not just hover: a keyboard user tabbing into a row's
+   buttons gets the same "this row is active" signal a mouse user gets
+   from hovering it. */
 @media (prefers-reduced-motion: no-preference) {
   .item {
     transition: box-shadow var(--transition-base) var(--easing-standard);
@@ -24,17 +34,37 @@
   box-shadow: var(--shadow-md);
 }
 
-.itemHeader {
+.stripeLow {
+  border-left-color: var(--color-priority-low-text);
+}
+
+.stripeMedium {
+  border-left-color: var(--color-priority-medium-text);
+}
+
+.stripeHigh {
+  border-left-color: var(--color-priority-high-text);
+}
+
+/* Status/priority chips on the left, controls on the right, one line
+   above the title. align-items: center keeps the pills optically level
+   with the buttons despite the height difference. */
+.topRow {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+  flex-wrap: wrap;
 }
 
+/* Bumped a step (was base/medium) in the design-review pass: with the
+   action row now sitting above it, a title at body weight read as the
+   third thing in its own card. It's the content — it outranks the
+   controls. */
 .title {
   font-family: var(--font-sans);
-  font-size: var(--font-size-base);
-  font-weight: var(--font-weight-medium);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
   margin: 0;
 }
@@ -113,22 +143,12 @@
   margin: 0;
 }
 
-/* border-top + padding-top matches .attachments' own separator below —
-   the three zones (title/description, status+actions, attachments) read
-   as related-but-distinct groups instead of one undifferentiated run of
-   buttons. */
-.footer {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-  border-top: 1px solid var(--color-border);
-  padding-top: var(--space-3);
-}
-
+/* One group, not two edges: the status control belongs with Edit and
+   Delete as "things you do to this task", and pushing it to the far
+   left instead left a wide empty channel across every row. */
 .actions {
   display: flex;
+  align-items: center;
   gap: var(--space-2);
   flex-shrink: 0;
 }

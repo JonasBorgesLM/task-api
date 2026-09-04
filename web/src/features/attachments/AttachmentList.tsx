@@ -116,19 +116,18 @@ export function AttachmentList({ taskId }: AttachmentListProps) {
         />
       )}
 
-      {/* Fase 14 CI-8: the empty caption sits beside Upload in one compact
-          row instead of stacked below it, so the "no attachments" state —
-          repeated across every empty task in the list (audit finding #6)
-          — takes one line, not two, without hiding or disabling Upload
-          file itself. Upload's own position is deliberately unconditional
-          and never nested inside a status-dependent wrapper: changing its
-          parent element type between renders would unmount and remount
-          it (losing the hidden file input's state) every time status
-          crosses into or out of 'empty' — the caption is the only thing
-          that's conditional here. */}
+      {/* Upload's own position is deliberately unconditional, never
+          nested inside a status-dependent wrapper: changing its parent
+          element type between renders would unmount and remount it
+          (losing the hidden file input's state) every time status
+          crosses into or out of 'empty' (Fase 14 CI-8's finding). The
+          empty state used to add a "No attachments yet." caption here;
+          removed per design review — an upload control that's just
+          sitting there already reads as "nothing here yet," and the
+          caption was one more line repeated across every empty task in
+          a list. */}
       <div className={styles.uploadRow}>
         <Upload taskId={taskId} onUploaded={handleUploaded} />
-        {status === 'empty' && <span className={styles.empty}>No attachments yet.</span>}
       </div>
 
       {status === 'loading' && (

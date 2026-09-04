@@ -1,6 +1,7 @@
+/* Transparent, not --color-bg: the page wash lives on <body> (index.css)
+   and an opaque shell would paint straight over it. */
 .shell {
   min-height: 100vh;
-  background-color: var(--color-bg);
 }
 
 /* Sticky + translucent-blur — Fase 14 CI-13. Sticky is what makes the
@@ -58,21 +59,45 @@
   color: var(--color-text-primary);
 }
 
-.currentSection {
-  font-family: var(--font-sans);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-medium);
-  color: var(--color-accent);
-}
-
 .userMenu {
   display: flex;
   align-items: center;
   gap: var(--space-3);
 }
 
+/* The two glyph buttons read as one control cluster — a tighter gap
+   than the one separating them from the email beside them. */
+.iconGroup {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .userEmail {
   font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
+}
+
+/* The email is identity, not a control — below the sm breakpoint the
+   account menu's own trigger carries it (aria-label) and the header
+   keeps its two glyphs instead of wrapping onto a second line. */
+@media (max-width: 480px) {
+  .userEmail {
+    display: none;
+  }
+}
+
+.confirmBody {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  color: var(--color-text-primary);
+  margin: 0 0 var(--space-4) 0;
+}
+
+.confirmActions {
+  display: flex;
+  gap: var(--space-3);
+  justify-content: flex-end;
 }

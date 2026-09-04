@@ -8,6 +8,9 @@
    distinct element on the screen, floating with nothing to anchor it.
    It's still the only accent-colored element, but now sits beside a
    title instead of alone (Fase 14 CI-7, audit finding — see plan.md). */
+/* One line: title+count, then the filters, then the create button
+   pushed to the far edge by .filters' own margin-right: auto. Wraps
+   gracefully on narrow viewports rather than overflowing. */
 .pageHeader {
   display: flex;
   align-items: center;
@@ -41,16 +44,15 @@
   color: var(--color-text-secondary);
 }
 
+/* margin-right: auto is what separates the filter pair from the create
+   button on the shared header line — the filters sit next to the title,
+   the button stays pinned to the opposite edge. */
 .filters {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-3);
-}
-
-.note {
-  font-family: var(--font-sans);
-  font-size: var(--font-size-xs);
-  color: var(--color-text-secondary);
+  align-items: center;
+  gap: var(--space-2);
+  margin-right: auto;
 }
 
 /* Fase 14 CI-7: gap reduced from --space-3 to --space-2 — now that

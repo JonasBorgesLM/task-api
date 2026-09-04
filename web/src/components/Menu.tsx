@@ -7,6 +7,16 @@ export interface MenuItem {
   label: string
   icon?: ReactNode
   onSelect: () => void
+  /**
+   * Present only for a menu whose items are a mutually-exclusive
+   * *choice* rather than one-shot actions (the theme menu; not the
+   * status menu, whose items each perform a transition and then stop
+   * being relevant). Setting it switches the item to
+   * role="menuitemradio" with aria-checked — the ARIA pattern for
+   * exactly that distinction — and draws a checkmark on the current
+   * one, the way a native OS pull-down marks its active entry.
+   */
+  selected?: boolean
 }
 
 export interface MenuProps {
@@ -19,6 +29,37 @@ export interface MenuProps {
   disabled?: boolean
   /** Marks the trigger aria-busy — pair with a spinner as triggerIcon while a selection's request is in flight. */
   busy?: boolean
+  /**
+   * Which edge the popup lines up with. 'start' (default) opens it to
+   * the right of the trigger; 'end' opens it leftward, which is what a
+   * trigger near the viewport's right edge needs — the header menus
+   * ran off-screen before this existed.
+   */
+  align?: 'start' | 'end'
+}
+
+/**
+ * The checkmark on the currently-selected item of a choice menu. Not
+ * exported and not in icons.tsx: it is Menu's own rendering of
+ * MenuItem.selected, not a glyph any caller picks.
+ */
+function CheckMark() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width={14}
+      height={14}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={styles.check}
+    >
+      <path d="M3 8.5l3 3 7-8" />
+    </svg>
+  )
 }
 
 /**
@@ -37,7 +78,14 @@ export interface MenuProps {
  * click outside both close the menu and return focus to the trigger;
  * choosing an item does the same, after calling its onSelect.
  */
-export function Menu({ triggerLabel, triggerIcon, items, disabled = false, busy = false }: MenuProps) {
+export function Menu({
+  triggerLabel,
+  triggerIcon,
+  items,
+  disabled = false,
+  busy = false,
+  align = 'start',
+}: MenuProps) {
   const [open, setOpen] = useState(false)
   const focusOnOpenRef = useRef<'first' | 'last'>('first')
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -48,7 +96,11 @@ export function Menu({ triggerLabel, triggerIcon, items, disabled = false, busy 
     if (!open) return
 
     const menuItems = () =>
-      Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+      Array.from(
+        menuRef.current?.querySelectorAll<HTMLElement>(
+          '[role="menuitem"], [role="menuitemradio"]',
+        ) ?? [],
+      )
 
     const initial = menuItems()
     ;(focusOnOpenRef.current === 'last' ? initial[initial.length - 1] : initial[0])?.focus()
@@ -150,17 +202,25 @@ export function Menu({ triggerLabel, triggerIcon, items, disabled = false, busy 
         {triggerIcon}
       </button>
       {open && (
-        <div id={menuId} ref={menuRef} role="menu" aria-label={triggerLabel} className={styles.menu}>
+        <div
+          id={menuId}
+          ref={menuRef}
+          role="menu"
+          aria-label={triggerLabel}
+          className={`${styles.menu} ${align === 'end' ? styles.menuAlignEnd : ''}`}
+        >
           {items.map((item) => (
             <button
               key={item.key}
               type="button"
-              role="menuitem"
+              role={item.selected === undefined ? 'menuitem' : 'menuitemradio'}
+              aria-checked={item.selected}
               className={styles.menuItem}
               onClick={() => handleSelect(item)}
             >
               {item.icon}
               {item.label}
+              {item.selected && <CheckMark />}
             </button>
           ))}
         </div>

@@ -156,11 +156,15 @@ describe('TaskList', () => {
     expect(screen.queryByText('0')).not.toBeInTheDocument()
   })
 
+  // The caption that used to spell out "sorted by creation date, oldest
+  // first" is gone (design review — it explained a default nobody can
+  // change, on every render). What it was really guarding is unchanged
+  // and still asserted below: there is no sort control, and both filter
+  // controls exist.
   it('success: sort order is fixed (no sort control), but status/priority filters exist', () => {
     mockTasksResult({ status: 'success', tasks: [makeTask()] })
     render(<TaskList />)
 
-    expect(screen.getByText(/sorted by creation date/i)).toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: /sort/i })).not.toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: 'Status' })).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: 'Priority' })).toBeInTheDocument()

@@ -85,13 +85,20 @@ describe('AttachmentList', () => {
     expect(screen.getByText('2.0 KB')).toBeInTheDocument()
   })
 
+  // The empty state carries no caption of its own any more (removed in
+  // the design-review pass — the bare Upload control already reads as
+  // "nothing here yet"), so "empty" is asserted structurally: Upload is
+  // present, and no attachment row — each of which renders a download
+  // link — exists.
   it('shows the empty state when the task has no attachments', async () => {
     const fetchMock = vi.mocked(fetch)
     fetchMock.mockResolvedValueOnce(jsonResponse(200, []))
 
     render(<AttachmentList taskId="t1" />)
 
-    expect(await screen.findByText('No attachments yet.')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Upload file' })).toBeInTheDocument()
+    expect(screen.queryByRole('link')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('shows an error state with a working retry on a failed list request', async () => {
@@ -140,7 +147,7 @@ describe('AttachmentList', () => {
     await waitFor(() =>
       expect(screen.queryByRole('link', { name: 'report.pdf' })).not.toBeInTheDocument(),
     )
-    expect(await screen.findByText('No attachments yet.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Upload file' })).toBeInTheDocument()
     const deleteCall = fetchMock.mock.calls[2]!
     expect(String(deleteCall[0])).toContain('/v1/files/key-pdf')
     expect((deleteCall[1] as RequestInit).method).toBe('DELETE')
@@ -167,7 +174,7 @@ describe('AttachmentList', () => {
     mockedUploadFile.mockResolvedValueOnce(jsonResponse(201, PDF_ATTACHMENT))
 
     render(<AttachmentList taskId="t1" />)
-    await screen.findByText('No attachments yet.')
+    await screen.findByRole('button', { name: 'Upload file' })
 
     const file = new File(['hello'], 'report.pdf', { type: 'application/pdf' })
     await userEvent.upload(screen.getByLabelText('Choose a file to upload'), file)

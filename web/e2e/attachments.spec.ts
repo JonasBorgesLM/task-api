@@ -55,5 +55,8 @@ test('deleting an attachment removes it from the list', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Delete' }).last().click()
   await expect(link).toHaveCount(0)
-  await expect(page.getByText('No attachments yet.')).toBeVisible()
+  // The empty state carries no caption any more (design review) — the
+  // upload control still being there, with no file rows left, is the
+  // whole of it.
+  await expect(page.getByRole('button', { name: 'Upload file' })).toBeVisible()
 })

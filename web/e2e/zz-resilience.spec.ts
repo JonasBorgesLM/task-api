@@ -86,7 +86,7 @@ test('a 503 from a mid-session action does not clear the session', async () => {
 
   // Still authenticated — no redirect, session state untouched.
   await expect(page).toHaveURL('/')
-  await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^Account:/ })).toBeVisible()
 })
 
 test('reloading mid-outage does not bounce an authenticated user to /login', async () => {
@@ -109,5 +109,5 @@ test('once postgres recovers, a page reload restores the authenticated view', as
 
   await page.reload()
   await page.waitForURL('/')
-  await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^Account:/ })).toBeVisible()
 })
