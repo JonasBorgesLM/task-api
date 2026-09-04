@@ -4,7 +4,10 @@ test('logging out redirects to /login, and the session is actually gone server-s
   page,
 }) => {
   const { email } = await registerAndLogin(page)
-  await expect(page.getByText(`Logged in as ${email}`)).toBeVisible()
+  // AppShell's user menu shows the bare email, not "Logged in as
+  // {email}" — see login.spec.ts's own comment on the same change
+  // (Fase 14 CI-4, App.tsx's doc comment).
+  await expect(page.getByText(email)).toBeVisible()
 
   await page.getByRole('button', { name: 'Log out' }).click()
   await page.waitForURL(/\/login$/)
@@ -14,5 +17,5 @@ test('logging out redirects to /login, and the session is actually gone server-s
   // authenticated view before a 401 catches up.
   await page.goto('/')
   await page.waitForURL(/\/login$/)
-  await expect(page.getByText(`Logged in as ${email}`)).toHaveCount(0)
+  await expect(page.getByText(email)).toHaveCount(0)
 })
