@@ -35,7 +35,7 @@ type fakeRepository struct {
 	deleteCalled      bool
 	savedTask         Task
 	updatedTask       Task
-	findAllCalledWith [3]any // [userID, limit, offset]
+	findAllCalledWith [5]any // [userID, limit, offset, status, priority]
 }
 
 func (f *fakeRepository) Create(_ context.Context, task Task) error {
@@ -48,8 +48,8 @@ func (f *fakeRepository) FindByID(_ context.Context, _, _ string) (Task, error) 
 	return f.findByIDTask, f.findByIDErr
 }
 
-func (f *fakeRepository) FindAll(_ context.Context, userID string, limit, offset int) ([]Task, error) {
-	f.findAllCalledWith = [3]any{userID, limit, offset}
+func (f *fakeRepository) FindAll(_ context.Context, userID string, limit, offset int, status Status, priority Priority) ([]Task, error) {
+	f.findAllCalledWith = [5]any{userID, limit, offset, status, priority}
 	return f.findAllTasks, f.findAllErr
 }
 
@@ -305,7 +305,7 @@ func TestListTasks_Delegates(t *testing.T) {
 	tasks := []Task{newFakeTask(StatusPending), newFakeTask(StatusDone)}
 	svc := NewService(&fakeRepository{findAllTasks: tasks})
 
-	got, err := svc.ListTasks(context.Background(), testUserID, -1, 0)
+	got, err := svc.ListTasks(context.Background(), testUserID, -1, 0, "", "")
 	if err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
@@ -314,21 +314,37 @@ func TestListTasks_Delegates(t *testing.T) {
 	}
 }
 
-// TestListTasks_PassesUserIDLimitOffsetToRepository verifies that Service
-// passes userID and the limit/offset it received straight through to
-// Repository.FindAll, unmodified — Service no longer applies its own
-// ordering or windowing (that moved to Repository; see
-// memory_repository_test.go's and postgres_repository_test.go's FindAll
-// ordering/pagination tests).
-func TestListTasks_PassesUserIDLimitOffsetToRepository(t *testing.T) {
+// TestListTasks_PassesUserIDLimitOffsetFiltersToRepository verifies that
+// Service passes userID, the limit/offset it received, and the parsed
+// status/priority filters straight through to Repository.FindAll,
+// unmodified — Service no longer applies its own ordering or windowing
+// (that moved to Repository; see memory_repository_test.go's and
+// postgres_repository_test.go's FindAll ordering/pagination/filter
+// tests).
+func TestListTasks_PassesUserIDLimitOffsetFiltersToRepository(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	if _, err := svc.ListTasks(context.Background(), testUserID, 10, 5); err != nil {
+	if _, err := svc.ListTasks(context.Background(), testUserID, 10, 5, "pending", "high"); err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
-	if want := [3]any{testUserID, 10, 5}; repo.findAllCalledWith != want {
-		t.Errorf("ListTasks() called Repository.FindAll with (userID, limit, offset) = %v, want %v", repo.findAllCalledWith, want)
+	if want := [5]any{testUserID, 10, 5, StatusPending, PriorityHigh}; repo.findAllCalledWith != want {
+		t.Errorf("ListTasks() called Repository.FindAll with (userID, limit, offset, status, priority) = %v, want %v", repo.findAllCalledWith, want)
+	}
+}
+
+// TestListTasks_EmptyFiltersReachRepositoryAsEmpty verifies that omitted
+// status/priority reach Repository.FindAll as the empty-string "no
+// filter" sentinel, not some other zero value.
+func TestListTasks_EmptyFiltersReachRepositoryAsEmpty(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	if _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, "", ""); err != nil {
+		t.Fatalf("ListTasks() unexpected error: %v", err)
+	}
+	if want := [5]any{testUserID, -1, 0, Status(""), Priority("")}; repo.findAllCalledWith != want {
+		t.Errorf("ListTasks() called Repository.FindAll with (userID, limit, offset, status, priority) = %v, want %v", repo.findAllCalledWith, want)
 	}
 }
 
@@ -336,9 +352,41 @@ func TestListTasks_RepositoryError(t *testing.T) {
 	repoErr := errors.New("storage failure")
 	svc := NewService(&fakeRepository{findAllErr: repoErr})
 
-	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0)
+	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, "", "")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("ListTasks() repository error = %v, want %v", err, repoErr)
+	}
+}
+
+// TestListTasks_UnknownStatusFilterIsInvalidInput verifies that an
+// unrecognized status filter is rejected before Repository is ever
+// reached — Repository.FindAll must never see a value it doesn't know
+// how to interpret.
+func TestListTasks_UnknownStatusFilterIsInvalidInput(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, "archived", "")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("ListTasks() with unknown status filter error = %v, want ErrInvalidInput", err)
+	}
+	if repo.findAllCalledWith != ([5]any{}) {
+		t.Errorf("ListTasks() must not call Repository.FindAll for an invalid filter, called with %v", repo.findAllCalledWith)
+	}
+}
+
+// TestListTasks_UnknownPriorityFilterIsInvalidInput mirrors
+// TestListTasks_UnknownStatusFilterIsInvalidInput for priority.
+func TestListTasks_UnknownPriorityFilterIsInvalidInput(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, "", "urgent")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("ListTasks() with unknown priority filter error = %v, want ErrInvalidInput", err)
+	}
+	if repo.findAllCalledWith != ([5]any{}) {
+		t.Errorf("ListTasks() must not call Repository.FindAll for an invalid filter, called with %v", repo.findAllCalledWith)
 	}
 }
 

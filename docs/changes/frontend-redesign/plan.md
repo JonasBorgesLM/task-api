@@ -2,7 +2,7 @@
 slug: frontend-redesign
 stage: plan
 tier: full
-items: 13
+items: 15
 sources_mtime:
   docs/changes/frontend-redesign/context.md: 2026-09-02T00:35:00Z
   docs/changes/frontend-redesign/validation.md: 2026-09-03T00:00:00Z
@@ -23,15 +23,24 @@ CI-10/CI-11 continuam 100% passando contra as telas redesenhadas — não é uma
 reescrita, é um segundo passe visual sobre o que CI-3–CI-9 da Fase 13 já
 produziram.
 
-Explicitamente fora desta fase (decisão do usuário, `validation.md` AM-1/
-AM-2): filtro/busca real de `GET /tasks` e uma visualização em board/kanban.
-Ambos ficam candidatos a uma fase futura.
+Explicitamente fora desta fase (decisão do usuário, `validation.md` AM-2):
+uma visualização em board/kanban — candidata a uma fase futura.
+
+`AM-1` (filtro/busca de `GET /tasks`) foi reaberta depois de `CI-1`–`CI-13`
+implementados e testados na prática — ver `validation.md`'s seção "AM-1 —
+Filtro/busca de GET /tasks (reaberta e refechada)". Filtro estruturado por
+`status`/`priority` entra nesta fase como `CI-14` (backend) + `CI-15`
+(frontend); busca livre por título continua fora (`AD-1` fecha só
+parcialmente).
 
 ## Restrições herdadas
 
-- Nenhuma mudança em `docs/openapi.yaml` — todo `CI` desta fase é
-  estritamente frontend; um `CI` que precisasse tocar o contrato estaria
-  fora de escopo (ver `validation.md`).
+- `CI-1`–`CI-13` são estritamente
+  frontend, sem mudança em `docs/openapi.yaml`. `CI-14` é a única exceção
+  deliberada, decidida depois do plano original (ver `validation.md`'s AM-1
+  reaberta): estende `GET /v1/tasks` com dois query params novos,
+  `status`/`priority`, seguindo `.claude/rules/api-contract.md` — o contrato
+  muda na mesma mudança que o handler, nunca depois.
 - `localStorage`/`sessionStorage` nunca guardam credencial — invariante do
   frontend inteiro, não deste redesenho especificamente, mas nenhum `CI`
   aqui tem motivo para tocar `api/client.ts`.
@@ -412,6 +421,120 @@ Ambos ficam candidatos a uma fase futura.
   (badges a colorir precisam existir para o efeito 3 ser visível, mesmo
   que a regra em si seja inerte antes disso).
 
+### CI-14 — Backend: filtro de `status`/`priority` em `GET /v1/tasks`
+
+- **Arquivos:**
+  - `internal/task/repository.go` — `Repository.FindAll` ganha dois
+    parâmetros novos, `status Status` e `priority Priority`, ambos
+    posicionais depois de `limit, offset`. Valor zero (`""`) em qualquer um
+    dos dois significa "sem filtro nesse campo" — o mesmo sentinela que
+    `CreateTaskRequest.Priority`/`UpdateTaskRequest.Priority` já usam para
+    "não informado" (`docs/openapi.yaml`'s `CreateTaskRequest`/
+    `UpdateTaskRequest`), não um valor novo inventado para este `CI`.
+  - `internal/task/memory_repository.go` — `FindAll` aplica os dois filtros
+    (comparação direta de campo) **antes** de `paginateTasks`, não depois —
+    filtrar depois da janela de paginação mudaria quantos resultados uma
+    página com filtro retorna, o que divergiria de como um `WHERE` do
+    Postgres se comporta.
+  - `internal/task/postgres_repository.go` — `FindAll` adiciona `AND status
+    = $N`/`AND priority = $N` condicionalmente à query (construção
+    dinâmica da cláusula `WHERE` + slice de argumentos, já que `database/sql`
+    não tem parâmetro opcional nativo) — mantém o filtro dentro do SQL, não
+    "busca tudo e filtra em Go", mesma disciplina que `CLAUDE.md` já exige
+    para `userID`/paginação.
+  - `internal/task/service.go` — `Service.ListTasks` ganha `status,
+    priority string` (não `Status`/`Priority` tipados — o handler só tem a
+    string crua da query string). Valida cada um, se não-vazio, contra os
+    mapas `validStatuses`/`validPriorities` já existentes (reuso, não
+    duplicação); um valor desconhecido retorna `ErrInvalidInput` — mesma
+    mensagem/formato de erro que `CreateTask` já usa para uma `priority`
+    inválida.
+  - `internal/task/handler.go` — `taskService` (a interface que o handler
+    depende) ganha os dois parâmetros; `listTasks` lê `r.URL.Query().Get
+    ("status")`/`.Get("priority")` (sem parsing numérico — são strings
+    passadas direto ao Service, que valida) e repassa ao `Service`.
+  - `docs/openapi.yaml` — `GET /v1/tasks`: dois `parameters` novos
+    (`status`, `priority`, ambos `schema: $ref Status`/`Priority`, ambos
+    opcionais), descrição atualizada explicando que os dois se combinam com
+    AND quando ambos presentes, e o `400` já documentado ganha mais uma
+    causa (valor de `status`/`priority` que não é um dos enums).
+- **Faz:** um cliente pode pedir `GET /v1/tasks?status=pending` ou
+  `?priority=high` ou os dois juntos — a combinação é AND, não OR (pedir
+  "pending E high" é o caso de uso real; "pending OU high" não foi pedido e
+  seria um parâmetro de forma diferente, fora de escopo). Continua ordenado
+  por `(created_at, id)` e paginado exatamente como hoje — o filtro só
+  reduz o conjunto que a paginação janela.
+- **Não faz:** não adiciona busca por texto/título (`AD-1` continua
+  parcialmente aberto — ver `validation.md`). Não muda `ListTasks`'s
+  ordenação nem introduz um parâmetro de ordenação novo — ninguém pediu
+  isso. Não valida `status`/`priority` vazio como erro — string vazia
+  continua sendo "sem filtro", exatamente como `priority: ""` já significa
+  em `CreateTaskRequest`.
+- **Testes:**
+  - `internal/task/memory_repository_test.go` — casos novos ao lado de
+    `TestFindAll_Pagination`: filtro só por `status`, só por `priority`,
+    os dois juntos, filtro que não casa com nada (retorna `[]Task{}`, não
+    `nil`), e um teste confirmando que filtro + paginação combinados
+    janelam o conjunto já filtrado (não o total).
+  - `internal/task/postgres_repository_test.go` (`//go:build integration`)
+    — os mesmos casos, contra Postgres de verdade, confirmando paridade com
+    `memory_repository_test.go` por `go-repository-parity.md`.
+  - `internal/task/service_test.go` — `fakeRepository.FindAll` ganha os
+    dois parâmetros novos (e `findAllCalledWith` passa a registrar os
+    cinco); `TestListTasks_PassesUserIDLimitOffsetToRepository` renomeado/
+    estendido para cobrir status/priority também; casos novos para
+    `ErrInvalidInput` em `status`/`priority` desconhecidos.
+  - `internal/task/handler_test.go` — `listTasksFn` ganha os dois
+    parâmetros; casos novos de `?status=`/`?priority=` válidos, inválidos
+    (`400`), combinados, e ausentes (comportamento atual preservado).
+- **Verificação:** `make check` (unit, `-race`, vet, staticcheck, gofmt) +
+  `make test-integration` contra Postgres real (`make db-up` primeiro).
+- **Depende de:** _nada_ — trabalho de backend, sem sobreposição de arquivo
+  com nenhum `CI` de frontend desta fase.
+
+### CI-15 — Frontend: controles de filtro em `TaskList`
+
+- **Arquivos:**
+  - `web/src/features/tasks/TaskList.tsx`, `TaskList.module.css`,
+    `TaskList.test.tsx` — dois `Select` novos (reusa o componente já
+    restilizado em `CI-3`) para `status`/`priority`, com uma opção "Todos"
+    representando "sem filtro" (mapeada para omitir o query param, não para
+    enviar uma string vazia — consistente com `CI-14`'s sentinela).
+  - `web/src/features/tasks/useTasks.tsx` — a hook que hoje chama
+    `GET /tasks` (sem filtro) passa a aceitar `status`/`priority` e
+    incluí-los na query string só quando não-vazios.
+  - `web/src/api/client.ts` — se `listTasks` já tiver uma assinatura de
+    parâmetros de paginação, os dois filtros entram do mesmo jeito
+    (parâmetros opcionais); se hoje não aceita nenhum parâmetro de query,
+    ganha os primeiros aqui, seguindo o mesmo padrão já usado por outros
+    métodos do client para parâmetros opcionais.
+- **Faz:** o usuário filtra a lista de tasks por status e/ou prioridade
+  direto no backend (não é mais só reordenação client-side do que já foi
+  carregado) — o pedido concreto que reabriu `AM-1`: "gostaria de ter
+  filtros também para organizar as tasks". Estado do filtro fica em
+  `useState` local de `TaskList` (não em `localStorage`/URL) — nenhum
+  pedido de persistir o filtro entre sessões ou compartilhar um link
+  filtrado ainda existe; adicionar isso sem pedido seria antecipação
+  especulativa (`CLAUDE.md` § "No speculative abstraction").
+- **Não faz:** não adiciona um campo de busca por texto (mesmo motivo de
+  `CI-14`: `AD-1` continua parcialmente aberto). Não muda a lógica de
+  criação/edição/transição de task — só como a lista é buscada.
+- **Testes:** `TaskList.test.tsx` — muda o `Select` de status, confirma que
+  a chamada a `useTasks`/`listTasks` inclui o `status` escolhido; o mesmo
+  para `priority`; escolher "Todos" de volta remove o parâmetro da próxima
+  chamada; os quatro estados (loading/empty/error/sucesso) continuam
+  passando com o filtro em qualquer posição. `assertOnlyTokens` no CSS
+  module tocado.
+- **Verificação:** `npm test` + `vite preview` real contra o backend de
+  `CI-14` rodando (não só os testes unitários — filtro é exatamente o tipo
+  de mudança que "funciona nos testes mas não bate com o parâmetro real do
+  backend" se um dos dois lados mudar o nome do query param sem o outro).
+- **Depende de:** `CI-14` (o backend precisa aceitar os parâmetros antes do
+  frontend poder enviá-los de verdade), `CI-3` (reusa `Select`), `CI-7`
+  (cabeçalho de `TaskList` onde os filtros vivem — ainda não implementado
+  neste branch; se `CI-15` for implementado antes de `CI-7`, os filtros
+  entram no `TaskList` de hoje e são reposicionados quando `CI-7`
+  chegar, não bloqueados por ele).
 
 ## Mapa de dependências
 
@@ -427,6 +550,8 @@ CI-4, CI-6 ─────────┴── CI-13 ─┘
                                 └── CI-9 ── CI-11
                                      │       │
 CI-1 ── CI-10 ───────────────────────┴───────┘
+
+CI-14 (independente) ── CI-15 (também depende de CI-3, CI-7)
 ```
 (`CI-13` depende de `CI-4` e `CI-6` — mostrado à parte acima porque um
 diagrama em texto não representa bem uma aresta que cruza os outros
@@ -464,9 +589,18 @@ desenho.)
       alternância claro/escuro/sistema (`CI-11`)
 - [ ] Auditoria de a11y + navegação por teclado reverificadas com o tema
       escuro ativo, registradas no PR de `CI-11`
+- [ ] `internal/task/{repository,memory_repository,postgres_repository,
+      service,handler}.go` — filtro `status`/`priority` (`CI-14`)
+- [ ] `docs/openapi.yaml` — `GET /v1/tasks` com os dois query params novos
+      (`CI-14`)
+- [ ] `web/src/features/tasks/{TaskList,useTasks}.tsx` +
+      `web/src/api/client.ts` — controles de filtro (`CI-15`)
 - [ ] `CHANGELOG.md` — entrada nova quando esta fase for lançada
-- [ ] `docs/ARCHITECTURE.md` — **sem alteração** (filtro/busca continua
-      adiado, board não vira item novo por não ter sido decidido nesta fase)
+- [ ] `docs/ARCHITECTURE.md` — o bullet de Future Improvements sobre
+      "Task filtering and search" é reescrito para refletir só a metade
+      que continua pendente (busca por título) — a metade filtro fecha com
+      `CI-14`/`CI-15` (ver `validation.md`'s `AD-1`). Board não vira item
+      novo por não ter sido decidido nesta fase.
 
 ## Riscos e como o plano os cobre
 
@@ -476,8 +610,10 @@ desenho.)
 | Restilizar `TaskItem`/`TaskList` quebra um `getByRole`/`getByLabel` que os specs de E2E (Fase 13, CI-11) dependem | `CI-9` roda a suíte E2E completa de verdade contra o redesenho, não só os testes unitários locais de cada `CI` |
 | Reduzir o peso visual do estado vazio de anexos (`CI-8`) sem querer torna "Upload file" inacessível por teclado | `CI-8` mantém o controle visível e alcançável; `CI-9` reverifica o fluxo de teclado ponta a ponta |
 | App shell novo (`CI-4`) esconde ou duplica a lógica de `logout`/`logout-all` que `useAuth` já expõe | `CI-4` só move a apresentação para dentro do shell — `useAuth()` continua a única fonte da lógica, testado em `AppShell.test.tsx` |
-| Escopo crescer de volta para filtro/busca ou board no meio da implementação, revertendo a decisão já tomada em `validation.md` | Plano não inclui nenhum `CI` de contrato; qualquer pedido nessa direção durante a implementação volta para `/decide` ou uma fase nova, não uma expansão silenciosa deste plano |
 | Painel de marketing de `CI-5` acaba na frente do formulário na ordem de tabulação, ou vira uma cópia do template de referência em vez de uma peça própria | `CI-5` testa a ordem de tabulação explicitamente; `validation.md`'s `AM-5` registra que só o princípio (token único, acento restrito) se estende, não a paleta/animação do template |
 | Um componente restilizado em `CI-5`–`CI-8` usa uma cor literal em vez de token, e só quebra visualmente quando o tema escuro (`CI-10`) entra em vigor | `assertOnlyTokens` já bloqueia isso no CI de cada componente, antes do tema escuro sequer existir — `CI-11` é a prova final, não a primeira linha de defesa |
 | `Menu.tsx` (`CI-12`) reimplementa foco/teclado incorretamente — trap incompleto, Escape não fecha, foco não volta ao gatilho — e uma transição de status vira inacessível por teclado | `Menu.test.tsx` testa cada um desses casos isoladamente no primitive; `CI-9` reverifica o fluxo real de teclado ponta a ponta depois de integrado em `TaskStatusControls` |
 | Esconder as transições atrás de um menu (`CI-12`) esconde também informação que antes era visível de relance (quais transições existem, não só a atual) | Cada item do menu usa ícone + rótulo (não só ícone) — a informação continua ali, só não ocupa espaço permanente na linha |
+| Escopo crescer de volta para busca por título ou board no meio da implementação, indo além da decisão já tomada em `validation.md` | `CI-14`/`CI-15` cobrem só filtro estruturado por `status`/`priority` — qualquer pedido de busca por texto ou board durante a implementação volta para `/decide` ou uma fase nova, não uma expansão silenciosa deste plano |
+| `internal/task/repository.go`'s `FindAll` ganhar parâmetros novos e `memoryRepository`/`postgresRepository` divergirem em como aplicam o filtro (ordem relativa a paginação, por exemplo) | `CI-14` testa os dois lados com os mesmos casos (`memory_repository_test.go` e `postgres_repository_test.go` espelhados), por `.claude/rules/go-repository-parity.md` |
+| `CI-15` enviar um nome de query param que não bate com o que `CI-14` implementou (ex.: `status` vs. `state`) | `CI-15` só é testado "de verdade" (`vite preview` contra o backend de `CI-14` rodando), não só mocado — a mesma disciplina de verificação real já usada no resto desta fase |

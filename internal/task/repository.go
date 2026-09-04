@@ -23,6 +23,15 @@ import (
 // discard most of them. offset or limit values beyond the end of the data
 // are not an error — they yield an empty result.
 //
+// status and priority filter the result when non-empty; the zero value of
+// each ("") means "no filter on this field", the same sentinel
+// CreateTaskRequest/UpdateTaskRequest already use for "not provided". Both
+// present combine with AND, never OR. Filtering happens before the
+// limit/offset window is applied — a filtered page must windows the
+// filtered set, not the full table. This is pushed into the query
+// itself in postgresRepository (a conditional WHERE clause), not
+// fetch-then-filter in Go.
+//
 // Update performs optimistic concurrency control keyed on Task.Version: the
 // caller must pass back the Version it most recently read (via FindByID or
 // FindAll), and Update returns ErrConflict — without applying the write —
@@ -36,7 +45,7 @@ import (
 type Repository interface {
 	Create(ctx context.Context, task Task) error
 	FindByID(ctx context.Context, id, userID string) (Task, error)
-	FindAll(ctx context.Context, userID string, limit, offset int) ([]Task, error)
+	FindAll(ctx context.Context, userID string, limit, offset int, status Status, priority Priority) ([]Task, error)
 	Update(ctx context.Context, task Task) error
 	Delete(ctx context.Context, id, userID string) error
 }

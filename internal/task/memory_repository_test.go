@@ -96,7 +96,7 @@ func TestFindAll(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), testUserID, -1, 0)
+	got, err := repo.FindAll(context.Background(), testUserID, -1, 0, "", "")
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestFindAll_ScopedToUser(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), testUserID, -1, 0)
+	got, err := repo.FindAll(context.Background(), testUserID, -1, 0, "", "")
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestFindAll_OrdersByCreatedAtThenID(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), testUserID, -1, 0)
+	got, err := repo.FindAll(context.Background(), testUserID, -1, 0, "", "")
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestFindAll_Pagination(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := repo.FindAll(context.Background(), testUserID, tc.limit, tc.offset)
+			got, err := repo.FindAll(context.Background(), testUserID, tc.limit, tc.offset, "", "")
 			if err != nil {
 				t.Fatalf("FindAll() unexpected error: %v", err)
 			}
@@ -487,6 +487,111 @@ func TestFindByID_IsolatesInternalState(t *testing.T) {
 	}
 }
 
+// TestFindAll_FiltersByStatusAndPriority verifies status/priority
+// filtering, including the two combined (AND, not OR) and a filter that
+// matches nothing (must return []Task{}, not nil).
+func TestFindAll_FiltersByStatusAndPriority(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	seed := []struct {
+		id       string
+		status   Status
+		priority Priority
+	}{
+		{"1", StatusPending, PriorityLow},
+		{"2", StatusPending, PriorityHigh},
+		{"3", StatusDone, PriorityLow},
+		{"4", StatusDone, PriorityHigh},
+	}
+	base := time.Now()
+	for i, s := range seed {
+		task := newTestTask(s.id, "Task "+s.id)
+		task.Status = s.status
+		task.Priority = s.priority
+		task.CreatedAt = base.Add(time.Duration(i) * time.Second)
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name     string
+		status   Status
+		priority Priority
+		wantIDs  []string
+	}{
+		{"no filter", "", "", []string{"1", "2", "3", "4"}},
+		{"status only", StatusDone, "", []string{"3", "4"}},
+		{"priority only", "", PriorityHigh, []string{"2", "4"}},
+		{"status and priority combined (AND)", StatusDone, PriorityHigh, []string{"4"}},
+		{"filter matches nothing", StatusCancelled, "", []string{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repo.FindAll(context.Background(), testUserID, -1, 0, tc.status, tc.priority)
+			if err != nil {
+				t.Fatalf("FindAll() unexpected error: %v", err)
+			}
+
+			gotIDs := make([]string, len(got))
+			for i, task := range got {
+				gotIDs[i] = task.ID
+			}
+			if len(gotIDs) != len(tc.wantIDs) {
+				t.Fatalf("FindAll() IDs = %v, want %v", gotIDs, tc.wantIDs)
+			}
+			for i := range tc.wantIDs {
+				if gotIDs[i] != tc.wantIDs[i] {
+					t.Errorf("FindAll() IDs = %v, want %v", gotIDs, tc.wantIDs)
+				}
+			}
+		})
+	}
+}
+
+// TestFindAll_FilterThenPaginate verifies that limit/offset window the
+// already-filtered set, not the full table — a filtered page must behave
+// the same way a SQL WHERE-then-LIMIT would, not "paginate everything,
+// then filter the page".
+func TestFindAll_FilterThenPaginate(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	base := time.Now()
+	for i, id := range []string{"1", "2", "3", "4", "5"} {
+		task := newTestTask(id, "Task "+id)
+		task.CreatedAt = base.Add(time.Duration(i) * time.Second)
+		if id == "3" {
+			task.Status = StatusDone // the only non-pending task
+		}
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	// Filtering to StatusPending leaves {1, 2, 4, 5}; limit=2/offset=1
+	// over that filtered set must be {2, 4}, not "take tasks 2-3 of the
+	// unfiltered five and then filter", which would wrongly yield {2}.
+	got, err := repo.FindAll(context.Background(), testUserID, 2, 1, StatusPending, "")
+	if err != nil {
+		t.Fatalf("FindAll() unexpected error: %v", err)
+	}
+
+	wantIDs := []string{"2", "4"}
+	gotIDs := make([]string, len(got))
+	for i, task := range got {
+		gotIDs[i] = task.ID
+	}
+	if len(gotIDs) != len(wantIDs) {
+		t.Fatalf("FindAll() IDs = %v, want %v", gotIDs, wantIDs)
+	}
+	for i := range wantIDs {
+		if gotIDs[i] != wantIDs[i] {
+			t.Errorf("FindAll() IDs = %v, want %v", gotIDs, wantIDs)
+		}
+	}
+}
+
 // TestFindAll_IsolatesInternalState verifies that modifying tasks returned by FindAll
 // does not affect the values stored in the repository.
 func TestFindAll_IsolatesInternalState(t *testing.T) {
@@ -497,7 +602,7 @@ func TestFindAll_IsolatesInternalState(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	all, _ := repo.FindAll(context.Background(), testUserID, -1, 0)
+	all, _ := repo.FindAll(context.Background(), testUserID, -1, 0, "", "")
 	all[0].Title = "Mutated"
 	all[0].Status = StatusDone
 
@@ -550,7 +655,7 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	// All 50 concurrent tasks plus the seed must be present.
-	all, err := repo.FindAll(context.Background(), testUserID, -1, 0)
+	all, err := repo.FindAll(context.Background(), testUserID, -1, 0, "", "")
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}

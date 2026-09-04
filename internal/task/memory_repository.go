@@ -58,11 +58,13 @@ func (r *memoryRepository) FindByID(ctx context.Context, id, userID string) (Tas
 	return task, nil
 }
 
-// FindAll returns a snapshot of userID's tasks ordered by CreatedAt
-// ascending (ties broken by ID) — the store is a Go map, so this ordering
-// is applied here rather than relied upon from iteration — windowed to at
-// most limit results starting at offset, per Repository's contract.
-func (r *memoryRepository) FindAll(ctx context.Context, userID string, limit, offset int) ([]Task, error) {
+// FindAll returns a snapshot of userID's tasks, optionally filtered by
+// status/priority, ordered by CreatedAt ascending (ties broken by ID) — the
+// store is a Go map, so this ordering is applied here rather than relied
+// upon from iteration — windowed to at most limit results starting at
+// offset, per Repository's contract. The status/priority filters are
+// applied before the window (see FindAll's doc comment on Repository).
+func (r *memoryRepository) FindAll(ctx context.Context, userID string, limit, offset int, status Status, priority Priority) ([]Task, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -73,6 +75,12 @@ func (r *memoryRepository) FindAll(ctx context.Context, userID string, limit, of
 	tasks := make([]Task, 0, len(r.store))
 	for _, task := range r.store {
 		if task.UserID != userID {
+			continue
+		}
+		if status != "" && task.Status != status {
+			continue
+		}
+		if priority != "" && task.Priority != priority {
 			continue
 		}
 		tasks = append(tasks, task)
