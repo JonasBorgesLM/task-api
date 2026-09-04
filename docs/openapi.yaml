@@ -59,7 +59,15 @@ info:
     would disable it behind the TLS-terminating proxy it exists for.
     `HSTS_MAX_AGE=0` is the opt-out. See docs/ARCHITECTURE.md's
     "Operational Behavior".
-  version: "2.3.0"
+  # Tracks the product's own release tag (see CHANGELOG.md), not a
+  # separate OpenAPI-document version — this project's actual contract
+  # versioning is the /v1 path mount (see the "Versioning" section
+  # below and .claude/rules/api-contract.md), not this field. Before
+  # this it had drifted for five releases (last touched in PR #139,
+  # 2026-08-29, months before v1.1.0 even existed) because nothing
+  # required bumping it. Bump it as part of every release from now on
+  # — see CLAUDE.md's "Keep documentation in sync".
+  version: "1.5.0"
   license:
     name: MIT
     url: https://github.com/JonasBorgesLM/task-api/blob/main/LICENSE
