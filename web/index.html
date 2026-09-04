@@ -5,6 +5,31 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>web</title>
+    <!-- Fase 14 CI-11: applies an explicit theme choice before first
+         paint, synchronously, so a user who chose "light" while their
+         OS prefers dark (or vice versa) never sees one frame of the
+         wrong theme on reload — React doesn't mount for another beat
+         after this, and tokens.css's own @media rule would otherwise
+         win by default until useTheme's effect catches up. "system"
+         (no explicit choice) needs no script at all: the CSS media
+         query alone already gets that case right on first paint. Reads
+         the exact same localStorage key useTheme.tsx writes — see that
+         file for why this is UI preference, not the session credential
+         docs/DECISIONS.md's "Cookie httpOnly, nunca localStorage"
+         forbids storing there. -->
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem('theme')
+          if (theme === 'light' || theme === 'dark') {
+            document.documentElement.setAttribute('data-theme', theme)
+          }
+        } catch (e) {
+          // localStorage inaccessible (private browsing, disabled) — the
+          // system-preference default via CSS still applies correctly.
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

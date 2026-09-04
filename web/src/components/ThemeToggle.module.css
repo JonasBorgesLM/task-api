@@ -1,0 +1,7 @@
+/* Select's own .field stacks a label above a width:100% control — fine
+   inside a form, too wide/tall for AppShell's single-row user menu
+   alongside plain buttons. This caps the width; AppShell's own
+   .userMenu { align-items: center } handles the height difference. */
+.container {
+  width: 8rem;
+}
