@@ -132,6 +132,7 @@ Requesting a task's current status again is always a no-op success, independent 
 - **docs/ARCHITECTURE.md** holds the full project structure tree, the detailed rationale behind each design decision, the status transition table's reasoning, and the Future Improvements/roadmap list.
 - **docs/openapi.yaml** is the source of truth for the API contract — every endpoint, request/response schema, status code, and example. If you change a handler's behavior (new field, new status code, new query param), update this file in the same change.
 - If you change a `Repository` interface, a config variable, or a `make` target, update the relevant README/docs/ARCHITECTURE.md section and this file in the same change — don't let them drift.
+- **`docs/openapi.yaml`'s `info.version` tracks the release tag being cut.** Bump it as part of every release, in the same commit that writes the `CHANGELOG.md` entry — it drifted for five releases (`v1.1.0` through `v1.4.0`) before anyone noticed, because nothing in the release process touched it. This project's actual contract versioning is the `/v1` path mount (see `.claude/rules/api-contract.md`'s "Versioning"), not this field — it exists only as a human-facing "what you're looking at" marker, so it should say the truth.
 
 ## Things not to do without being asked
 
