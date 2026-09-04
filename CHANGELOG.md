@@ -6,6 +6,44 @@ versionamento seguindo [Semantic Versioning](https://semver.org/lang/pt-BR/).
 Este é o primeiro release versionado do projeto — não há tags anteriores.
 `v1.0.0` marca o ponto em que a API passa a ter contrato estável (`/v1`).
 
+## [1.3.0] — a definir na tag
+
+Fase 14 (redesenho visual do frontend + filtro de tasks) — PRs #165,
+#166, #167, #168, #171, #174, #177, #178, #180, #181, #183, #185, #187.
+**Minor, não major:** a única mudança de contrato é aditiva (dois query
+params novos, opcionais, em `GET /v1/tasks`) — nenhuma rota, campo ou
+código de status existente muda de comportamento, e um cliente que não
+envia os dois parâmetros novos vê exatamente o que via antes. O restante
+do lote é redesenho visual do frontend (fora do contrato de API) e
+correções de auditoria (E2E, acessibilidade) — ver `CHANGELOG.md`'s
+seção "Alterado" desta entrada para o que efetivamente é observável por
+um cliente, e `docs/changes/frontend-redesign/` para o resto.
+
+### Adicionado
+- `GET /v1/tasks` aceita dois query params novos, opcionais: `status` e
+  `priority`, filtrando a lista por esses campos — combinam com `AND`
+  quando os dois estão presentes (ex.: `?status=pending&priority=high`
+  retorna só tasks que são as duas coisas ao mesmo tempo). Omitir os
+  dois continua retornando exatamente o que retornava antes; um valor
+  que não é um dos enums conhecidos de `status`/`priority` retorna
+  `400`, mesmo formato de erro já usado para `limit`/`offset` inválidos
+  (issue #175).
+- `web/` ganha os controles de filtro correspondentes na lista de tasks
+  (dois `<select>`, "Todos" = sem filtro) — issue #176.
+
+### Alterado
+- `web/` — segundo passe visual sobre a SPA introduzida em v1.2.0: app
+  shell persistente, telas de login/registro com painel informativo,
+  hierarquia de cor/densidade na lista de tasks, tema com efeitos
+  visuais (glow de foco, elevação em hover, entre outros). Nenhuma
+  mudança de contrato de API — é puramente visual/estrutural do
+  frontend, sem novo endpoint, campo ou comportamento que um cliente da
+  API observe. Detalhe completo em `docs/changes/frontend-redesign/`.
+- `docs/openapi.yaml`'s descrição de `GET /v1/tasks` reescrita para
+  documentar a interação entre filtro e paginação (o filtro é aplicado
+  antes da janela `limit`/`offset`, não depois) — só clareza de
+  documentação, o comportamento em si (ordenação, janela) não mudou.
+
 ## [1.2.0] — a definir na tag
 
 Lote das issues #112 a #118 e #130 (Fase 12 — modo duplo de autenticação),
