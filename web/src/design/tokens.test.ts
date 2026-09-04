@@ -87,6 +87,61 @@ describe('design tokens: color contrast (WCAG AA)', () => {
   })
 })
 
+// Dark theme (Fase 14, CI-10) — same pairs as the light theme above,
+// against the --dark-color-* values tokens.css defines (the ones the
+// two activation blocks at the end of that file assign onto the public
+// --color-* names). Measured independently, not the same numbers
+// reused: --dark-color-on-accent/-on-danger are dark, not white — see
+// tokens.css's own comment on why a single accent/danger hue can't
+// satisfy both "legible as text on the dark page" and "white text
+// legible on it as a button" at once, and why dark text on a light
+// accent is the fix.
+const darkTextOnBackgroundPairs: Array<[name: string, fg: string, bg: string]> = [
+  ['text-primary on bg', 'dark-color-text-primary', 'dark-color-bg'],
+  ['text-primary on surface', 'dark-color-text-primary', 'dark-color-surface'],
+  ['text-secondary on bg', 'dark-color-text-secondary', 'dark-color-bg'],
+  ['text-secondary on surface', 'dark-color-text-secondary', 'dark-color-surface'],
+  ['on-accent on accent', 'dark-color-on-accent', 'dark-color-accent'],
+  ['accent on bg (links)', 'dark-color-accent', 'dark-color-bg'],
+  ['accent-hover on bg', 'dark-color-accent-hover', 'dark-color-bg'],
+  ['success on bg', 'dark-color-success', 'dark-color-bg'],
+  ['warning-text on warning-bg', 'dark-color-warning-text', 'dark-color-warning-bg'],
+  ['danger on bg', 'dark-color-danger', 'dark-color-bg'],
+  ['on-danger on danger', 'dark-color-on-danger', 'dark-color-danger'],
+  [
+    'status-pending text on bg',
+    'dark-color-status-pending-text',
+    'dark-color-status-pending-bg',
+  ],
+  [
+    'status-in-progress text on bg',
+    'dark-color-status-in-progress-text',
+    'dark-color-status-in-progress-bg',
+  ],
+  ['status-done text on bg', 'dark-color-status-done-text', 'dark-color-status-done-bg'],
+  [
+    'status-cancelled text on bg',
+    'dark-color-status-cancelled-text',
+    'dark-color-status-cancelled-bg',
+  ],
+  ['priority-low text on bg', 'dark-color-priority-low-text', 'dark-color-priority-low-bg'],
+  [
+    'priority-medium text on bg',
+    'dark-color-priority-medium-text',
+    'dark-color-priority-medium-bg',
+  ],
+  ['priority-high text on bg', 'dark-color-priority-high-text', 'dark-color-priority-high-bg'],
+]
+
+describe('design tokens: dark theme color contrast (WCAG AA)', () => {
+  it.each(darkTextOnBackgroundPairs)('%s is >= 4.5:1', (_name, fgToken, bgToken) => {
+    const fg = readColorToken(fgToken)
+    const bg = readColorToken(bgToken)
+    const ratio = contrastRatio(fg, bg)
+    expect(ratio).toBeGreaterThanOrEqual(AA_NORMAL_TEXT)
+  })
+})
+
 // WCAG 1.4.11 (Non-text Contrast): a UI component's visual boundary needs
 // this, not the stricter 4.5:1 normal-text threshold above — see CI-5's
 // entry in docs/changes/web-frontend/plan.md for the finding this
@@ -101,6 +156,20 @@ const interactiveBorderPairs: Array<[name: string, fg: string, bg: string]> = [
 
 describe('design tokens: non-text UI contrast (WCAG 1.4.11)', () => {
   it.each(interactiveBorderPairs)('%s is >= 3:1', (_name, fgToken, bgToken) => {
+    const fg = readColorToken(fgToken)
+    const bg = readColorToken(bgToken)
+    const ratio = contrastRatio(fg, bg)
+    expect(ratio).toBeGreaterThanOrEqual(NON_TEXT_UI_CONTRAST)
+  })
+})
+
+const darkInteractiveBorderPairs: Array<[name: string, fg: string, bg: string]> = [
+  ['border-interactive on bg', 'dark-color-border-interactive', 'dark-color-bg'],
+  ['border-interactive on surface', 'dark-color-border-interactive', 'dark-color-surface'],
+]
+
+describe('design tokens: dark theme non-text UI contrast (WCAG 1.4.11)', () => {
+  it.each(darkInteractiveBorderPairs)('%s is >= 3:1', (_name, fgToken, bgToken) => {
     const fg = readColorToken(fgToken)
     const bg = readColorToken(bgToken)
     const ratio = contrastRatio(fg, bg)

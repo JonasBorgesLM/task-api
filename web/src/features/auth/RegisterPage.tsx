@@ -95,8 +95,11 @@ export function RegisterPage() {
         <Button type="submit" loading={isSubmitting}>
           Create account
         </Button>
-        <p>
-          Already have an account? <Link to="/login">Log in</Link>
+        <p className={styles.switchLink}>
+          Already have an account?{' '}
+          <Link to="/login" className={styles.switchLinkAnchor}>
+            Log in
+          </Link>
         </p>
       </form>
     </AuthLayout>

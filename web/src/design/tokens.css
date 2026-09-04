@@ -4,14 +4,21 @@
  * Every value here is decided once, for a reason recorded inline, and
  * every component consumes these custom properties rather than a
  * literal color/size — see tokens.test.ts for the contrast obligation
- * this file carries. No dark theme yet: nothing downstream needs one,
- * and CSS custom properties make adding one later (a `[data-theme]`
- * override block) additive, not a rewrite.
+ * this file carries. CSS custom properties are what made a dark theme
+ * (Fase 14, CI-10) additive rather than a rewrite: components already
+ * consume --color-* names, never a literal hex, so giving those same
+ * names a second set of values under a `[data-theme]`/media-query
+ * override changes nothing about how any component is written.
  *
  * Anti-requirements this palette was built against (issue #121): no
  * generic-dashboard aesthetic, no gradient without a reason, no
  * exaggerated shadow, no color picked without a contrast number behind
- * it, no arbitrary spacing.
+ * it, no arbitrary spacing. The dark palette below was held to the
+ * same discipline — it is not the orange/heavy-animation template that
+ * originally prompted "apply this template's colors" (see
+ * docs/changes/frontend-redesign/validation.md's AM-5): same neutral
+ * scale + one accent, a second measured set of values, not a second
+ * personality.
  */
 
 :root {
@@ -105,6 +112,78 @@
      requires; the glow is decoration on top). */
   --color-surface-translucent: rgb(248 249 251 / 85%);
   --color-focus-glow: rgb(40 87 214 / 20%);
+
+  /* ---------------------------------------------------------------
+   * Dark theme palette (Fase 14, CI-10) — private values only, never
+   * consumed by a component directly (nothing below reads a
+   * --dark-color-* name; grep the rest of web/src and there is no
+   * hit). The two activation blocks at the end of this file assign
+   * these onto the public --color-* names components already use, so
+   * defining the hex values exactly once here — instead of repeating
+   * the same ~25 declarations in both the @media block and the
+   * [data-theme="dark"] block — is what keeps the two activation
+   * paths impossible to accidentally drift apart.
+   *
+   * --dark-color-accent is deliberately much lighter than
+   * --color-accent (#7ea2ff vs #2857d6), and --dark-color-on-accent is
+   * dark, not white. This is not arbitrary: in light mode,
+   * "on-accent on accent" (white text on the accent button) and
+   * "accent on bg" (accent-colored link text on the white page) are
+   * secretly the same contrast check, because the page background and
+   * the button's text color are both white — one accent value passes
+   * both automatically. In dark mode the page background is near-black
+   * and the button text is a separate, real choice — the same trick
+   * only reappears if the button's text goes dark too (near-black text
+   * on a light accent), which is why --dark-color-on-accent is
+   * #0d1526, not #ffffff. Verified: a single accent hue with a white
+   * on-accent value has no solution here — solving "white legible on
+   * accent" and "accent legible on near-black" simultaneously at
+   * 4.5:1 requires the accent's luminance to be both >= ~0.20 and
+   * <= ~0.18, which is impossible. --dark-color-danger/-on-danger use
+   * the same resolution, for the same reason (`--color-danger` is
+   * both error text throughout the app and the delete-confirmation
+   * button's solid fill). Every pair below is tested in tokens.test.ts
+   * exactly like the light pairs are — measured, not estimated. */
+  --dark-color-bg: #0d0f13;
+  --dark-color-surface: #171b23;
+  --dark-color-border: #262b35;
+  --dark-color-border-interactive: #7b8494;
+
+  --dark-color-text-primary: #e9ecf1;
+  --dark-color-text-secondary: #a7afbc;
+  --dark-color-text-disabled: #5a6270;
+
+  --dark-color-accent: #7ea2ff;
+  --dark-color-accent-hover: #9cb8ff;
+  --dark-color-on-accent: #0d1526;
+
+  --dark-color-success: #5fd695;
+  --dark-color-warning-bg: #33280a;
+  --dark-color-warning-text: #f0c674;
+  --dark-color-danger: #ff8a80;
+  --dark-color-on-danger: #2a0b08;
+
+  --dark-color-status-pending-bg: #2a3140;
+  --dark-color-status-pending-text: #c3cad6;
+  --dark-color-status-in-progress-bg: #1e2f57;
+  --dark-color-status-in-progress-text: #a9c4ff;
+  --dark-color-status-done-bg: #1a3a29;
+  --dark-color-status-done-text: #8fe0b3;
+  --dark-color-status-cancelled-bg: #3d2126;
+  --dark-color-status-cancelled-text: #f0aab1;
+
+  --dark-color-priority-low-bg: #183129;
+  --dark-color-priority-low-text: #8fd4bd;
+  --dark-color-priority-medium-bg: #3a2c05;
+  --dark-color-priority-medium-text: #f4c95d;
+  --dark-color-priority-high-bg: #3a1a15;
+  --dark-color-priority-high-text: #ff9d8f;
+
+  /* Decorative — exempt from the contrast obligation above the same
+     way their light-mode counterparts are (neither is text). Same
+     construction: --dark-color-surface/-accent at reduced alpha. */
+  --dark-color-surface-translucent: rgb(23 27 35 / 85%);
+  --dark-color-focus-glow: rgb(126 162 255 / 20%);
 
   /* ---------------------------------------------------------------
    * Typography
@@ -203,4 +282,107 @@
   --breakpoint-sm: 480px; /* mobile */
   --breakpoint-md: 768px; /* tablet */
   --breakpoint-lg: 1024px; /* desktop */
+}
+
+/*
+ * Dark theme activation (Fase 14, CI-10) — two independent paths, both
+ * assigning the same --dark-color-* values (defined once above) onto
+ * the public --color-* names every component already consumes:
+ *
+ * 1. System preference, automatic, no explicit choice made yet. Guarded
+ *    by :not([data-theme="light"]) so a user who explicitly chose light
+ *    while their OS is set to dark isn't overridden back — CI-11 (the
+ *    toggle) is what sets data-theme on <html>, this file only reacts
+ *    to it.
+ * 2. Explicit choice, wins regardless of system preference — this is
+ *    what makes "override the system" possible at all. Deliberately
+ *    outside the @media block: an explicit choice applies whether or
+ *    not prefers-color-scheme even matches, which a rule nested inside
+ *    that media query could never do.
+ *
+ * CI-10's own scope stops here: no component is touched, and nothing
+ * sets [data-theme] yet (there is no toggle to set it — that's CI-11).
+ * Until CI-11 ships, only the @media path can ever activate, purely
+ * from the visiting browser/OS's own prefers-color-scheme.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --color-bg: var(--dark-color-bg);
+    --color-surface: var(--dark-color-surface);
+    --color-border: var(--dark-color-border);
+    --color-border-interactive: var(--dark-color-border-interactive);
+
+    --color-text-primary: var(--dark-color-text-primary);
+    --color-text-secondary: var(--dark-color-text-secondary);
+    --color-text-disabled: var(--dark-color-text-disabled);
+
+    --color-accent: var(--dark-color-accent);
+    --color-accent-hover: var(--dark-color-accent-hover);
+    --color-on-accent: var(--dark-color-on-accent);
+
+    --color-success: var(--dark-color-success);
+    --color-warning-bg: var(--dark-color-warning-bg);
+    --color-warning-text: var(--dark-color-warning-text);
+    --color-danger: var(--dark-color-danger);
+    --color-on-danger: var(--dark-color-on-danger);
+
+    --color-status-pending-bg: var(--dark-color-status-pending-bg);
+    --color-status-pending-text: var(--dark-color-status-pending-text);
+    --color-status-in-progress-bg: var(--dark-color-status-in-progress-bg);
+    --color-status-in-progress-text: var(--dark-color-status-in-progress-text);
+    --color-status-done-bg: var(--dark-color-status-done-bg);
+    --color-status-done-text: var(--dark-color-status-done-text);
+    --color-status-cancelled-bg: var(--dark-color-status-cancelled-bg);
+    --color-status-cancelled-text: var(--dark-color-status-cancelled-text);
+
+    --color-priority-low-bg: var(--dark-color-priority-low-bg);
+    --color-priority-low-text: var(--dark-color-priority-low-text);
+    --color-priority-medium-bg: var(--dark-color-priority-medium-bg);
+    --color-priority-medium-text: var(--dark-color-priority-medium-text);
+    --color-priority-high-bg: var(--dark-color-priority-high-bg);
+    --color-priority-high-text: var(--dark-color-priority-high-text);
+
+    --color-surface-translucent: var(--dark-color-surface-translucent);
+    --color-focus-glow: var(--dark-color-focus-glow);
+  }
+}
+
+:root[data-theme='dark'] {
+  --color-bg: var(--dark-color-bg);
+  --color-surface: var(--dark-color-surface);
+  --color-border: var(--dark-color-border);
+  --color-border-interactive: var(--dark-color-border-interactive);
+
+  --color-text-primary: var(--dark-color-text-primary);
+  --color-text-secondary: var(--dark-color-text-secondary);
+  --color-text-disabled: var(--dark-color-text-disabled);
+
+  --color-accent: var(--dark-color-accent);
+  --color-accent-hover: var(--dark-color-accent-hover);
+  --color-on-accent: var(--dark-color-on-accent);
+
+  --color-success: var(--dark-color-success);
+  --color-warning-bg: var(--dark-color-warning-bg);
+  --color-warning-text: var(--dark-color-warning-text);
+  --color-danger: var(--dark-color-danger);
+  --color-on-danger: var(--dark-color-on-danger);
+
+  --color-status-pending-bg: var(--dark-color-status-pending-bg);
+  --color-status-pending-text: var(--dark-color-status-pending-text);
+  --color-status-in-progress-bg: var(--dark-color-status-in-progress-bg);
+  --color-status-in-progress-text: var(--dark-color-status-in-progress-text);
+  --color-status-done-bg: var(--dark-color-status-done-bg);
+  --color-status-done-text: var(--dark-color-status-done-text);
+  --color-status-cancelled-bg: var(--dark-color-status-cancelled-bg);
+  --color-status-cancelled-text: var(--dark-color-status-cancelled-text);
+
+  --color-priority-low-bg: var(--dark-color-priority-low-bg);
+  --color-priority-low-text: var(--dark-color-priority-low-text);
+  --color-priority-medium-bg: var(--dark-color-priority-medium-bg);
+  --color-priority-medium-text: var(--dark-color-priority-medium-text);
+  --color-priority-high-bg: var(--dark-color-priority-high-bg);
+  --color-priority-high-text: var(--dark-color-priority-high-text);
+
+  --color-surface-translucent: var(--dark-color-surface-translucent);
+  --color-focus-glow: var(--dark-color-focus-glow);
 }

@@ -58,6 +58,34 @@
   gap: var(--space-4);
 }
 
+/* LoginPage/RegisterPage's own "Don't have an account? / Already have
+   one?" switch link below the form. Fase 14 CI-11 finding: this <a>
+   (via react-router's <Link>) had no color of its own — inherited from
+   .form's --color-text-primary in every other element, but a browser's
+   default link color always wins over inherited text color unless
+   overridden. That default (a shade of blue) happened to clear 4.5:1
+   against the light theme's white background by accident, and failed
+   outright (2.04:1) against the dark theme's near-black one once CI-10
+   shipped — caught by CI-11's real re-audit with dark theme active, not
+   by reading the code. */
+.switchLink {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* Rerunning the dark-mode audit after the fix above surfaced a second,
+   distinct finding (axe's link-in-text-block): --color-accent against
+   --color-text-secondary is only ~1.1:1 apart — too close to tell the
+   link apart by color alone — and an underline shown only on :hover
+   gave no resting-state cue either. WCAG 1.4.1 wants a non-color
+   distinguishing signal, so the underline is permanent now, not a
+   hover embellishment. */
+.switchLinkAnchor {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+
 .marketing {
   flex: 1 1 50%;
   background-color: var(--color-surface);
