@@ -130,6 +130,32 @@ describe('TaskList', () => {
     expect(screen.getByText('high')).toBeInTheDocument()
   })
 
+  it('success: shows a page title and a count of what is actually loaded', () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask(), makeTask({ id: 't2' })] })
+    render(<TaskList />)
+
+    expect(screen.getByRole('heading', { name: 'Tasks' })).toBeInTheDocument()
+    expect(screen.getByText('2')).toBeInTheDocument()
+  })
+
+  it('the count gets a "+" when hasMore is true — never a fake total the API never gave', () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask()], hasMore: true })
+    render(<TaskList />)
+
+    expect(screen.getByText('1+')).toBeInTheDocument()
+  })
+
+  it('loading/empty/error states show the page title but no count (nothing loaded yet)', () => {
+    mockTasksResult({ status: 'loading' })
+    render(<TaskList />)
+    expect(screen.queryByRole('heading', { name: 'Tasks' })).not.toBeInTheDocument()
+
+    mockTasksResult({ status: 'empty', tasks: [] })
+    render(<TaskList />)
+    expect(screen.getByRole('heading', { name: 'Tasks' })).toBeInTheDocument()
+    expect(screen.queryByText('0')).not.toBeInTheDocument()
+  })
+
   it('success: sort order is fixed (no sort control), but status/priority filters exist', () => {
     mockTasksResult({ status: 'success', tasks: [makeTask()] })
     render(<TaskList />)

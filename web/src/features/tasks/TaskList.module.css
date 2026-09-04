@@ -4,12 +4,41 @@
   gap: var(--space-4);
 }
 
-.header {
+/* A real page header — "New task" was previously the only visually
+   distinct element on the screen, floating with nothing to anchor it.
+   It's still the only accent-colored element, but now sits beside a
+   title instead of alone (Fase 14 CI-7, audit finding — see plan.md). */
+.pageHeader {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--space-3);
+}
+
+.titleGroup {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.title {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+/* Honest, not a fake total: GET /v1/tasks has no total-count response
+   (see useTasks.tsx's own doc comment) — this counts only what's
+   actually loaded, and the "+" when hasMore is true says "at least this
+   many," never a number the API never gave this client. */
+.count {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
 }
 
 .filters {
@@ -24,13 +53,17 @@
   color: var(--color-text-secondary);
 }
 
+/* Fase 14 CI-7: gap reduced from --space-3 to --space-2 — now that
+   status/priority color and Delete's reduced weight (CI-6) carry part of
+   the scannability whitespace alone used to (audit finding #12), each
+   row needs less air around it to stay easy to scan. */
 .list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
 .skeletonItem {
