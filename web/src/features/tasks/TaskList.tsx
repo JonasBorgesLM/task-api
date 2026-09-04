@@ -118,34 +118,47 @@ export function TaskList() {
         />
       )}
 
-      <div className={styles.header}>
-        <div className={styles.filters}>
-          <Select
-            label="Status"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-          >
-            <option value="">All statuses</option>
-            {(Object.entries(STATUS_LABELS) as [Task['status'], string][]).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </Select>
-          <Select
-            label="Priority"
-            value={priorityFilter}
-            onChange={(e) => setPriorityFilter(e.target.value as PriorityFilter)}
-          >
-            <option value="">All priorities</option>
-            {(Object.entries(PRIORITY_LABELS) as [Task['priority'], string][]).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </Select>
+      <div className={styles.pageHeader}>
+        <div className={styles.titleGroup}>
+          <h2 className={styles.title}>Tasks</h2>
+          {status === 'success' && (
+            <span
+              className={styles.count}
+              aria-label={`${tasks.length}${hasMore ? ' or more' : ''} tasks`}
+            >
+              {tasks.length}
+              {hasMore ? '+' : ''}
+            </span>
+          )}
         </div>
         <Button onClick={() => setCreating(true)}>New task</Button>
+      </div>
+
+      <div className={styles.filters}>
+        <Select
+          label="Status"
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+        >
+          <option value="">All statuses</option>
+          {(Object.entries(STATUS_LABELS) as [Task['status'], string][]).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </Select>
+        <Select
+          label="Priority"
+          value={priorityFilter}
+          onChange={(e) => setPriorityFilter(e.target.value as PriorityFilter)}
+        >
+          <option value="">All priorities</option>
+          {(Object.entries(PRIORITY_LABELS) as [Task['priority'], string][]).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </Select>
       </div>
       <Modal open={creating} onClose={() => setCreating(false)} title="New task">
         <TaskForm onCancel={() => setCreating(false)} onSuccess={handleCreated} />
