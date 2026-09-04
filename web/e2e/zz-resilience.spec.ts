@@ -80,7 +80,8 @@ test('a 503 from a mid-session action does not clear the session', async () => {
   // A mutating request made while already authenticated — the session
   // itself was validated at login, before the outage; this exercises
   // RequireAuth's mid-request DB failure on the *next* call.
-  await page.getByRole('button', { name: 'Move to In progress' }).click()
+  await page.getByRole('button', { name: /Change status of/ }).click()
+  await page.getByRole('menuitem', { name: 'Move to In progress' }).click()
   await expect(page.getByRole('alert')).toBeVisible({ timeout: 10000 })
 
   // Still authenticated — no redirect, session state untouched.

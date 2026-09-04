@@ -2,13 +2,13 @@ import { useState } from 'react'
 import { apiFetch } from '../../api/client'
 import type { ApiError } from '../../api/errors'
 import { classifyError } from '../../api/errors'
-import { Button } from '../../components/Button'
+import type { MenuItem } from '../../components/Menu'
+import { Menu } from '../../components/Menu'
 import styles from './TaskStatusControls.module.css'
+import { StatusIcon } from './statusIcons'
 import type { Task } from './useTasks'
 
 type Status = Task['status']
-
-const ALL_STATUSES: Status[] = ['pending', 'in_progress', 'done', 'cancelled']
 
 // Exported for reuse by TaskList's status filter (CI-15) — a single
 // source of human-readable status text, so the filter dropdown and the
@@ -23,11 +23,14 @@ export const STATUS_LABELS: Record<Status, string> = {
 /**
  * Mirrors internal/task/service.go's legalTransitions table exactly —
  * see CLAUDE.md's "Task status: transition rules live in Service, not
- * the database". This decides ONLY which buttons render enabled; the
- * server stays the authority regardless, which is why handleTransition
- * below still handles a 409 on click rather than trusting this table
- * blindly — the mirror can go stale (another tab, another device) in
- * ways this component has no way to detect ahead of time.
+ * the database". This decides ONLY which items the menu below lists —
+ * an illegal transition is absent, not shown-and-disabled (Fase 14
+ * CI-12 — matches how a macOS/iOS pull-down menu omits inapplicable
+ * actions rather than greying them out). The server stays the
+ * authority regardless, which is why handleTransition still handles a
+ * 409 on selection rather than trusting this table blindly — the
+ * mirror can go stale (another tab, another device) in ways this
+ * component has no way to detect ahead of time.
  */
 const LEGAL_TRANSITIONS: Record<Status, Status[]> = {
   pending: ['in_progress', 'done', 'cancelled'],
@@ -80,23 +83,28 @@ export function TaskStatusControls({ task, onSuccess }: TaskStatusControlsProps)
     }
   }
 
-  const otherStatuses = ALL_STATUSES.filter((status) => status !== task.status)
+  const items: MenuItem[] = LEGAL_TRANSITIONS[task.status].map((target) => ({
+    key: target,
+    label: `Move to ${STATUS_LABELS[target]}`,
+    icon: <StatusIcon status={target} />,
+    onSelect: () => void handleTransition(target),
+  }))
 
   return (
     <div>
-      <div className={styles.controls} role="group" aria-label={`Change status of "${task.title}"`}>
-        {otherStatuses.map((target) => (
-          <Button
-            key={target}
-            variant="secondary"
-            disabled={!LEGAL_TRANSITIONS[task.status].includes(target)}
-            loading={pendingTarget === target}
-            onClick={() => void handleTransition(target)}
-          >
-            Move to {STATUS_LABELS[target]}
-          </Button>
-        ))}
-      </div>
+      <Menu
+        triggerLabel={`Change status of "${task.title}" (currently ${STATUS_LABELS[task.status]})`}
+        triggerIcon={
+          pendingTarget !== null ? (
+            <span className={styles.spinner} aria-hidden="true" />
+          ) : (
+            <StatusIcon status={task.status} />
+          )
+        }
+        items={items}
+        disabled={pendingTarget !== null}
+        busy={pendingTarget !== null}
+      />
       {error && (
         <p className={styles.error} role="alert">
           {error}
