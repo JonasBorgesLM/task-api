@@ -18,8 +18,8 @@
   padding: 0;
   border: 1px solid var(--color-border-interactive);
   border-radius: var(--radius-md);
-  background-color: var(--color-surface);
-  color: var(--color-text-primary);
+  background-color: var(--color-paper);
+  color: var(--color-accent);
   cursor: pointer;
 }
 
@@ -30,7 +30,7 @@
 }
 
 .trigger:hover:not(:disabled) {
-  background-color: var(--color-bg);
+  background-color: var(--color-surface);
 }
 
 .trigger:disabled {
@@ -56,8 +56,38 @@
   padding: var(--space-1);
   border: 1px solid var(--color-border-interactive);
   border-radius: var(--radius-md);
-  background-color: var(--color-surface);
+  background-color: var(--color-paper);
   box-shadow: var(--shadow-md);
+}
+
+/* Opens leftward from the trigger instead of rightward — for a trigger
+   sitting near the viewport's right edge (the header's theme and
+   account menus), the default would push the popup off-screen, which
+   is exactly what it did before this rule existed. */
+.menuAlignEnd {
+  left: auto;
+  right: 0;
+}
+
+/* A labelled trigger sizes to its text instead of staying a 2rem
+   square, and lines its parts up left-to-right: glyph, label, chevron. */
+.triggerWide {
+  width: auto;
+  height: auto;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+
+.triggerText {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+}
+
+.triggerChevron {
+  display: flex;
+  color: var(--color-text-secondary);
 }
 
 .menuItem {
@@ -76,16 +106,53 @@
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .menuItem {
+  /* A labelled trigger sizes to its text instead of staying a 2rem
+   square, and lines its parts up left-to-right: glyph, label, chevron. */
+.triggerWide {
+  width: auto;
+  height: auto;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+
+.triggerText {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+}
+
+.triggerChevron {
+  display: flex;
+  color: var(--color-text-secondary);
+}
+
+.menuItem {
     transition: background-color var(--transition-fast) var(--easing-standard);
   }
 }
 
 .menuItem:hover {
-  background-color: var(--color-bg);
+  background-color: var(--color-surface);
+}
+
+/* The item's own glyph carries the accent unless it brought a colour of
+   its own — the status menu tints its icons per status, and that must
+   win over the default. */
+.menuItem > svg {
+  color: var(--color-accent);
 }
 
 .menuItem:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
+}
+
+/* margin-left: auto pushes the checkmark to the row's trailing edge, the
+   way a native OS pull-down marks its active entry — the label stays
+   left-aligned with every other item's regardless of text length. */
+.check {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--color-accent);
 }

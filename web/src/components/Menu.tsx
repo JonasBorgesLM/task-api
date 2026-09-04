@@ -1,5 +1,6 @@
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { useEffect, useId, useRef, useState } from 'react'
+import { ChevronDownIcon } from './icons'
 import styles from './Menu.module.css'
 
 export interface MenuItem {
@@ -7,6 +8,16 @@ export interface MenuItem {
   label: string
   icon?: ReactNode
   onSelect: () => void
+  /**
+   * Present only for a menu whose items are a mutually-exclusive
+   * *choice* rather than one-shot actions (the theme menu; not the
+   * status menu, whose items each perform a transition and then stop
+   * being relevant). Setting it switches the item to
+   * role="menuitemradio" with aria-checked — the ARIA pattern for
+   * exactly that distinction — and draws a checkmark on the current
+   * one, the way a native OS pull-down marks its active entry.
+   */
+  selected?: boolean
 }
 
 export interface MenuProps {
@@ -19,6 +30,51 @@ export interface MenuProps {
   disabled?: boolean
   /** Marks the trigger aria-busy — pair with a spinner as triggerIcon while a selection's request is in flight. */
   busy?: boolean
+  /**
+   * Turns the menu into a set of independent toggles rather than a list
+   * of one-shot actions: items become role="menuitemcheckbox", and
+   * choosing one leaves the menu open, because the point of a multiple
+   * choice is making several of them without reopening in between.
+   */
+  multi?: boolean
+  /**
+   * Visible text in the trigger, for a control that has to say what it
+   * is currently filtering on. Without it the trigger stays a square
+   * glyph — right for the header's chrome, wrong for a filter whose
+   * whole job is showing its own state.
+   */
+  triggerText?: string
+  /**
+   * Which edge the popup lines up with. 'start' (default) opens it to
+   * the right of the trigger; 'end' opens it leftward, which is what a
+   * trigger near the viewport's right edge needs — the header menus
+   * ran off-screen before this existed.
+   */
+  align?: 'start' | 'end'
+}
+
+/**
+ * The checkmark on the currently-selected item of a choice menu. Not
+ * exported and not in icons.tsx: it is Menu's own rendering of
+ * MenuItem.selected, not a glyph any caller picks.
+ */
+function CheckMark() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width={14}
+      height={14}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={styles.check}
+    >
+      <path d="M3 8.5l3 3 7-8" />
+    </svg>
+  )
 }
 
 /**
@@ -37,7 +93,16 @@ export interface MenuProps {
  * click outside both close the menu and return focus to the trigger;
  * choosing an item does the same, after calling its onSelect.
  */
-export function Menu({ triggerLabel, triggerIcon, items, disabled = false, busy = false }: MenuProps) {
+export function Menu({
+  triggerLabel,
+  triggerIcon,
+  items,
+  disabled = false,
+  busy = false,
+  align = 'start',
+  multi = false,
+  triggerText,
+}: MenuProps) {
   const [open, setOpen] = useState(false)
   const focusOnOpenRef = useRef<'first' | 'last'>('first')
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -48,7 +113,13 @@ export function Menu({ triggerLabel, triggerIcon, items, disabled = false, busy 
     if (!open) return
 
     const menuItems = () =>
-      Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+      Array.from(
+        menuRef.current?.querySelectorAll<HTMLElement>(
+          // Every item role this menu can render — miss one and arrow
+          // navigation silently stops working for that kind of menu.
+          '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]',
+        ) ?? [],
+      )
 
     const initial = menuItems()
     ;(focusOnOpenRef.current === 'last' ? initial[initial.length - 1] : initial[0])?.focus()
@@ -124,8 +195,13 @@ export function Menu({ triggerLabel, triggerIcon, items, disabled = false, busy 
   }
 
   function handleSelect(item: MenuItem) {
-    setOpen(false)
-    triggerRef.current?.focus()
+    // A multiple choice stays open: closing after each toggle would
+    // make selecting three things a matter of opening the menu three
+    // times. Escape, an outside click or Tab still close it.
+    if (!multi) {
+      setOpen(false)
+      triggerRef.current?.focus()
+    }
     item.onSelect()
   }
 
@@ -134,7 +210,7 @@ export function Menu({ triggerLabel, triggerIcon, items, disabled = false, busy 
       <button
         ref={triggerRef}
         type="button"
-        className={styles.trigger}
+        className={`${styles.trigger} ${triggerText ? styles.triggerWide : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
@@ -148,19 +224,35 @@ export function Menu({ triggerLabel, triggerIcon, items, disabled = false, busy 
         onKeyDown={handleTriggerKeyDown}
       >
         {triggerIcon}
+        {triggerText && <span className={styles.triggerText}>{triggerText}</span>}
+        {triggerText && (
+          <span className={styles.triggerChevron} aria-hidden="true">
+            <ChevronDownIcon />
+          </span>
+        )}
       </button>
       {open && (
-        <div id={menuId} ref={menuRef} role="menu" aria-label={triggerLabel} className={styles.menu}>
+        <div
+          id={menuId}
+          ref={menuRef}
+          role="menu"
+          aria-label={triggerLabel}
+          className={`${styles.menu} ${align === 'end' ? styles.menuAlignEnd : ''}`}
+        >
           {items.map((item) => (
             <button
               key={item.key}
               type="button"
-              role="menuitem"
+              role={
+                item.selected === undefined ? 'menuitem' : multi ? 'menuitemcheckbox' : 'menuitemradio'
+              }
+              aria-checked={item.selected}
               className={styles.menuItem}
               onClick={() => handleSelect(item)}
             >
               {item.icon}
               {item.label}
+              {item.selected && <CheckMark />}
             </button>
           ))}
         </div>

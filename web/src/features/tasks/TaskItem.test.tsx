@@ -87,13 +87,43 @@ describe('TaskItem', () => {
     vi.clearAllMocks()
   })
 
-  it('renders the task title, description and badges', () => {
+  it('collapsed: shows the title and badges, and keeps the description closed', () => {
     renderItem()
 
     expect(screen.getByRole('heading', { name: 'Buy groceries' })).toBeInTheDocument()
-    expect(screen.getByText('Milk, eggs, bread')).toBeInTheDocument()
     expect(screen.getByText('pending')).toBeInTheDocument()
     expect(screen.getByText('high')).toBeInTheDocument()
+    // The detail is one click away, not on screen for every row in a
+    // long list (design audit).
+    expect(screen.queryByText('Milk, eggs, bread')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Buy groceries' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+  })
+
+  it('the title opens and closes the detail, and reports its state', async () => {
+    const user = userEvent.setup()
+    renderItem()
+
+    const disclosure = screen.getByRole('button', { name: 'Buy groceries' })
+    await user.click(disclosure)
+
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('Milk, eggs, bread')).toBeInTheDocument()
+
+    await user.click(disclosure)
+
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('Milk, eggs, bread')).not.toBeInTheDocument()
+  })
+
+  it('a task with nothing to open gets a plain title, not a dead disclosure', () => {
+    stubAuth(false)
+    renderItem({ task: { ...TASK, description: '' } })
+
+    expect(screen.getByRole('heading', { name: 'Buy groceries' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Buy groceries' })).not.toBeInTheDocument()
   })
 
   it('a status transition calls onUpdated (TaskStatusControls integration)', async () => {
@@ -208,11 +238,18 @@ describe('TaskItem', () => {
     expect(screen.queryByRole('button', { name: 'Upload file' })).not.toBeInTheDocument()
   })
 
-  it('attachments_enabled: true renders the attachments section', async () => {
+  it('attachments_enabled: true renders the attachments section once the row is opened', async () => {
     stubAuth(true)
     const fetchMock = vi.mocked(fetch)
     fetchMock.mockResolvedValueOnce(jsonResponse(200, []))
+    const user = userEvent.setup()
     renderItem()
+
+    // Not before: the upload control used to repeat on every row of the
+    // list whether or not anyone was attaching anything.
+    expect(screen.queryByRole('button', { name: 'Upload file' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Buy groceries' }))
 
     expect(await screen.findByRole('button', { name: 'Upload file' })).toBeInTheDocument()
   })

@@ -5,6 +5,34 @@
   margin: var(--space-2) 0 0 0;
 }
 
+/* Each wrapper only sets a color — StatusIcon strokes with currentColor,
+   so the glyph inside picks it up, and the -text half of the same token
+   pair the matching badge uses keeps the two in lockstep. display:flex
+   stops the inline-span baseline from nudging the glyph off-center
+   inside the trigger. */
+.iconPending,
+.iconInProgress,
+.iconDone,
+.iconCancelled {
+  display: flex;
+}
+
+.iconPending {
+  color: var(--color-status-pending-text);
+}
+
+.iconInProgress {
+  color: var(--color-status-in-progress-text);
+}
+
+.iconDone {
+  color: var(--color-status-done-text);
+}
+
+.iconCancelled {
+  color: var(--color-status-cancelled-text);
+}
+
 /* Same construction as Button.module.css's own .spinner — replaces the
    menu trigger's status icon while a transition request is in flight. */
 .spinner {

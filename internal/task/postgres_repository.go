@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -123,7 +124,7 @@ func (r *postgresRepository) FindByID(ctx context.Context, id, userID string) (T
 // never string-interpolated — so an empty filter reads exactly as if it
 // were never sent, and a filter still benefits from
 // idx_tasks_user_id_created_at_id rather than forcing a different plan.
-func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, offset int, status Status, priority Priority) ([]Task, error) {
+func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, offset int, statuses []Status, priorities []Priority) ([]Task, error) {
 	query := `
 		SELECT id::text, user_id::text, title, description, status, priority, created_at, updated_at, version
 		FROM tasks
@@ -138,14 +139,35 @@ func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, 
 	}
 	args := []any{userID}
 
-	if status != "" {
-		args = append(args, string(status))
-		query += fmt.Sprintf(" AND status = $%d", len(args))
+	// One placeholder per value rather than a driver-encoded array: an
+	// IN list of ordinary parameters is still a single indexed lookup
+	// here, and it keeps this query free of any dependency on how the
+	// driver happens to marshal a Go slice into a Postgres array. The
+	// lists are bounded by the enums themselves — Service validates and
+	// de-duplicates before this is reached — so the clause can never
+	// grow past four (status) or three (priority) placeholders.
+	appendInClause := func(column string, values []string) {
+		if len(values) == 0 {
+			return
+		}
+		placeholders := make([]string, len(values))
+		for i, v := range values {
+			args = append(args, v)
+			placeholders[i] = fmt.Sprintf("$%d", len(args))
+		}
+		query += fmt.Sprintf(" AND %s IN (%s)", column, strings.Join(placeholders, ", "))
 	}
-	if priority != "" {
-		args = append(args, string(priority))
-		query += fmt.Sprintf(" AND priority = $%d", len(args))
+
+	statusValues := make([]string, len(statuses))
+	for i, s := range statuses {
+		statusValues[i] = string(s)
 	}
+	priorityValues := make([]string, len(priorities))
+	for i, p := range priorities {
+		priorityValues[i] = string(p)
+	}
+	appendInClause("status", statusValues)
+	appendInClause("priority", priorityValues)
 
 	args = append(args, limitArg, offset)
 	query += fmt.Sprintf(" ORDER BY created_at, id LIMIT $%d::bigint OFFSET $%d::bigint", len(args)-1, len(args))

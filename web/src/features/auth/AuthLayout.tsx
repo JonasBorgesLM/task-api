@@ -1,4 +1,7 @@
 import type { ReactNode } from 'react'
+import { PaperclipIcon, ShieldIcon } from '../../components/icons'
+import { Mark } from '../../components/Mark'
+import { StatusChangeIcon } from '../tasks/statusIcons'
 import styles from './AuthLayout.module.css'
 
 export interface AuthLayoutProps {
@@ -14,16 +17,19 @@ export interface AuthLayoutProps {
 // generic SaaS copy.
 const HIGHLIGHTS = [
   {
+    icon: <StatusChangeIcon />,
     title: 'Full task lifecycle',
     description:
       'Create, edit, and move tasks through pending, in progress, done, and cancelled — with legal transitions enforced on the server, not just the UI.',
   },
   {
+    icon: <PaperclipIcon />,
     title: 'File attachments',
     description:
       'Upload, preview, and download files on any task, with per-file and per-account storage limits enforced before a single byte is stored.',
   },
   {
+    icon: <ShieldIcon />,
     title: 'Secure by design',
     description:
       'Sessions live in an httpOnly cookie, every write is CSRF-protected, and every task is scoped to its owner — no cross-account access, ever.',
@@ -51,7 +57,13 @@ export function AuthLayout({ title, children }: AuthLayoutProps) {
     <div className={styles.page}>
       <div className={styles.formColumn}>
         <div className={styles.formColumnInner}>
-          <span className={styles.appName}>Task API</span>
+          {/* The same inked name the app shell carries. This screen used
+              to spell the product out in plain text, which made the
+              first thing anyone sees the one place with no identity on
+              it. */}
+          <span className={styles.appName}>
+            <Mark>Task API</Mark>
+          </span>
           <div className={styles.card}>
             <h1 className={styles.title}>{title}</h1>
             {children}
@@ -68,7 +80,9 @@ export function AuthLayout({ title, children }: AuthLayoutProps) {
           <ul className={styles.highlights}>
             {HIGHLIGHTS.map((item) => (
               <li key={item.title} className={styles.highlight}>
-                <span className={styles.highlightDot} aria-hidden="true" />
+                <span className={styles.highlightIcon} aria-hidden="true">
+                  {item.icon}
+                </span>
                 <div>
                   <p className={styles.highlightTitle}>{item.title}</p>
                   <p className={styles.highlightDescription}>{item.description}</p>

@@ -35,7 +35,7 @@ type fakeRepository struct {
 	deleteCalled      bool
 	savedTask         Task
 	updatedTask       Task
-	findAllCalledWith [5]any // [userID, limit, offset, status, priority]
+	findAllCalledWith [5]any // [userID, limit, offset, statuses, priorities]
 }
 
 func (f *fakeRepository) Create(_ context.Context, task Task) error {
@@ -48,8 +48,10 @@ func (f *fakeRepository) FindByID(_ context.Context, _, _ string) (Task, error) 
 	return f.findByIDTask, f.findByIDErr
 }
 
-func (f *fakeRepository) FindAll(_ context.Context, userID string, limit, offset int, status Status, priority Priority) ([]Task, error) {
-	f.findAllCalledWith = [5]any{userID, limit, offset, status, priority}
+func (f *fakeRepository) FindAll(_ context.Context, userID string, limit, offset int, statuses []Status, priorities []Priority) ([]Task, error) {
+	// Joined rather than stored as slices: [5]any is compared with ==,
+	// which panics on a slice.
+	f.findAllCalledWith = [5]any{userID, limit, offset, joinStatuses(statuses), joinPriorities(priorities)}
 	return f.findAllTasks, f.findAllErr
 }
 
@@ -299,13 +301,29 @@ func TestGetTask_NotFound(t *testing.T) {
 	}
 }
 
+func joinStatuses(statuses []Status) string {
+	parts := make([]string, len(statuses))
+	for i, s := range statuses {
+		parts[i] = string(s)
+	}
+	return strings.Join(parts, ",")
+}
+
+func joinPriorities(priorities []Priority) string {
+	parts := make([]string, len(priorities))
+	for i, p := range priorities {
+		parts[i] = string(p)
+	}
+	return strings.Join(parts, ",")
+}
+
 // --- ListTasks ---
 
 func TestListTasks_Delegates(t *testing.T) {
 	tasks := []Task{newFakeTask(StatusPending), newFakeTask(StatusDone)}
 	svc := NewService(&fakeRepository{findAllTasks: tasks})
 
-	got, err := svc.ListTasks(context.Background(), testUserID, -1, 0, "", "")
+	got, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
@@ -325,10 +343,10 @@ func TestListTasks_PassesUserIDLimitOffsetFiltersToRepository(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	if _, err := svc.ListTasks(context.Background(), testUserID, 10, 5, "pending", "high"); err != nil {
+	if _, err := svc.ListTasks(context.Background(), testUserID, 10, 5, []string{"pending"}, []string{"high"}); err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
-	if want := [5]any{testUserID, 10, 5, StatusPending, PriorityHigh}; repo.findAllCalledWith != want {
+	if want := [5]any{testUserID, 10, 5, "pending", "high"}; repo.findAllCalledWith != want {
 		t.Errorf("ListTasks() called Repository.FindAll with (userID, limit, offset, status, priority) = %v, want %v", repo.findAllCalledWith, want)
 	}
 }
@@ -340,10 +358,10 @@ func TestListTasks_EmptyFiltersReachRepositoryAsEmpty(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	if _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, "", ""); err != nil {
+	if _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, nil); err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
-	if want := [5]any{testUserID, -1, 0, Status(""), Priority("")}; repo.findAllCalledWith != want {
+	if want := [5]any{testUserID, -1, 0, "", ""}; repo.findAllCalledWith != want {
 		t.Errorf("ListTasks() called Repository.FindAll with (userID, limit, offset, status, priority) = %v, want %v", repo.findAllCalledWith, want)
 	}
 }
@@ -352,7 +370,7 @@ func TestListTasks_RepositoryError(t *testing.T) {
 	repoErr := errors.New("storage failure")
 	svc := NewService(&fakeRepository{findAllErr: repoErr})
 
-	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, "", "")
+	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, nil)
 	if !errors.Is(err, repoErr) {
 		t.Errorf("ListTasks() repository error = %v, want %v", err, repoErr)
 	}
@@ -366,7 +384,7 @@ func TestListTasks_UnknownStatusFilterIsInvalidInput(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, "archived", "")
+	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, []string{"archived"}, nil)
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("ListTasks() with unknown status filter error = %v, want ErrInvalidInput", err)
 	}
@@ -381,12 +399,87 @@ func TestListTasks_UnknownPriorityFilterIsInvalidInput(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, "", "urgent")
+	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, []string{"urgent"})
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("ListTasks() with unknown priority filter error = %v, want ErrInvalidInput", err)
 	}
 	if repo.findAllCalledWith != ([5]any{}) {
 		t.Errorf("ListTasks() must not call Repository.FindAll for an invalid filter, called with %v", repo.findAllCalledWith)
+	}
+}
+
+// TestListTasks_MultipleFiltersReachRepository verifies the whole point
+// of the repeated parameter: several statuses (and several priorities)
+// arrive at Repository.FindAll together, in the order given, so the
+// store can match any of them.
+func TestListTasks_MultipleFiltersReachRepository(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	statuses := []string{"pending", "in_progress", "done"}
+	priorities := []string{"high", "medium"}
+	if _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, statuses, priorities); err != nil {
+		t.Fatalf("ListTasks() unexpected error: %v", err)
+	}
+
+	want := [5]any{testUserID, -1, 0, "pending,in_progress,done", "high,medium"}
+	if repo.findAllCalledWith != want {
+		t.Errorf("ListTasks() called Repository.FindAll with %v, want %v", repo.findAllCalledWith, want)
+	}
+}
+
+// TestListTasks_DuplicateFiltersAreCollapsed verifies that repeating the
+// same value does not repeat it in the query: postgresRepository builds
+// one placeholder per value, and a caller sending status ten times must
+// not produce a ten-item IN clause.
+func TestListTasks_DuplicateFiltersAreCollapsed(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	statuses := []string{"done", "pending", "done", "pending", "done"}
+	if _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, statuses, nil); err != nil {
+		t.Fatalf("ListTasks() unexpected error: %v", err)
+	}
+
+	want := [5]any{testUserID, -1, 0, "done,pending", ""}
+	if repo.findAllCalledWith != want {
+		t.Errorf("ListTasks() called Repository.FindAll with %v, want %v", repo.findAllCalledWith, want)
+	}
+}
+
+// TestListTasks_EmptyFilterValuesAreDropped verifies that `?status=`
+// still means "no filter" even when it arrives alongside real values —
+// an empty occurrence is not an error and must not become one now that
+// the parameter can repeat.
+func TestListTasks_EmptyFilterValuesAreDropped(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	if _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, []string{"", "done", ""}, []string{""}); err != nil {
+		t.Fatalf("ListTasks() unexpected error: %v", err)
+	}
+
+	want := [5]any{testUserID, -1, 0, "done", ""}
+	if repo.findAllCalledWith != want {
+		t.Errorf("ListTasks() called Repository.FindAll with %v, want %v", repo.findAllCalledWith, want)
+	}
+}
+
+// TestListTasks_OneBadValueRejectsTheWholeFilter verifies that a single
+// unknown value invalidates the request rather than being quietly
+// dropped — silently narrowing to the values it happened to recognise
+// would return a plausible-looking page that answers a different
+// question than the one asked.
+func TestListTasks_OneBadValueRejectsTheWholeFilter(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, []string{"pending", "archived"}, nil)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("ListTasks() with one unknown status among valid ones = %v, want ErrInvalidInput", err)
+	}
+	if repo.findAllCalledWith != ([5]any{}) {
+		t.Errorf("ListTasks() must not call Repository.FindAll, called with %v", repo.findAllCalledWith)
 	}
 }
 

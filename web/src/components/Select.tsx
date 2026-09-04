@@ -6,6 +6,13 @@ export interface SelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement
   label: string
   error?: string
   id?: string
+  /**
+   * Hides the label visually while keeping it for assistive tech. For a
+   * control whose own first option already says what it filters ("All
+   * statuses"), a repeated visible caption above it is duplication —
+   * but removing the <label> outright would leave the select unnamed.
+   */
+  labelHidden?: boolean
 }
 
 /**
@@ -15,14 +22,26 @@ export interface SelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement
  * baseline, for a component this app doesn't need to visually deviate
  * from native styling to justify.
  */
-export function Select({ label, error, id, required, className, children, ...rest }: SelectProps) {
+export function Select({
+  label,
+  error,
+  id,
+  required,
+  labelHidden = false,
+  className,
+  children,
+  ...rest
+}: SelectProps) {
   const generatedId = useId()
   const fieldId = id ?? generatedId
   const errorId = error ? `${fieldId}-error` : undefined
 
   return (
     <div className={styles.field}>
-      <label htmlFor={fieldId} className={styles.label}>
+      <label
+        htmlFor={fieldId}
+        className={[styles.label, labelHidden && styles.labelHidden].filter(Boolean).join(' ')}
+      >
         {label}
         {required && (
           <span className={styles.required} aria-hidden="true">
