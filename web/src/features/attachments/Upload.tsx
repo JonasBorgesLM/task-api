@@ -5,6 +5,7 @@ import type { ApiError } from '../../api/errors'
 import { classifyError } from '../../api/errors'
 import type { components } from '../../api/types'
 import { Button } from '../../components/Button'
+import { PaperclipIcon } from '../../components/icons'
 import styles from './Upload.module.css'
 
 type Attachment = components['schemas']['Attachment']
@@ -135,6 +136,7 @@ export function Upload({ taskId, onUploaded }: UploadProps) {
         loading={status === 'uploading'}
         onClick={() => inputRef.current?.click()}
       >
+        <PaperclipIcon />
         Upload file
       </Button>
 

@@ -1,7 +1,15 @@
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
 import styles from './Button.module.css'
 
-export type ButtonVariant = 'primary' | 'secondary' | 'danger'
+/**
+ * `danger` is a solid fill, for the one button that actually commits a
+ * destructive action — a confirmation dialog's final button. Use
+ * `dangerQuiet` for a destructive *entry point* that repeats down a
+ * list (a row's Delete): it reads as clearly destructive next to a
+ * neutral Edit without turning a list of 16 rows into a wall of solid
+ * red, which is exactly how it looked before this variant existed.
+ */
+export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'dangerQuiet'
 
 export interface ButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'children'> {
   variant?: ButtonVariant

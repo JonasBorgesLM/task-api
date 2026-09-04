@@ -1,0 +1,9 @@
+/* The colour is translucent, so whatever it sits behind keeps reading as
+   its own text colour through the ink. radius-full is the round nib. */
+.mark {
+  background-color: var(--color-highlighter);
+  border-radius: var(--radius-full);
+  padding: var(--space-1) var(--space-2);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}

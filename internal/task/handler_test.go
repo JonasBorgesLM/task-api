@@ -21,7 +21,7 @@ import (
 type fakeService struct {
 	createTaskFn       func(userID, title, description, priority string) (Task, error)
 	getTaskFn          func(userID, id string) (Task, error)
-	listTasksFn        func(userID string, limit, offset int, status, priority string) ([]Task, error)
+	listTasksFn        func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error)
 	updateTaskFn       func(userID, id, title, description, priority string) (Task, error)
 	deleteTaskFn       func(userID, id string) error
 	completeTaskFn     func(userID, id string) (Task, error)
@@ -29,7 +29,7 @@ type fakeService struct {
 
 	// Call recording.
 	createCalledWith     [4]string // [userID, title, description, priority]
-	listCalledWith       [5]any    // [userID, limit, offset, status, priority]
+	listCalledWith       [5]any    // [userID, limit, offset, statuses, priorities]
 	updateCalledWith     [5]string // [userID, id, title, description, priority]
 	completeCalledWith   [2]string // [userID, id]
 	deleteCalledWith     [2]string // [userID, id]
@@ -51,10 +51,13 @@ func (f *fakeService) GetTask(_ context.Context, userID, id string) (Task, error
 	return Task{}, nil
 }
 
-func (f *fakeService) ListTasks(_ context.Context, userID string, limit, offset int, status, priority string) ([]Task, error) {
-	f.listCalledWith = [5]any{userID, limit, offset, status, priority}
+func (f *fakeService) ListTasks(_ context.Context, userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
+	// Joined rather than stored as slices: [5]any is compared with ==,
+	// which panics on a slice. The separator is a character no status or
+	// priority contains, so "pending,done" is unambiguous.
+	f.listCalledWith = [5]any{userID, limit, offset, strings.Join(statuses, ","), strings.Join(priorities, ",")}
 	if f.listTasksFn != nil {
-		return f.listTasksFn(userID, limit, offset, status, priority)
+		return f.listTasksFn(userID, limit, offset, statuses, priorities)
 	}
 	return []Task{}, nil
 }
@@ -260,7 +263,9 @@ func TestCreateTask_Handler_IgnoresProtectedFields(t *testing.T) {
 func TestListTasks_Handler_ReturnsOK(t *testing.T) {
 	tasks := []Task{sampleTask(), sampleTask()}
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int, status, priority string) ([]Task, error) { return tasks, nil },
+		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
+			return tasks, nil
+		},
 	}
 	h := newHandlerWithFake(svc)
 
@@ -279,7 +284,7 @@ func TestListTasks_Handler_ReturnsOK(t *testing.T) {
 
 func TestListTasks_Handler_EmptyIsArray(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int, status, priority string) ([]Task, error) { return nil, nil },
+		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error) { return nil, nil },
 	}
 	h := newHandlerWithFake(svc)
 
@@ -312,7 +317,9 @@ func TestListTasks_Handler_EmptyIsArray(t *testing.T) {
 // memory_repository_test.go and their PostgreSQL counterparts.
 func TestListTasks_Handler_PassesUserIDLimitOffsetFiltersToService(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int, status, priority string) ([]Task, error) { return []Task{}, nil },
+		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
+			return []Task{}, nil
+		},
 	}
 	h := newHandlerWithFake(svc)
 
@@ -333,6 +340,20 @@ func TestListTasks_Handler_PassesUserIDLimitOffsetFiltersToService(t *testing.T)
 		{"priority only", "?priority=high", -1, 0, "", "high"},
 		{"status and priority combined", "?status=done&priority=low", -1, 0, "done", "low"},
 		{"status, priority, limit and offset combined", "?status=done&priority=low&limit=2&offset=1", 2, 1, "done", "low"},
+		// Repeating a parameter asks for more than one at once; the
+		// values within a field are an OR, the two fields an AND.
+		{"status repeated", "?status=pending&status=done", -1, 0, "pending,done", ""},
+		{"priority repeated", "?priority=high&priority=low", -1, 0, "", "high,low"},
+		{
+			"both repeated, with a window",
+			"?status=pending&status=in_progress&priority=high&priority=medium&limit=2&offset=1",
+			2, 1, "pending,in_progress", "high,medium",
+		},
+		// The handler hands the raw values over untouched, empties
+		// included — dropping them is Service's job, asserted in
+		// service_test.go's TestListTasks_EmptyFilterValuesAreDropped.
+		// This case pins the pass-through, not the filtering.
+		{"empty occurrence is passed through, not swallowed here", "?status=&status=done", -1, 0, ",done", ""},
 	}
 
 	for _, tc := range cases {
@@ -353,7 +374,7 @@ func TestListTasks_Handler_PassesUserIDLimitOffsetFiltersToService(t *testing.T)
 
 func TestListTasks_Handler_InvalidPaginationParams(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int, status, priority string) ([]Task, error) {
+		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
 			return []Task{{ID: "1"}}, nil
 		},
 	}
@@ -386,7 +407,7 @@ func TestListTasks_Handler_InvalidPaginationParams(t *testing.T) {
 // this only confirms the handler's wiring passes the error through.
 func TestListTasks_Handler_InvalidFilterIs400(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int, status, priority string) ([]Task, error) {
+		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
 			return nil, fmt.Errorf("%w: status must be one of pending, in_progress, done, cancelled", ErrInvalidInput)
 		},
 	}
@@ -808,7 +829,7 @@ func TestLoggingStrategy_NotFound_ProducesOnlyAccessLog(t *testing.T) {
 func TestRegisterRoutes(t *testing.T) {
 	svc := &fakeService{
 		createTaskFn:       func(_, _, _, _ string) (Task, error) { return sampleTask(), nil },
-		listTasksFn:        func(_ string, _, _ int, _, _ string) ([]Task, error) { return []Task{sampleTask()}, nil },
+		listTasksFn:        func(_ string, _, _ int, _, _ []string) ([]Task, error) { return []Task{sampleTask()}, nil },
 		getTaskFn:          func(_, _ string) (Task, error) { return sampleTask(), nil },
 		updateTaskFn:       func(_, _, _, _, _ string) (Task, error) { return sampleTask(), nil },
 		completeTaskFn:     func(_, _ string) (Task, error) { return sampleTask(), nil },

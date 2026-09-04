@@ -1,39 +1,55 @@
-import type { ChangeEvent } from 'react'
-import { Select } from './Select'
-import styles from './ThemeToggle.module.css'
+import type { ReactNode } from 'react'
+import { MoonIcon, SunIcon, SystemIcon } from './icons'
+import type { MenuItem } from './Menu'
+import { Menu } from './Menu'
 import type { ThemePreference } from './useTheme'
 import { useTheme } from './useTheme'
 
-function isThemePreference(value: string): value is ThemePreference {
-  return value === 'system' || value === 'light' || value === 'dark'
+const LABELS: Record<ThemePreference, string> = {
+  system: 'System',
+  light: 'Light',
+  dark: 'Dark',
 }
 
+const ICONS: Record<ThemePreference, ReactNode> = {
+  system: <SystemIcon />,
+  light: <SunIcon />,
+  dark: <MoonIcon />,
+}
+
+const ORDER: ThemePreference[] = ['system', 'light', 'dark']
+
 /**
- * Fase 14 CI-11 — lives in AppShell's user menu. A native <select>
- * (via the already-restyled Select from CI-3), not a custom
- * icon-button group: this is a three-way choice (system/light/dark),
- * exactly the kind of control HTML already has a real, fully
- * accessible widget for — same "semantic HTML first" reasoning Select
- * and Checkbox were already built on. CI-12's icon-menu redesign is
- * about TaskStatusControls specifically (a different interaction,
- * "pick one of several actions to perform now"), not a template to
- * force onto every control in the app.
+ * Fase 14 CI-11, restyled in the design-review pass that followed: an
+ * icon-only pull-down (the same Menu primitive CI-12 built), not the
+ * labelled <select> this shipped as first. The select was the right
+ * call for a form field and the wrong one for app chrome — it carried
+ * a visible "Theme" label and a full-width control into a header row
+ * whose every other element is a single glyph, which is also how every
+ * comparable product (Notion, Linear, Asana) treats this setting.
+ *
+ * The trigger shows the *current* choice's glyph, and the open menu
+ * marks it with a checkmark (MenuItem.selected → role="menuitemradio")
+ * — a three-way persistent choice, unlike the status menu's one-shot
+ * actions, so it gets the ARIA pattern that actually says so.
  */
 export function ThemeToggle() {
   const { preference, setPreference } = useTheme()
 
-  function handleChange(event: ChangeEvent<HTMLSelectElement>) {
-    const { value } = event.target
-    if (isThemePreference(value)) setPreference(value)
-  }
+  const items: MenuItem[] = ORDER.map((value) => ({
+    key: value,
+    label: LABELS[value],
+    icon: ICONS[value],
+    selected: preference === value,
+    onSelect: () => setPreference(value),
+  }))
 
   return (
-    <div className={styles.container}>
-      <Select label="Theme" value={preference} onChange={handleChange}>
-        <option value="system">System</option>
-        <option value="light">Light</option>
-        <option value="dark">Dark</option>
-      </Select>
-    </div>
+    <Menu
+      triggerLabel={`Theme (currently ${LABELS[preference]})`}
+      triggerIcon={ICONS[preference]}
+      items={items}
+      align="end"
+    />
   )
 }

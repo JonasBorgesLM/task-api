@@ -9,7 +9,11 @@ test('logging out redirects to /login, and the session is actually gone server-s
   // (Fase 14 CI-4, App.tsx's doc comment).
   await expect(page.getByText(email)).toBeVisible()
 
-  await page.getByRole('button', { name: 'Log out' }).click()
+  // Session actions moved behind one account menu in the design-review
+  // pass — two always-visible text buttons made the least-used controls
+  // on screen the widest ones.
+  await page.getByRole('button', { name: /^Account:/ }).click()
+  await page.getByRole('menuitem', { name: 'Log out' }).click()
   await page.waitForURL(/\/login$/)
 
   // Not just a client-side redirect: reloading / with no session left

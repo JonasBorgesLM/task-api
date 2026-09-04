@@ -22,7 +22,7 @@ const maxRequestBodyBytes = 1 << 20 // 1 MiB
 type taskService interface {
 	CreateTask(ctx context.Context, userID, title, description, priority string) (Task, error)
 	GetTask(ctx context.Context, userID, id string) (Task, error)
-	ListTasks(ctx context.Context, userID string, limit, offset int, status, priority string) ([]Task, error)
+	ListTasks(ctx context.Context, userID string, limit, offset int, statuses, priorities []string) ([]Task, error)
 	UpdateTask(ctx context.Context, userID, id, title, description, priority string) (Task, error)
 	DeleteTask(ctx context.Context, userID, id string) error
 	CompleteTask(ctx context.Context, userID, id string) (Task, error)
@@ -128,7 +128,13 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 	userID, _ := middleware.UserIDFromContext(r.Context())
 
 	query := r.URL.Query()
-	tasks, err := h.svc.ListTasks(r.Context(), userID, limit, offset, query.Get("status"), query.Get("priority"))
+	// query["status"], not query.Get("status"): the parameter may be
+	// repeated to ask for more than one at once (?status=pending&
+	// status=done), which the values within one field combine as OR.
+	// A single occurrence still arrives here as a one-element slice, so
+	// every caller written against the old single-value contract keeps
+	// working unchanged.
+	tasks, err := h.svc.ListTasks(r.Context(), userID, limit, offset, query["status"], query["priority"])
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return

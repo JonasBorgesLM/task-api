@@ -185,12 +185,12 @@ func (s *Service) GetTask(ctx context.Context, userID, id string) (Task, error) 
 // apply ORDER BY/LIMIT/OFFSET in the query instead of fetching every row
 // into the process on every call just to discard most of them. The
 // status/priority filters follow the same reasoning — see FindAll.
-func (s *Service) ListTasks(ctx context.Context, userID string, limit, offset int, status, priority string) ([]Task, error) {
-	st, err := validateStatusFilter(status)
+func (s *Service) ListTasks(ctx context.Context, userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
+	st, err := validateStatusFilters(statuses)
 	if err != nil {
 		return nil, err
 	}
-	p, err := validatePriorityFilter(priority)
+	p, err := validatePriorityFilters(priorities)
 	if err != nil {
 		return nil, err
 	}
@@ -398,34 +398,67 @@ func validatePriority(priority string, fallback Priority) (Priority, error) {
 	return p, nil
 }
 
-// validateStatusFilter returns "" (no filter) if status is empty, or
-// status itself if it names a known Status; otherwise ErrInvalidInput.
-// Unlike validatePriority, there is no fallback value to substitute — an
-// empty filter stays empty, it does not default to some particular status.
-func validateStatusFilter(status string) (Status, error) {
-	if status == "" {
-		return "", nil
+// validateStatusFilters turns the raw status filter values into the
+// Statuses a Repository should match, or ErrInvalidInput if any of them
+// names something that is not a status. Empty strings are dropped rather
+// than rejected: `?status=` has always meant "no filter", and repeating
+// the parameter must not turn that into an error.
+//
+// The result is de-duplicated, which is what bounds the IN clause
+// postgresRepository builds from it: however many times a caller repeats
+// a value, at most one of each known status reaches the query. An
+// entirely empty result means "no filter", exactly as before — filtering
+// on nothing and filtering on every status happen to return the same
+// rows, so there is no need to distinguish them.
+//
+// Unlike validatePriority, there is no fallback value to substitute: an
+// empty filter stays empty, it does not default to some particular
+// status.
+func validateStatusFilters(statuses []string) ([]Status, error) {
+	var out []Status
+	seen := make(map[Status]bool, len(statuses))
+	for _, raw := range statuses {
+		if raw == "" {
+			continue
+		}
+		s := Status(raw)
+		if !validStatuses[s] {
+			return nil, fmt.Errorf("%w: status must be one of pending, in_progress, done, cancelled", ErrInvalidInput)
+		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
 	}
-	s := Status(status)
-	if !validStatuses[s] {
-		return "", fmt.Errorf("%w: status must be one of pending, in_progress, done, cancelled", ErrInvalidInput)
-	}
-	return s, nil
+	return out, nil
 }
 
-// validatePriorityFilter is validatePriority's counterpart for filtering:
-// it returns "" (no filter) if priority is empty, or priority itself if it
-// names a known Priority; otherwise ErrInvalidInput. Kept separate from
-// validatePriority because that function's empty-string case defaults to a
-// caller-supplied fallback Priority (medium on create, the existing value
-// on update) — semantics that don't apply to "no filter on this field".
-func validatePriorityFilter(priority string) (Priority, error) {
-	if priority == "" {
-		return "", nil
+// validatePriorityFilters is validateStatusFilters' counterpart for the
+// priority field — same rules: empty values dropped, unknown values
+// rejected, the result de-duplicated, an empty result meaning "no
+// filter".
+//
+// Kept separate from validatePriority because that function's
+// empty-string case defaults to a caller-supplied fallback Priority
+// (medium on create, the existing value on update) — semantics that
+// don't apply to "no filter on this field".
+func validatePriorityFilters(priorities []string) ([]Priority, error) {
+	var out []Priority
+	seen := make(map[Priority]bool, len(priorities))
+	for _, raw := range priorities {
+		if raw == "" {
+			continue
+		}
+		p := Priority(raw)
+		if !validPriorities[p] {
+			return nil, fmt.Errorf("%w: priority must be one of low, medium, high", ErrInvalidInput)
+		}
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
 	}
-	p := Priority(priority)
-	if !validPriorities[p] {
-		return "", fmt.Errorf("%w: priority must be one of low, medium, high", ErrInvalidInput)
-	}
-	return p, nil
+	return out, nil
 }

@@ -1,0 +1,124 @@
+.wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Same square glyph button as Menu's own trigger — the header's
+   controls are one family, whether they open a menu or a panel. */
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid var(--color-border-interactive);
+  border-radius: var(--radius-md);
+  background-color: var(--color-paper);
+  color: var(--color-accent);
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .trigger {
+    transition: background-color var(--transition-fast) var(--easing-standard);
+  }
+}
+
+.trigger:hover {
+  background-color: var(--color-surface);
+}
+
+.trigger:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 6px var(--color-focus-glow);
+}
+
+/* Anchored to its trigger's right edge, not its left: the button sits
+   at the trailing end of the header row, so opening rightward pushes
+   the panel into (and past) the viewport edge — the same trap the
+   header menus needed Menu's `align` prop for. */
+.panel {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: 10;
+  min-width: 13rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-interactive);
+  border-radius: var(--radius-md);
+  background-color: var(--color-paper);
+  box-shadow: var(--shadow-md);
+}
+
+.total {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.totalValue {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.totalLabel {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+}
+
+.groupTitle {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-1);
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.rowLabel,
+.rowValue {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  margin: 0;
+}
+
+.rowLabel {
+  color: var(--color-text-secondary);
+}
+
+.rowValue {
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+}

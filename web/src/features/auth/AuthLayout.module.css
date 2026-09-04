@@ -30,11 +30,12 @@
   font-family: var(--font-sans);
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
+  letter-spacing: -0.01em;
   color: var(--color-text-primary);
 }
 
 .card {
-  background-color: var(--color-bg);
+  background-color: var(--color-paper);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-md);
@@ -86,9 +87,15 @@
   text-decoration: underline;
 }
 
+/* Paper, like the task cards: the two halves of this screen were
+   different materials before — a warm sheet on the left, cool grey on
+   the right — which read as two apps meeting in the middle. The rules
+   are on .marketingInner rather than here, for the same reason the
+   cards rule only their written area: lines running the full height of
+   an otherwise empty column advertise the emptiness. */
 .marketing {
   flex: 1 1 50%;
-  background-color: var(--color-surface);
+  background-color: var(--color-paper);
   border-top: 1px solid var(--color-border);
   display: flex;
   align-items: center;
@@ -108,6 +115,14 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
+  padding-bottom: var(--space-5);
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent calc(1.75rem - 1px),
+    var(--color-paper-rule) calc(1.75rem - 1px),
+    var(--color-paper-rule) 1.75rem
+  );
 }
 
 .marketingHeadline {
@@ -141,12 +156,13 @@
   align-items: flex-start;
 }
 
-.highlightDot {
+/* A glyph per claim rather than an anonymous dot — the same three marks
+   these features carry inside the app, so the promise and the thing
+   itself look alike. */
+.highlightIcon {
+  display: flex;
   flex-shrink: 0;
-  width: var(--space-2);
-  height: var(--space-2);
-  border-radius: var(--radius-full);
-  background-color: var(--color-accent);
+  color: var(--color-accent);
   margin-top: var(--space-1);
 }
 
