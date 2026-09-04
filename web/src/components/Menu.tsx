@@ -1,5 +1,6 @@
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { useEffect, useId, useRef, useState } from 'react'
+import { ChevronDownIcon } from './icons'
 import styles from './Menu.module.css'
 
 export interface MenuItem {
@@ -29,6 +30,20 @@ export interface MenuProps {
   disabled?: boolean
   /** Marks the trigger aria-busy — pair with a spinner as triggerIcon while a selection's request is in flight. */
   busy?: boolean
+  /**
+   * Turns the menu into a set of independent toggles rather than a list
+   * of one-shot actions: items become role="menuitemcheckbox", and
+   * choosing one leaves the menu open, because the point of a multiple
+   * choice is making several of them without reopening in between.
+   */
+  multi?: boolean
+  /**
+   * Visible text in the trigger, for a control that has to say what it
+   * is currently filtering on. Without it the trigger stays a square
+   * glyph — right for the header's chrome, wrong for a filter whose
+   * whole job is showing its own state.
+   */
+  triggerText?: string
   /**
    * Which edge the popup lines up with. 'start' (default) opens it to
    * the right of the trigger; 'end' opens it leftward, which is what a
@@ -85,6 +100,8 @@ export function Menu({
   disabled = false,
   busy = false,
   align = 'start',
+  multi = false,
+  triggerText,
 }: MenuProps) {
   const [open, setOpen] = useState(false)
   const focusOnOpenRef = useRef<'first' | 'last'>('first')
@@ -98,7 +115,9 @@ export function Menu({
     const menuItems = () =>
       Array.from(
         menuRef.current?.querySelectorAll<HTMLElement>(
-          '[role="menuitem"], [role="menuitemradio"]',
+          // Every item role this menu can render — miss one and arrow
+          // navigation silently stops working for that kind of menu.
+          '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]',
         ) ?? [],
       )
 
@@ -176,8 +195,13 @@ export function Menu({
   }
 
   function handleSelect(item: MenuItem) {
-    setOpen(false)
-    triggerRef.current?.focus()
+    // A multiple choice stays open: closing after each toggle would
+    // make selecting three things a matter of opening the menu three
+    // times. Escape, an outside click or Tab still close it.
+    if (!multi) {
+      setOpen(false)
+      triggerRef.current?.focus()
+    }
     item.onSelect()
   }
 
@@ -186,7 +210,7 @@ export function Menu({
       <button
         ref={triggerRef}
         type="button"
-        className={styles.trigger}
+        className={`${styles.trigger} ${triggerText ? styles.triggerWide : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
@@ -200,6 +224,12 @@ export function Menu({
         onKeyDown={handleTriggerKeyDown}
       >
         {triggerIcon}
+        {triggerText && <span className={styles.triggerText}>{triggerText}</span>}
+        {triggerText && (
+          <span className={styles.triggerChevron} aria-hidden="true">
+            <ChevronDownIcon />
+          </span>
+        )}
       </button>
       {open && (
         <div
@@ -213,7 +243,9 @@ export function Menu({
             <button
               key={item.key}
               type="button"
-              role={item.selected === undefined ? 'menuitem' : 'menuitemradio'}
+              role={
+                item.selected === undefined ? 'menuitem' : multi ? 'menuitemcheckbox' : 'menuitemradio'
+              }
               aria-checked={item.selected}
               className={styles.menuItem}
               onClick={() => handleSelect(item)}

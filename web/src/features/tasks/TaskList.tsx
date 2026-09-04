@@ -1,8 +1,15 @@
 import { useState } from 'react'
 import { Button } from '../../components/Button'
-import { ChevronLeftIcon, ChevronRightIcon, PlusIcon, RefreshIcon } from '../../components/icons'
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  FilterIcon,
+  PlusIcon,
+  RefreshIcon,
+} from '../../components/icons'
+import type { MenuItem } from '../../components/Menu'
+import { Menu } from '../../components/Menu'
 import { Modal } from '../../components/Modal'
-import { Select } from '../../components/Select'
 import { Skeleton } from '../../components/Skeleton'
 import { Toast } from '../../components/Toast'
 import styles from './TaskList.module.css'
@@ -15,13 +22,41 @@ import { useTasks } from './useTasks'
 
 const SKELETON_ROWS = 5
 
-type StatusFilter = Task['status'] | ''
-type PriorityFilter = Task['priority'] | ''
-
 const PRIORITY_LABELS: Record<Task['priority'], string> = {
   low: 'Low',
   medium: 'Medium',
   high: 'High',
+}
+
+const ALL_STATUSES: Task['status'][] = ['pending', 'in_progress', 'done', 'cancelled']
+const ALL_PRIORITIES: Task['priority'][] = ['high', 'medium', 'low']
+
+// Cancelled is off to begin with: a cancelled task is one you decided
+// not to do, and having it in the default view means every list is
+// partly made of things nobody is going to work on. It is one click
+// away, and the filter says so when it is on.
+const DEFAULT_STATUSES: Task['status'][] = ['pending', 'in_progress', 'done']
+
+/**
+ * "Everything is selected" and "nothing is selected" would send the same
+ * request — the API reads an absent filter as "no filter" — so the
+ * label has to distinguish them for the user even though the wire
+ * cannot. Naming one or two selections outright beats a count: "Pending"
+ * says more than "1 status".
+ *
+ * The plural is passed in rather than derived by adding an "s": neither
+ * of the two nouns this is called with forms its plural that way, and
+ * the first version of this shipped "statuss" on screen.
+ */
+function filterLabel(
+  selected: string[],
+  all: string[],
+  labels: Record<string, string>,
+  plural: string,
+) {
+  if (selected.length === all.length) return `All ${plural}`
+  if (selected.length <= 2) return selected.map((value) => labels[value]).join(', ')
+  return `${selected.length} ${plural}`
 }
 
 /**
@@ -38,8 +73,12 @@ const PRIORITY_LABELS: Record<Task['priority'], string> = {
  * building its own.
  */
 export function TaskList() {
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('')
-  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('')
+  const [statuses, setStatuses] = useState<Task['status'][]>(DEFAULT_STATUSES)
+  const [priorities, setPriorities] = useState<Task['priority'][]>(ALL_PRIORITIES)
+  // Joined here rather than inside useTasks: the hook needs a primitive
+  // to compare, and this is the one place that knows the order.
+  const statusFilter = statuses.length === ALL_STATUSES.length ? '' : statuses.join(',')
+  const priorityFilter = priorities.length === ALL_PRIORITIES.length ? '' : priorities.join(',')
   const {
     status,
     tasks,
@@ -57,7 +96,39 @@ export function TaskList() {
   } = useTasks(statusFilter, priorityFilter)
   const [creating, setCreating] = useState(false)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
-  const isFiltered = statusFilter !== '' || priorityFilter !== ''
+  // "Narrowed by the user", not "any filter is active": the default
+  // itself excludes cancelled, so a plain `statusFilter !== ''` would
+  // greet someone with no tasks at all with "no tasks match this
+  // filter" — technically true, unhelpful, and not what they did.
+  const isNarrowed =
+    statuses.length !== DEFAULT_STATUSES.length ||
+    !DEFAULT_STATUSES.every((status) => statuses.includes(status)) ||
+    priorities.length !== ALL_PRIORITIES.length
+
+  // Toggling off the last remaining value would ask for nothing at all,
+  // which the API cannot express — an absent filter means "no filter",
+  // so an empty selection would silently return everything, the exact
+  // opposite of what unticking the last box looks like it should do.
+  // The last one selected therefore stays selected.
+  function toggle<T extends string>(values: T[], value: T, setValues: (next: T[]) => void) {
+    const next = values.includes(value) ? values.filter((v) => v !== value) : [...values, value]
+    if (next.length === 0) return
+    setValues(next)
+  }
+
+  const statusItems: MenuItem[] = ALL_STATUSES.map((status) => ({
+    key: status,
+    label: STATUS_LABELS[status],
+    selected: statuses.includes(status),
+    onSelect: () => toggle(statuses, status, setStatuses),
+  }))
+
+  const priorityItems: MenuItem[] = ALL_PRIORITIES.map((priority) => ({
+    key: priority,
+    label: PRIORITY_LABELS[priority],
+    selected: priorities.includes(priority),
+    onSelect: () => toggle(priorities, priority, setPriorities),
+  }))
 
   function handleCreated(task: Task) {
     setCreating(false)
@@ -73,24 +144,6 @@ export function TaskList() {
   function handleDeleted(id: string) {
     removeTaskLocally(id)
     setSuccessMessage('Task deleted.')
-  }
-
-  if (status === 'loading') {
-    return (
-      <div className={styles.container}>
-        <ul className={styles.list} aria-busy="true" aria-label="Loading tasks">
-          {Array.from({ length: SKELETON_ROWS }, (_, i) => (
-            <li key={i} className={styles.skeletonItem}>
-              <div className={styles.skeletonRow}>
-                <Skeleton width="60%" height="1.25rem" />
-                <Skeleton width="4rem" height="1.25rem" radius="full" />
-              </div>
-              <Skeleton width="90%" height="0.875rem" />
-            </li>
-          ))}
-        </ul>
-      </div>
-    )
   }
 
   return (
@@ -111,37 +164,23 @@ export function TaskList() {
           "All statuses"/"All priorities" already say what they do. */}
       <div className={styles.pageHeader}>
         <div className={styles.filters}>
-          <Select
-            label="Status"
-            labelHidden
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-          >
-            <option value="">All statuses</option>
-            {(Object.entries(STATUS_LABELS) as [Task['status'], string][]).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </Select>
-          <Select
-            label="Priority"
-            labelHidden
-            value={priorityFilter}
-            onChange={(e) => setPriorityFilter(e.target.value as PriorityFilter)}
-          >
-            <option value="">All priorities</option>
-            {(Object.entries(PRIORITY_LABELS) as [Task['priority'], string][]).map(
-              ([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ),
-            )}
-          </Select>
+          <Menu
+            multi
+            triggerLabel="Filter by status"
+            triggerIcon={<FilterIcon />}
+            triggerText={filterLabel(statuses, ALL_STATUSES, STATUS_LABELS, 'statuses')}
+            items={statusItems}
+          />
+          <Menu
+            multi
+            triggerLabel="Filter by priority"
+            triggerIcon={<FilterIcon />}
+            triggerText={filterLabel(priorities, ALL_PRIORITIES, PRIORITY_LABELS, 'priorities')}
+            items={priorityItems}
+          />
         </div>
 
-        <TaskStats tasks={tasks} isFiltered={isFiltered} />
+        <TaskStats tasks={tasks} isFiltered={isNarrowed} />
 
         <Button onClick={() => setCreating(true)}>
           <PlusIcon />
@@ -151,6 +190,25 @@ export function TaskList() {
       <Modal open={creating} onClose={() => setCreating(false)} title="New task">
         <TaskForm onCancel={() => setCreating(false)} onSuccess={handleCreated} />
       </Modal>
+
+      {/* The header stays mounted through a load, and only the list
+          below it swaps for skeletons. Returning early on 'loading'
+          unmounted the filters on every fetch — which threw away the
+          open filter menu the moment you ticked something in it, since
+          ticking triggers the fetch that unmounted it. */}
+      {status === 'loading' && (
+        <ul className={styles.list} aria-busy="true" aria-label="Loading tasks">
+          {Array.from({ length: SKELETON_ROWS }, (_, i) => (
+            <li key={i} className={styles.skeletonItem}>
+              <div className={styles.skeletonRow}>
+                <Skeleton width="60%" height="1.25rem" />
+                <Skeleton width="4rem" height="1.25rem" radius="full" />
+              </div>
+              <Skeleton width="90%" height="0.875rem" />
+            </li>
+          ))}
+        </ul>
+      )}
 
       {status === 'error' && (
         <p className={styles.error} role="alert">
@@ -166,7 +224,11 @@ export function TaskList() {
 
       {status === 'empty' && (
         <p className={styles.empty}>
-          {isFiltered ? 'No tasks match this filter.' : "You don't have any tasks yet."}
+          {isNarrowed
+            ? 'No tasks match this filter.'
+            : // Says both things it can honestly say: there is nothing
+              // here, and the default view is not showing everything.
+              "You don't have any tasks yet. Cancelled ones are hidden by default."}
         </p>
       )}
 

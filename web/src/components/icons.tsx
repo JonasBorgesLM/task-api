@@ -182,3 +182,12 @@ export function ChevronRightIcon() {
     </svg>
   )
 }
+
+/** Funnel — a filter control. */
+export function FilterIcon() {
+  return (
+    <svg {...SHARED_PROPS}>
+      <path d="M2.5 3.25h11l-4.25 5v4.5l-2.5 1.25V8.25z" />
+    </svg>
+  )
+}

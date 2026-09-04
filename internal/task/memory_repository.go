@@ -64,7 +64,24 @@ func (r *memoryRepository) FindByID(ctx context.Context, id, userID string) (Tas
 // upon from iteration — windowed to at most limit results starting at
 // offset, per Repository's contract. The status/priority filters are
 // applied before the window (see FindAll's doc comment on Repository).
-func (r *memoryRepository) FindAll(ctx context.Context, userID string, limit, offset int, status Status, priority Priority) ([]Task, error) {
+// matchesAny reports whether value is among wanted, treating an empty
+// wanted as "no filter on this field" — the same meaning postgres-side
+// gets from omitting the IN clause entirely. Generic over Status and
+// Priority because the rule is identical for both, and two copies of it
+// are two places for the two repositories to drift apart.
+func matchesAny[T comparable](value T, wanted []T) bool {
+	if len(wanted) == 0 {
+		return true
+	}
+	for _, w := range wanted {
+		if value == w {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *memoryRepository) FindAll(ctx context.Context, userID string, limit, offset int, statuses []Status, priorities []Priority) ([]Task, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -77,10 +94,10 @@ func (r *memoryRepository) FindAll(ctx context.Context, userID string, limit, of
 		if task.UserID != userID {
 			continue
 		}
-		if status != "" && task.Status != status {
+		if !matchesAny(task.Status, statuses) {
 			continue
 		}
-		if priority != "" && task.Priority != priority {
+		if !matchesAny(task.Priority, priorities) {
 			continue
 		}
 		tasks = append(tasks, task)

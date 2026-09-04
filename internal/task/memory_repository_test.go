@@ -96,7 +96,7 @@ func TestFindAll(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), testUserID, -1, 0, "", "")
+	got, err := repo.FindAll(context.Background(), testUserID, -1, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestFindAll_ScopedToUser(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), testUserID, -1, 0, "", "")
+	got, err := repo.FindAll(context.Background(), testUserID, -1, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestFindAll_OrdersByCreatedAtThenID(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), testUserID, -1, 0, "", "")
+	got, err := repo.FindAll(context.Background(), testUserID, -1, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestFindAll_Pagination(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := repo.FindAll(context.Background(), testUserID, tc.limit, tc.offset, "", "")
+			got, err := repo.FindAll(context.Background(), testUserID, tc.limit, tc.offset, nil, nil)
 			if err != nil {
 				t.Fatalf("FindAll() unexpected error: %v", err)
 			}
@@ -515,21 +515,31 @@ func TestFindAll_FiltersByStatusAndPriority(t *testing.T) {
 	}
 
 	cases := []struct {
-		name     string
-		status   Status
-		priority Priority
-		wantIDs  []string
+		name       string
+		statuses   []Status
+		priorities []Priority
+		wantIDs    []string
 	}{
-		{"no filter", "", "", []string{"1", "2", "3", "4"}},
-		{"status only", StatusDone, "", []string{"3", "4"}},
-		{"priority only", "", PriorityHigh, []string{"2", "4"}},
-		{"status and priority combined (AND)", StatusDone, PriorityHigh, []string{"4"}},
-		{"filter matches nothing", StatusCancelled, "", []string{}},
+		{"no filter", nil, nil, []string{"1", "2", "3", "4"}},
+		{"status only", []Status{StatusDone}, nil, []string{"3", "4"}},
+		{"priority only", nil, []Priority{PriorityHigh}, []string{"2", "4"}},
+		{"status and priority combined (AND)", []Status{StatusDone}, []Priority{PriorityHigh}, []string{"4"}},
+		{"filter matches nothing", []Status{StatusCancelled}, nil, []string{}},
+		// Several values in one field are an OR — the whole point of the
+		// slice. Across fields it stays an AND.
+		{"two statuses (OR)", []Status{StatusPending, StatusDone}, nil, []string{"1", "2", "3", "4"}},
+		{"two priorities (OR)", nil, []Priority{PriorityLow, PriorityHigh}, []string{"1", "2", "3", "4"}},
+		{
+			"several of each: OR within, AND across",
+			[]Status{StatusPending, StatusDone},
+			[]Priority{PriorityHigh},
+			[]string{"2", "4"},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := repo.FindAll(context.Background(), testUserID, -1, 0, tc.status, tc.priority)
+			got, err := repo.FindAll(context.Background(), testUserID, -1, 0, tc.statuses, tc.priorities)
 			if err != nil {
 				t.Fatalf("FindAll() unexpected error: %v", err)
 			}
@@ -572,7 +582,7 @@ func TestFindAll_FilterThenPaginate(t *testing.T) {
 	// Filtering to StatusPending leaves {1, 2, 4, 5}; limit=2/offset=1
 	// over that filtered set must be {2, 4}, not "take tasks 2-3 of the
 	// unfiltered five and then filter", which would wrongly yield {2}.
-	got, err := repo.FindAll(context.Background(), testUserID, 2, 1, StatusPending, "")
+	got, err := repo.FindAll(context.Background(), testUserID, 2, 1, []Status{StatusPending}, nil)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -602,7 +612,7 @@ func TestFindAll_IsolatesInternalState(t *testing.T) {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
 
-	all, _ := repo.FindAll(context.Background(), testUserID, -1, 0, "", "")
+	all, _ := repo.FindAll(context.Background(), testUserID, -1, 0, nil, nil)
 	all[0].Title = "Mutated"
 	all[0].Status = StatusDone
 
@@ -655,7 +665,7 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	// All 50 concurrent tasks plus the seed must be present.
-	all, err := repo.FindAll(context.Background(), testUserID, -1, 0, "", "")
+	all, err := repo.FindAll(context.Background(), testUserID, -1, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}

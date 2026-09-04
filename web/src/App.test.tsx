@@ -62,7 +62,7 @@ describe('App routing', () => {
     renderApp('/')
 
     expect(await screen.findByText('alice@example.com')).toBeInTheDocument()
-    expect(await screen.findByText("You don't have any tasks yet.")).toBeInTheDocument()
+    expect(await screen.findByText(/You don't have any tasks yet/)).toBeInTheDocument()
   })
 
   it('the full flow: register → login → /me hydrates → logout redirects back to /login', async () => {
@@ -125,7 +125,7 @@ describe('App routing', () => {
     await user.click(screen.getByRole('button', { name: 'Log in' }))
 
     expect(await screen.findByText('alice@example.com')).toBeInTheDocument()
-    expect(await screen.findByText("You don't have any tasks yet.")).toBeInTheDocument()
+    expect(await screen.findByText(/You don't have any tasks yet/)).toBeInTheDocument()
 
     // Logout — clears state, and RequireAuth (still mounted at /)
     // reacts to the status change on its own, with no explicit

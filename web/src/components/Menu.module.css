@@ -69,6 +69,27 @@
   right: 0;
 }
 
+/* A labelled trigger sizes to its text instead of staying a 2rem
+   square, and lines its parts up left-to-right: glyph, label, chevron. */
+.triggerWide {
+  width: auto;
+  height: auto;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+
+.triggerText {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+}
+
+.triggerChevron {
+  display: flex;
+  color: var(--color-text-secondary);
+}
+
 .menuItem {
   display: flex;
   align-items: center;
@@ -85,7 +106,28 @@
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .menuItem {
+  /* A labelled trigger sizes to its text instead of staying a 2rem
+   square, and lines its parts up left-to-right: glyph, label, chevron. */
+.triggerWide {
+  width: auto;
+  height: auto;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+
+.triggerText {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+}
+
+.triggerChevron {
+  display: flex;
+  color: var(--color-text-secondary);
+}
+
+.menuItem {
     transition: background-color var(--transition-fast) var(--easing-standard);
   }
 }

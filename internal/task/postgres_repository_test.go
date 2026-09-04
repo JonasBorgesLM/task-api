@@ -251,7 +251,7 @@ func TestPostgres_FindAll_OrderedByCreatedAtThenID(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), userID, -1, 0, "", "")
+	got, err := repo.FindAll(context.Background(), userID, -1, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestPostgres_FindAll_OrderedByCreatedAtThenID(t *testing.T) {
 func TestPostgres_FindAll_Empty(t *testing.T) {
 	repo, _, userID := newPostgresTestRepo(t)
 
-	got, err := repo.FindAll(context.Background(), userID, -1, 0, "", "")
+	got, err := repo.FindAll(context.Background(), userID, -1, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestPostgres_FindAll_ScopedToUser(t *testing.T) {
 		}
 	}
 
-	got, err := repo.FindAll(context.Background(), userID, -1, 0, "", "")
+	got, err := repo.FindAll(context.Background(), userID, -1, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("FindAll() unexpected error: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestPostgres_FindAll_Pagination(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := repo.FindAll(context.Background(), userID, tc.limit, tc.offset, "", "")
+			got, err := repo.FindAll(context.Background(), userID, tc.limit, tc.offset, nil, nil)
 			if err != nil {
 				t.Fatalf("FindAll() unexpected error: %v", err)
 			}
@@ -390,20 +390,31 @@ func TestPostgres_FindAll_FiltersByStatusAndPriority(t *testing.T) {
 
 	cases := []struct {
 		name       string
-		status     Status
-		priority   Priority
+		statuses   []Status
+		priorities []Priority
 		wantTitles []string
 	}{
-		{"no filter", "", "", []string{"1", "2", "3", "4"}},
-		{"status only", StatusDone, "", []string{"3", "4"}},
-		{"priority only", "", PriorityHigh, []string{"2", "4"}},
-		{"status and priority combined (AND)", StatusDone, PriorityHigh, []string{"4"}},
-		{"filter matches nothing", StatusCancelled, "", []string{}},
+		{"no filter", nil, nil, []string{"1", "2", "3", "4"}},
+		{"status only", []Status{StatusDone}, nil, []string{"3", "4"}},
+		{"priority only", nil, []Priority{PriorityHigh}, []string{"2", "4"}},
+		{"status and priority combined (AND)", []Status{StatusDone}, []Priority{PriorityHigh}, []string{"4"}},
+		// The IN clause: several values in one field are an OR, and the
+		// two fields still AND together. Same cases as the memory
+		// repository's, so a drift between the two shows up here.
+		{"two statuses (OR)", []Status{StatusPending, StatusDone}, nil, []string{"1", "2", "3", "4"}},
+		{"two priorities (OR)", nil, []Priority{PriorityLow, PriorityHigh}, []string{"1", "2", "3", "4"}},
+		{
+			"several of each: OR within, AND across",
+			[]Status{StatusPending, StatusDone},
+			[]Priority{PriorityHigh},
+			[]string{"2", "4"},
+		},
+		{"filter matches nothing", []Status{StatusCancelled}, nil, []string{}},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := repo.FindAll(context.Background(), userID, -1, 0, tc.status, tc.priority)
+			got, err := repo.FindAll(context.Background(), userID, -1, 0, tc.statuses, tc.priorities)
 			if err != nil {
 				t.Fatalf("FindAll() unexpected error: %v", err)
 			}

@@ -6,6 +6,35 @@ versionamento seguindo [Semantic Versioning](https://semver.org/lang/pt-BR/).
 Este é o primeiro release versionado do projeto — não há tags anteriores.
 `v1.0.0` marca o ponto em que a API passa a ter contrato estável (`/v1`).
 
+## [Não lançado]
+
+### Adicionado
+- `GET /v1/tasks` aceita `status` e `priority` **repetidos**
+  (`?status=pending&status=done`), retornando as tasks que casam com
+  qualquer um dos valores daquele campo. Os valores dentro de um mesmo
+  parâmetro combinam com OR; `status` e `priority` continuam combinando
+  entre si com AND. **Minor, não major:** a mudança é aditiva e
+  retrocompatível — uma ocorrência única se comporta exatamente como
+  antes, e `?status=` segue significando "sem filtro", inclusive quando
+  aparece junto de valores reais. Repetir o mesmo valor não tem efeito
+  adicional (a lista é deduplicada antes de virar consulta). Um valor
+  desconhecido continua sendo `400`, e invalida a requisição inteira
+  mesmo que os outros valores sejam válidos: filtrar silenciosamente só
+  pelos reconhecidos devolveria uma página plausível respondendo a uma
+  pergunta diferente da que foi feita.
+
+### Alterado
+- `web/` — a lista de tasks passa a paginar de dez em dez, com navegação
+  para frente e para trás, no lugar do "carregar mais" que crescia sem
+  limite. Não há "página 3 de 12" porque `GET /v1/tasks` não devolve
+  total algum; a existência da próxima página vem da técnica de pedir um
+  item a mais, que o cliente já usava.
+- `web/` — os filtros de status e prioridade viram múltipla escolha, com
+  `pending`, `in_progress` e `done` marcados por padrão. Tasks
+  canceladas ficam fora da visão inicial e entram com um clique. Sem
+  mudança de comportamento observável na API além do parâmetro repetido
+  descrito acima.
+
 ## [1.4.0] — a definir na tag
 
 Fase 14, restante (CI-10 a CI-12) — PRs #190, #191, #192. **Minor, não

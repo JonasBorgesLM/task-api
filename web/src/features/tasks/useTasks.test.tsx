@@ -242,6 +242,40 @@ describe('useTasks', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  // Regression: cancelling a task while cancelled is filtered out left
+  // it sitting on screen, because an edit patched the row in place
+  // without asking whether it still belonged in the result.
+  it('updateTaskLocally re-fetches when the edit drops the task out of the active filter', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(2)))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(1)))
+
+    const { result } = renderHook(() => useTasks('pending,in_progress,done'))
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    await act(async () => {
+      result.current.updateTaskLocally({ ...makeTask('1'), status: 'cancelled' })
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(result.current.tasks).toHaveLength(1)
+  })
+
+  it('updateTaskLocally still patches in place when the task keeps matching', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(2)))
+
+    const { result } = renderHook(() => useTasks('pending,in_progress,done'))
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    act(() => {
+      result.current.updateTaskLocally({ ...makeTask('1'), title: 'Renamed', status: 'done' })
+    })
+
+    expect(result.current.tasks[0]!.title).toBe('Renamed')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   // Likewise a delete: it pulls every later row one place forward, so
   // the window this page represents now holds a different set.
   it('removeTaskLocally re-fetches the page being viewed', async () => {

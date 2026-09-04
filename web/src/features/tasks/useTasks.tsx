@@ -44,6 +44,11 @@ export interface UseTasksResult {
 // number duplicated in a test file.
 export const PAGE_SIZE = 10
 
+/** "pending,done" -> ["pending", "done"]; "" -> [] (no filter). */
+function splitFilter(value: string): string[] {
+  return value ? value.split(',').filter(Boolean) : []
+}
+
 /**
  * Discrete pages, forwards and back — one window of PAGE_SIZE rows at a
  * time, never an accumulation. Replaces the accumulate-and-scroll model
@@ -67,10 +72,14 @@ export const PAGE_SIZE = 10
 /**
  * statusFilter/priorityFilter mirror GET /v1/tasks's own query params
  * (docs/openapi.yaml) — "" means "no filter on this field", the same
- * sentinel the backend uses (CI-14). Passed as separate primitive
- * strings rather than a single filters object so fetchPage's useCallback
- * dependency array compares by value, not by a new object identity on
- * every render.
+ * sentinel the backend uses (CI-14).
+ *
+ * Each is a comma-separated list ("pending,done"), sent to the API as
+ * one repeated parameter per value, because the endpoint takes several
+ * and ORs them. A string rather than the string[] the caller naturally
+ * has: fetchPage's dependency array compares by value, and an array
+ * prop is a new identity on every render, which would re-fetch forever.
+ * Splitting is this hook's job precisely so no caller has to know that.
  */
 export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult {
   const [tasks, setTasks] = useState<Task[]>([])
@@ -86,8 +95,9 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
         limit: String(PAGE_SIZE + 1),
         offset: String(index * PAGE_SIZE),
       })
-      if (statusFilter) params.set('status', statusFilter)
-      if (priorityFilter) params.set('priority', priorityFilter)
+      // append, not set: the endpoint reads the parameter as a list.
+      for (const status of splitFilter(statusFilter)) params.append('status', status)
+      for (const priority of splitFilter(priorityFilter)) params.append('priority', priority)
 
       const response = await apiFetch(`/v1/tasks?${params.toString()}`)
       if (!response.ok) {
@@ -174,9 +184,30 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
     void fetchPage(pageIndex)
   }, [fetchPage, pageIndex])
 
-  const updateTaskLocally = useCallback((task: Task) => {
-    setTasks((previous) => previous.map((t) => (t.id === task.id ? task : t)))
-  }, [])
+  // An edit usually just changes what a row says, so it patches in
+  // place. But an edit can also change whether the row belongs here at
+  // all: cancel a task while cancelled is filtered out and it no longer
+  // matches, yet patching would leave it sitting on screen until
+  // something else caused a fetch. So the updated task is re-checked
+  // against the active filter, and a row that no longer matches
+  // re-fetches the page instead — which also pulls in whatever row
+  // moved up to take its place.
+  const updateTaskLocally = useCallback(
+    (task: Task) => {
+      const wantedStatuses = splitFilter(statusFilter)
+      const wantedPriorities = splitFilter(priorityFilter)
+      const stillMatches =
+        (wantedStatuses.length === 0 || wantedStatuses.includes(task.status)) &&
+        (wantedPriorities.length === 0 || wantedPriorities.includes(task.priority))
+
+      if (!stillMatches) {
+        void fetchPage(pageIndex)
+        return
+      }
+      setTasks((previous) => previous.map((t) => (t.id === task.id ? task : t)))
+    },
+    [fetchPage, pageIndex, statusFilter, priorityFilter],
+  )
 
   // A delete pulls every later row one place forward, so the window
   // this page represents now holds a different set — re-fetch rather

@@ -967,15 +967,21 @@ export interface operations {
                  */
                 offset?: number;
                 /**
-                 * @description Only return tasks with this status. Sending the parameter with an empty value (`?status=`) is treated as omitting it, not as an error.
-                 * @example pending
+                 * @description Only return tasks with this status. May be repeated to ask for several at once (`?status=pending&status=done`), which matches a task whose status is any one of them — the values within this parameter combine with OR, while `status` and `priority` combine with AND. Repeating the same value has no additional effect. Sending the parameter with an empty value (`?status=`) is treated as omitting it, not as an error, including when it appears alongside real values. A single occurrence behaves exactly as it always has.
+                 * @example [
+                 *       "pending",
+                 *       "in_progress"
+                 *     ]
                  */
-                status?: components["schemas"]["Status"];
+                status?: components["schemas"]["Status"][];
                 /**
-                 * @description Only return tasks with this priority. Sending the parameter with an empty value (`?priority=`) is treated as omitting it, not as an error.
-                 * @example high
+                 * @description Only return tasks with this priority. May be repeated to ask for several at once (`?priority=high&priority=medium`), following exactly the same rules as `status` above.
+                 * @example [
+                 *       "high",
+                 *       "medium"
+                 *     ]
                  */
-                priority?: components["schemas"]["Priority"];
+                priority?: components["schemas"]["Priority"][];
             };
             header?: never;
             path?: never;

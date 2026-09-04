@@ -100,7 +100,7 @@ describe('TaskList', () => {
     mockTasksResult({ status: 'empty', tasks: [] })
     render(<TaskList />)
 
-    expect(screen.getByText("You don't have any tasks yet.")).toBeInTheDocument()
+    expect(screen.getByText(/You don't have any tasks yet/)).toBeInTheDocument()
     expect(screen.queryByRole('list')).not.toBeInTheDocument()
   })
 
@@ -197,41 +197,66 @@ describe('TaskList', () => {
     render(<TaskList />)
 
     expect(screen.queryByRole('combobox', { name: /sort/i })).not.toBeInTheDocument()
-    expect(screen.getByRole('combobox', { name: 'Status' })).toBeInTheDocument()
-    expect(screen.getByRole('combobox', { name: 'Priority' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Filter by status' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Filter by priority' })).toBeInTheDocument()
   })
 
-  it('changing the status filter re-calls useTasks with the new value', async () => {
+  // Cancelled is off by default, so the default view is a filter — the
+  // three active statuses, named explicitly on the wire.
+  it('defaults to the three active statuses, leaving cancelled out', () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask()] })
+    render(<TaskList />)
+
+    expect(useTasks).toHaveBeenLastCalledWith('pending,in_progress,done', '')
+    expect(screen.getByRole('button', { name: 'Filter by status' })).toHaveTextContent(
+      '3 statuses',
+    )
+  })
+
+  it('ticking cancelled adds it to the filter without removing the others', async () => {
     mockTasksResult({ status: 'success', tasks: [makeTask()] })
     const user = userEvent.setup()
     render(<TaskList />)
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'In progress')
+    await user.click(screen.getByRole('button', { name: 'Filter by status' }))
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Cancelled' }))
 
-    expect(useTasks).toHaveBeenLastCalledWith('in_progress', '')
-  })
-
-  it('changing the priority filter re-calls useTasks with the new value', async () => {
-    mockTasksResult({ status: 'success', tasks: [makeTask()] })
-    const user = userEvent.setup()
-    render(<TaskList />)
-
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Priority' }), 'Low')
-
-    expect(useTasks).toHaveBeenLastCalledWith('', 'low')
-  })
-
-  it('picking "All statuses" again clears the status filter', async () => {
-    mockTasksResult({ status: 'success', tasks: [makeTask()] })
-    const user = userEvent.setup()
-    render(<TaskList />)
-
-    const statusSelect = screen.getByRole('combobox', { name: 'Status' })
-    await user.selectOptions(statusSelect, 'Done')
-    expect(useTasks).toHaveBeenLastCalledWith('done', '')
-
-    await user.selectOptions(statusSelect, 'All statuses')
+    // All four selected is the same result set as no filter at all, and
+    // is sent as one — see TaskList's own comment.
     expect(useTasks).toHaveBeenLastCalledWith('', '')
+    expect(screen.getByRole('button', { name: 'Filter by status' })).toHaveTextContent(
+      'All statuses',
+    )
+  })
+
+  it('unticking a status narrows the filter, and the menu stays open for the next one', async () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask()] })
+    const user = userEvent.setup()
+    render(<TaskList />)
+
+    await user.click(screen.getByRole('button', { name: 'Filter by status' }))
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Done' }))
+    expect(useTasks).toHaveBeenLastCalledWith('pending,in_progress', '')
+
+    // Still open — the point of a multiple choice.
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'In progress' }))
+    expect(useTasks).toHaveBeenLastCalledWith('pending', '')
+  })
+
+  it('refuses to untick the last remaining value — an empty filter would mean "everything"', async () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask()] })
+    const user = userEvent.setup()
+    render(<TaskList />)
+
+    await user.click(screen.getByRole('button', { name: 'Filter by priority' }))
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'High' }))
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Medium' }))
+    expect(useTasks).toHaveBeenLastCalledWith('pending,in_progress,done', 'low')
+
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Low' }))
+
+    expect(useTasks).toHaveBeenLastCalledWith('pending,in_progress,done', 'low')
+    expect(screen.getByRole('menuitemcheckbox', { name: 'Low' })).toBeChecked()
   })
 
   it('empty: shows a filter-specific message once a filter is active', async () => {
@@ -239,12 +264,19 @@ describe('TaskList', () => {
     const user = userEvent.setup()
     render(<TaskList />)
 
-    expect(screen.getByText("You don't have any tasks yet.")).toBeInTheDocument()
+    // The default already excludes cancelled, so ticking it back on is
+    // what "no filter" looks like here.
+    await user.click(screen.getByRole('button', { name: 'Filter by status' }))
+    // The default view says both things it honestly can: nothing here,
+    // and cancelled is hidden.
+    expect(screen.getByText(/You don't have any tasks yet/)).toBeInTheDocument()
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Priority' }), 'High')
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Cancelled' }))
 
+    // Now the user has widened it themselves, so the message is about
+    // the filter rather than about having nothing.
     expect(screen.getByText('No tasks match this filter.')).toBeInTheDocument()
-    expect(screen.queryByText("You don't have any tasks yet.")).not.toBeInTheDocument()
+    expect(screen.queryByText(/You don't have any tasks yet/)).not.toBeInTheDocument()
   })
 
   it('Next is offered when another page exists, and calls nextPage on click', async () => {
