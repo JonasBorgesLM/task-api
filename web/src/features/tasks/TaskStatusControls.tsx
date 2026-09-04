@@ -5,7 +5,7 @@ import { classifyError } from '../../api/errors'
 import type { MenuItem } from '../../components/Menu'
 import { Menu } from '../../components/Menu'
 import styles from './TaskStatusControls.module.css'
-import { StatusIcon } from './statusIcons'
+import { StatusChangeIcon, StatusIcon } from './statusIcons'
 import type { Task } from './useTasks'
 
 type Status = Task['status']
@@ -119,7 +119,7 @@ export function TaskStatusControls({ task, onSuccess }: TaskStatusControlsProps)
           pendingTarget !== null ? (
             <span className={styles.spinner} aria-hidden="true" />
           ) : (
-            <TintedStatusIcon status={task.status} />
+            <StatusChangeIcon />
           )
         }
         items={items}

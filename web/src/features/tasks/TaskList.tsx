@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '../../components/Button'
+import { ChevronDownIcon, PlusIcon, RefreshIcon } from '../../components/icons'
 import { Modal } from '../../components/Modal'
 import { Select } from '../../components/Select'
 import { Skeleton } from '../../components/Skeleton'
@@ -8,6 +9,7 @@ import styles from './TaskList.module.css'
 import { STATUS_LABELS } from './TaskStatusControls'
 import { TaskForm } from './TaskForm'
 import { TaskItem } from './TaskItem'
+import { TaskStats } from './TaskStats'
 import type { Task } from './useTasks'
 import { useTasks } from './useTasks'
 
@@ -118,25 +120,13 @@ export function TaskList() {
         />
       )}
 
-      {/* Title, count, both filters and the create button on one line
-          (design review). They were three stacked rows of chrome above
-          a list that is the actual content; the filters carry no
-          visible caption either, since "All statuses"/"All priorities"
-          already say what each one does. */}
+      {/* One line: the two filters, the counts button, then create. The
+          page title and its running count used to sit here; the title
+          repeated the only thing this screen shows, and the count is
+          now one glyph away instead of always on screen (design
+          review). Neither filter carries a visible caption —
+          "All statuses"/"All priorities" already say what they do. */}
       <div className={styles.pageHeader}>
-        <div className={styles.titleGroup}>
-          <h2 className={styles.title}>Tasks</h2>
-          {status === 'success' && (
-            <span
-              className={styles.count}
-              aria-label={`${tasks.length}${hasMore ? ' or more' : ''} tasks`}
-            >
-              {tasks.length}
-              {hasMore ? '+' : ''}
-            </span>
-          )}
-        </div>
-
         <div className={styles.filters}>
           <Select
             label="Status"
@@ -168,7 +158,12 @@ export function TaskList() {
           </Select>
         </div>
 
-        <Button onClick={() => setCreating(true)}>New task</Button>
+        <TaskStats tasks={tasks} hasMore={hasMore} isFiltered={isFiltered} />
+
+        <Button onClick={() => setCreating(true)}>
+          <PlusIcon />
+          New task
+        </Button>
       </div>
       <Modal open={creating} onClose={() => setCreating(false)} title="New task">
         <TaskForm onCancel={() => setCreating(false)} onSuccess={handleCreated} />
@@ -180,6 +175,7 @@ export function TaskList() {
             ? "Couldn't load your tasks — the service is temporarily unavailable. "
             : "Couldn't load your tasks. "}
           <Button variant="secondary" onClick={reload}>
+            <RefreshIcon />
             Retry
           </Button>
         </p>
@@ -206,6 +202,7 @@ export function TaskList() {
           {hasMore && (
             <div className={styles.loadMore} ref={sentinelRef}>
               <Button variant="secondary" onClick={loadMore} loading={isLoadingMore}>
+                <ChevronDownIcon />
                 Load more
               </Button>
             </div>

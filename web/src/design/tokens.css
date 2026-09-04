@@ -59,9 +59,17 @@
   --color-text-disabled: #9aa1ab;
 
   /* One accent hue, used for interactive/brand elements only — links,
-     primary buttons, focus rings. Not decorative anywhere else. */
-  --color-accent: #2857d6;
-  --color-accent-hover: #1f45ad;
+     primary buttons, focus rings. Not decorative anywhere else.
+     
+     This is the violet the product's own page icon is drawn in
+     (public/favicon.svg's #7e14ff), not a palette picked beside it: the
+     tab, the header's brand mark and the primary button now carry the
+     same colour, which is the cheapest kind of identity there is. It
+     clears 6.12:1 on white and 5.91:1 on the paper, so it holds as link
+     text as well as it does as a button fill — the dual role
+     tokens.test.ts checks. */
+  --color-accent: #7e14ff;
+  --color-accent-hover: #6a0dc7;
   --color-on-accent: #ffffff;
 
   --color-success: #1d7a4c;
@@ -105,13 +113,13 @@
      blur() (AppShell's sticky header), where full opacity would defeat
      the point of blurring what scrolls underneath.
 
-     --color-focus-glow is exactly --color-accent (#2857d6 =
-     rgb(40 87 214)) at 20% alpha — a soft halo added to the existing
+     --color-focus-glow is exactly --color-accent (#7e14ff =
+     rgb(126 20 255)) at 20% alpha — a soft halo added to the existing
      :focus-visible outline on Button/TextField/Select/Checkbox, never a
      replacement for it (the 2px outline is what WCAG 2.4.11 actually
      requires; the glow is decoration on top). */
   --color-surface-translucent: rgb(248 249 251 / 85%);
-  --color-focus-glow: rgb(40 87 214 / 20%);
+  --color-focus-glow: rgb(126 20 255 / 20%);
 
   /* Page background wash — decorative, exempt from the contrast
      obligation the same way --shadow-* is (it is not text, and nothing
@@ -123,7 +131,24 @@
      reason"; the reason here is depth behind a single flat column of
      cards, and the moment it competes with them for attention it has
      gone too far. */
-  --gradient-page: linear-gradient(180deg, #eaf0fb 0%, #ffffff 38%);
+  --gradient-page: linear-gradient(180deg, #f3eee1 0%, #fdfbf5 42%);
+
+  /* Notebook-paper treatment. Decorative, like the wash above: nothing
+     is ever placed directly on the rule lines' own color, and the
+     highlighter is translucent over --color-surface, so the title
+     underneath keeps the contrast tokens.test.ts already measures.
+     --color-paper is a warmer white than --color-surface's cool grey —
+     paper, not screen. The rule spacing is a length, not a color, and
+     lives with the components that draw it. */
+  --color-paper: #fdfbf5;
+  --color-paper-rule: #dde5f3;
+  /* The sticky header sits on the same sheet as everything else, so it
+     tints toward paper rather than toward --color-surface's cool grey;
+     the alpha is what the blur behind it needs to be worth having. */
+  --color-paper-translucent: rgb(253 251 245 / 85%);
+  /* A marker stroke, not a fill: 40% alpha lets the title's own
+     --color-text-primary read straight through it. */
+  --color-highlighter: rgb(255 213 92 / 40%);
 
   /* ---------------------------------------------------------------
    * Dark theme palette (Fase 14, CI-10) — private values only, never
@@ -165,9 +190,13 @@
   --dark-color-text-secondary: #a7afbc;
   --dark-color-text-disabled: #5a6270;
 
-  --dark-color-accent: #7ea2ff;
-  --dark-color-accent-hover: #9cb8ff;
-  --dark-color-on-accent: #0d1526;
+  /* The page icon's violet, lightened for a near-black page: the light
+     theme's own #7e14ff sits at 1.9:1 here, nowhere near legible. Same
+     dual-role resolution the comment above describes — the on-accent
+     value is dark, not white. */
+  --dark-color-accent: #b98cff;
+  --dark-color-accent-hover: #cbb2ff;
+  --dark-color-on-accent: #1a0b33;
 
   --dark-color-success: #5fd695;
   --dark-color-warning-bg: #33280a;
@@ -195,11 +224,20 @@
      way their light-mode counterparts are (neither is text). Same
      construction: --dark-color-surface/-accent at reduced alpha. */
   --dark-color-surface-translucent: rgb(23 27 35 / 85%);
-  --dark-color-focus-glow: rgb(126 162 255 / 20%);
+  --dark-color-focus-glow: rgb(185 140 255 / 20%);
   /* Same construction as the light wash, one theme down: a lift at the
      top settling into --dark-color-bg. Kept even shallower — a dark
      surface shows banding far more readily than a light one. */
-  --dark-gradient-page: linear-gradient(180deg, #171d2a 0%, #0d0f13 38%);
+  --dark-gradient-page: linear-gradient(180deg, #1b2030 0%, #12141a 42%);
+  /* The same idea one theme down: a dark sheet rather than a bright
+     one, ruled in a barely-there blue, marked in the accent hue —
+     a warm yellow highlighter over a dark page reads as a defect
+     rather than as ink, so the dark sheet is marked in the brand's
+     violet instead. */
+  --dark-color-paper: #161a22;
+  --dark-color-paper-rule: rgb(185 140 255 / 12%);
+  --dark-color-paper-translucent: rgb(22 26 34 / 85%);
+  --dark-color-highlighter: rgb(185 140 255 / 26%);
 
   /* ---------------------------------------------------------------
    * Typography
@@ -361,6 +399,10 @@
     --color-surface-translucent: var(--dark-color-surface-translucent);
     --color-focus-glow: var(--dark-color-focus-glow);
     --gradient-page: var(--dark-gradient-page);
+    --color-paper: var(--dark-color-paper);
+    --color-paper-rule: var(--dark-color-paper-rule);
+    --color-paper-translucent: var(--dark-color-paper-translucent);
+    --color-highlighter: var(--dark-color-highlighter);
 
     /* Native chrome the app does not draw itself — scrollbars, the
        <select> popup, form control internals — follows the theme only
@@ -410,5 +452,9 @@
   --color-surface-translucent: var(--dark-color-surface-translucent);
   --color-focus-glow: var(--dark-color-focus-glow);
   --gradient-page: var(--dark-gradient-page);
+  --color-paper: var(--dark-color-paper);
+  --color-paper-rule: var(--dark-color-paper-rule);
+  --color-paper-translucent: var(--dark-color-paper-translucent);
+  --color-highlighter: var(--dark-color-highlighter);
   color-scheme: dark;
 }

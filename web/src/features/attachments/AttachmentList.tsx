@@ -4,6 +4,7 @@ import type { ApiError } from '../../api/errors'
 import { classifyError } from '../../api/errors'
 import type { components } from '../../api/types'
 import { Button } from '../../components/Button'
+import { RefreshIcon, TrashIcon } from '../../components/icons'
 import { Skeleton } from '../../components/Skeleton'
 import { Toast } from '../../components/Toast'
 import styles from './AttachmentList.module.css'
@@ -146,6 +147,7 @@ export function AttachmentList({ taskId }: AttachmentListProps) {
             ? "Couldn't load attachments — the service is temporarily unavailable. "
             : "Couldn't load attachments. "}
           <Button variant="secondary" onClick={() => void load()}>
+            <RefreshIcon />
             Retry
           </Button>
         </p>
@@ -169,10 +171,11 @@ export function AttachmentList({ taskId }: AttachmentListProps) {
                 <span className={styles.size}>{formatBytes(attachment.size_bytes)}</span>
               </div>
               <Button
-                variant="danger"
+                variant="dangerQuiet"
                 loading={deletingKey === attachment.storage_key}
                 onClick={() => void handleDelete(attachment.storage_key)}
               >
+                <TrashIcon />
                 Delete
               </Button>
             </li>

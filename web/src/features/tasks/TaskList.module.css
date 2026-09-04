@@ -4,49 +4,20 @@
   gap: var(--space-4);
 }
 
-/* A real page header — "New task" was previously the only visually
-   distinct element on the screen, floating with nothing to anchor it.
-   It's still the only accent-colored element, but now sits beside a
-   title instead of alone (Fase 14 CI-7, audit finding — see plan.md). */
-/* One line: title+count, then the filters, then the create button
-   pushed to the far edge by .filters' own margin-right: auto. Wraps
-   gracefully on narrow viewports rather than overflowing. */
+/* One line, three parts: filters at the leading edge, the title centred
+   in what's left, "New task" pinned to the trailing edge. The centring
+   is done by giving the title group flex:1 between two auto-width
+   neighbours rather than by margins, so it stays centred on the row
+   even as the filters change width. */
 .pageHeader {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--space-3);
 }
 
-.titleGroup {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-}
-
-.title {
-  font-family: var(--font-sans);
-  font-size: var(--font-size-xl);
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-text-primary);
-  margin: 0;
-}
-
-/* Honest, not a fake total: GET /v1/tasks has no total-count response
-   (see useTasks.tsx's own doc comment) — this counts only what's
-   actually loaded, and the "+" when hasMore is true says "at least this
-   many," never a number the API never gave this client. */
-.count {
-  font-family: var(--font-sans);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-medium);
-  color: var(--color-text-secondary);
-}
-
-/* margin-right: auto is what separates the filter pair from the create
-   button on the shared header line — the filters sit next to the title,
-   the button stays pinned to the opposite edge. */
+/* An auto right margin pushes "New task" out to the trailing edge, so
+   the filters and the counts button stay together at the leading one. */
 .filters {
   display: flex;
   flex-wrap: wrap;

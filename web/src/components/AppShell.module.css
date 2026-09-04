@@ -15,13 +15,19 @@
   position: sticky;
   top: 0;
   z-index: 10;
-  background-color: var(--color-surface);
+  background-color: var(--color-paper);
+  /* A notebook's header rule: the page's own line, doubled — one solid
+     divider plus a lighter companion below it, drawn with the same
+     --color-paper-rule the cards are ruled in. A single hairline was
+     what made this bar read as chrome bolted onto the sheet rather
+     than as the top of it. */
   border-bottom: 1px solid var(--color-border);
+  box-shadow: 0 3px 0 -1px var(--color-paper-rule);
 }
 
 @supports (backdrop-filter: blur(1px)) {
   .header {
-    background-color: var(--color-surface-translucent);
+    background-color: var(--color-paper-translucent);
     backdrop-filter: blur(8px);
   }
 }
@@ -43,20 +49,30 @@
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--space-3);
-  padding-block: var(--space-3);
+  padding-block: var(--space-4);
 }
 
 .nav {
   display: flex;
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-2);
 }
 
 .appName {
   font-family: var(--font-sans);
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
+  letter-spacing: -0.01em;
   color: var(--color-text-primary);
+}
+
+/* Slightly quieter than body text and set on the paper rather than in
+   a control, so the two glyph buttons stay the only things in the bar
+   that look pressable. */
+.userEmail {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
 }
 
 .userMenu {
@@ -71,12 +87,6 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-}
-
-.userEmail {
-  font-family: var(--font-sans);
-  font-size: var(--font-size-sm);
-  color: var(--color-text-secondary);
 }
 
 /* The email is identity, not a control — below the sm breakpoint the

@@ -2,6 +2,12 @@
    every card reserves the same space and only the color varies below;
    a card whose stripe changed the padding would jump on every priority
    edit. */
+/* Each card is a sheet of paper: --color-paper underneath, the priority
+   stripe doubling as the margin rule down the left edge — the one a
+   notebook prints in red. The writing rules themselves are on .written
+   below, not here: ruling the whole card drew lines straight through
+   the buttons and chips, which read as a rendering artefact rather
+   than as paper. */
 .item {
   display: flex;
   flex-direction: column;
@@ -11,7 +17,7 @@
   border-left-width: var(--space-1);
   border-left-style: solid;
   border-radius: var(--radius-md);
-  background-color: var(--color-surface);
+  background-color: var(--color-paper);
   box-shadow: var(--shadow-sm);
 }
 
@@ -46,9 +52,9 @@
   border-left-color: var(--color-priority-high-text);
 }
 
-/* Status/priority chips on the left, controls on the right, one line
-   above the title. align-items: center keeps the pills optically level
-   with the buttons despite the height difference. */
+/* Status control and its chips on the left, Edit/Delete on the right,
+   one line above the title. align-items: center keeps the pills
+   optically level with the buttons despite the height difference. */
 .topRow {
   display: flex;
   align-items: center;
@@ -69,10 +75,35 @@
   margin: 0;
 }
 
-.badges {
+/* The ruled writing area — title and description only. 1.75rem rhythm
+   with the text sitting on the lines, and a trailing rule or two below
+   the last line so the sheet reads as partly filled rather than as
+   exactly as tall as its content.
+
+   background-image, not a border per line: one paint, and it reflows
+   with the card, where stacked borders would need an element per line
+   and would not survive a description growing by a sentence. */
+.written {
   display: flex;
+  flex-direction: column;
   gap: var(--space-2);
-  flex-shrink: 0;
+  padding-bottom: var(--space-4);
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent calc(1.75rem - 1px),
+    var(--color-paper-rule) calc(1.75rem - 1px),
+    var(--color-paper-rule) 1.75rem
+  );
+}
+
+/* Trigger, then the two chips it governs — one cluster, so the control
+   and the state it changes are read together. */
+.statusGroup {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
 }
 
 .badge {
@@ -143,9 +174,8 @@
   margin: 0;
 }
 
-/* One group, not two edges: the status control belongs with Edit and
-   Delete as "things you do to this task", and pushing it to the far
-   left instead left a wide empty channel across every row. */
+/* Edit and Delete only — the status trigger moved in beside the chips
+   it changes, so that the button reads as acting on them. */
 .actions {
   display: flex;
   align-items: center;

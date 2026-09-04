@@ -3,6 +3,8 @@ import { apiFetch } from '../../api/client'
 import type { ApiError } from '../../api/errors'
 import { classifyError } from '../../api/errors'
 import { Button } from '../../components/Button'
+import { PencilIcon, TrashIcon } from '../../components/icons'
+import { Mark } from '../../components/Mark'
 import { Modal } from '../../components/Modal'
 import { AttachmentList } from '../attachments/AttachmentList'
 import { useAuth } from '../auth/useAuth'
@@ -91,12 +93,16 @@ export function TaskItem({ task, onUpdated, onDeleted }: TaskItemProps) {
           review). Actions lead the card rather than closing it — they're
           the reason a row is interactive at all, and burying them under
           the description meant the eye travelled past the content to
-          reach them on every row. The badges share the line because a
+          reach them on every row. The chips share the line because a
           right-aligned action group over a right-aligned badge group
           stair-stepped down the card's edge with an empty channel
           beside both. */}
       <div className={styles.topRow}>
-        <div className={styles.badges}>
+        {/* The status control sits immediately before the chips it
+            changes, so the button reads as acting on the thing next to
+            it rather than as one more item in the action group. */}
+        <div className={styles.statusGroup}>
+          <TaskStatusControls task={task} onSuccess={onUpdated} />
           <span className={`${styles.badge} ${STATUS_BADGE_CLASS[task.status] ?? ''}`}>
             {task.status}
           </span>
@@ -105,17 +111,22 @@ export function TaskItem({ task, onUpdated, onDeleted }: TaskItemProps) {
           </span>
         </div>
         <div className={styles.actions}>
-          <TaskStatusControls task={task} onSuccess={onUpdated} />
           <Button variant="secondary" onClick={() => setEditing(true)}>
+            <PencilIcon />
             Edit
           </Button>
           <Button variant="dangerQuiet" onClick={() => setConfirmingDelete(true)}>
+            <TrashIcon />
             Delete
           </Button>
         </div>
       </div>
-      <h3 className={styles.title}>{task.title}</h3>
-      {task.description && <p className={styles.description}>{task.description}</p>}
+      <div className={styles.written}>
+        <h3 className={styles.title}>
+          <Mark>{task.title}</Mark>
+        </h3>
+        {task.description && <p className={styles.description}>{task.description}</p>}
+      </div>
 
       {/* Entire section absent, not just disabled, when attachments are
           off for this account — see plan.md's CI-9 test requirement.

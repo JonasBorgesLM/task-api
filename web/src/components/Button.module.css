@@ -5,7 +5,11 @@
   gap: var(--space-2);
   padding: var(--space-2) var(--space-4);
   border: none;
-  border-radius: var(--radius-md);
+  /* Pill, not a rounded rectangle: the badges, the marker stroke behind
+     every title and the priority chips are all fully rounded, so a
+     button with squared-off corners was the one control still shaped
+     like generic UI rather than like something in this app. */
+  border-radius: var(--radius-full);
   font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-medium);
@@ -41,19 +45,18 @@
   box-shadow: 0 0 0 6px var(--color-focus-glow);
 }
 
-/* Two-tone gradient — Fase 14 CI-13, the one effect that deliberately
-   tensions with "no gradient without a reason" (tokens.css's own
-   anti-requirements, issue 121). The reason: depth on the single
-   primary call-to-action on a given screen, not decoration spread
-   around — every other variant (secondary/danger) stays flat. Both
-   stops are --color-accent/--color-accent-hover, tokens that already
-   existed for this exact button before this change; no new color is
-   introduced. Hover/active use filter: brightness() on the same
-   gradient instead of swapping to a flat color, so the gradient itself
-   never disappears mid-interaction. */
+/* Flat accent, not the two-tone gradient this carried from Fase 14
+   CI-13. That gradient was there for depth on the one call-to-action
+   per screen, and it earned its place while the app was flat; against
+   paper it read as the last piece of stock dashboard chrome on the
+   page. Depth now comes from the same shadow language the cards use —
+   ink pressed onto the sheet rather than a glossy control sitting on
+   top of it. Hover/active still work the gradient's old way, by
+   brightness on whatever the fill is, so nothing disappears mid-press. */
 .primary {
-  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-hover) 100%);
+  background-color: var(--color-accent);
   color: var(--color-on-accent);
+  box-shadow: var(--shadow-sm);
 }
 
 .primary:hover:not(:disabled) {
@@ -64,14 +67,22 @@
   filter: brightness(0.94);
 }
 
+/* Paper, not --color-surface's cool grey: a secondary button sits on
+   the sheet and should be cut from it. The icon inside takes the accent
+   while the label stays text-primary — one point of colour per control,
+   the same split the header's brand mark uses. */
 .secondary {
-  background-color: var(--color-surface);
+  background-color: var(--color-paper);
   color: var(--color-text-primary);
   border: 1px solid var(--color-border-interactive);
 }
 
 .secondary:hover:not(:disabled) {
-  background-color: var(--color-bg);
+  background-color: var(--color-surface);
+}
+
+.secondary svg {
+  color: var(--color-accent);
 }
 
 .danger {
@@ -86,9 +97,10 @@
 /* Same shape as .secondary, danger's color instead of neutral text —
    destructive at a glance, quiet enough to repeat once per row. Fills
    only on hover, so the solid treatment still means "this is the click
-   that does it". */
+   that does it". Paper rather than transparent, so it reads as the same
+   material as the button beside it. */
 .dangerQuiet {
-  background-color: transparent;
+  background-color: var(--color-paper);
   color: var(--color-danger);
   border: 1px solid var(--color-danger);
 }

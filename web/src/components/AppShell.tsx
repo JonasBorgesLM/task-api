@@ -2,7 +2,8 @@ import type { ReactNode } from 'react'
 import { useState } from 'react'
 import { Button } from './Button'
 import styles from './AppShell.module.css'
-import { UserIcon } from './icons'
+import { DevicesIcon, SignOutIcon, UserIcon } from './icons'
+import { Mark } from './Mark'
 import type { MenuItem } from './Menu'
 import { Menu } from './Menu'
 import { Modal } from './Modal'
@@ -40,10 +41,11 @@ export function AppShell({ userEmail, onLogout, onLogoutAll, children }: AppShel
   const [confirmingLogoutAll, setConfirmingLogoutAll] = useState(false)
 
   const accountItems: MenuItem[] = [
-    { key: 'logout', label: 'Log out', onSelect: onLogout },
+    { key: 'logout', label: 'Log out', icon: <SignOutIcon />, onSelect: onLogout },
     {
       key: 'logout-all',
       label: 'Sign out of all devices',
+      icon: <DevicesIcon />,
       onSelect: () => setConfirmingLogoutAll(true),
     },
   ]
@@ -53,8 +55,15 @@ export function AppShell({ userEmail, onLogout, onLogoutAll, children }: AppShel
       <header className={styles.header}>
         <PageContainer>
           <div className={styles.headerRow}>
+            {/* The product name carries the same ink the task titles do
+                — the header was the one surface still reading as plain
+                chrome while everything under it had a hand. The name
+                stands on its own: a glyph beside it added a second mark
+                competing with the ink for the same job. */}
             <nav aria-label="Main" className={styles.nav}>
-              <span className={styles.appName}>Task API</span>
+              <span className={styles.appName}>
+                <Mark>Task API</Mark>
+              </span>
             </nav>
             {/* Email first, then the two glyphs as one pair — it used to
                 sit between them, which read as a label belonging to

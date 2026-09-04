@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { invalidateCsrfToken } from '../../api/client'
@@ -130,30 +130,55 @@ describe('TaskList', () => {
     expect(screen.getByText('high')).toBeInTheDocument()
   })
 
-  it('success: shows a page title and a count of what is actually loaded', () => {
+  // The page title and its always-visible count were dropped in the
+  // design review: the title named the only screen this app has, and
+  // the count now lives one glyph away, in the counts panel.
+  it('the counts button names how many are loaded, without opening anything', () => {
     mockTasksResult({ status: 'success', tasks: [makeTask(), makeTask({ id: 't2' })] })
     render(<TaskList />)
 
-    expect(screen.getByRole('heading', { name: 'Tasks' })).toBeInTheDocument()
-    expect(screen.getByText('2')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Task counts (2 loaded)' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Tasks' })).not.toBeInTheDocument()
   })
 
-  it('the count gets a "+" when hasMore is true — never a fake total the API never gave', () => {
+  it('the count says "or more" when hasMore is true — never a fake total the API never gave', async () => {
     mockTasksResult({ status: 'success', tasks: [makeTask()], hasMore: true })
+    const user = userEvent.setup()
     render(<TaskList />)
+
+    await user.click(screen.getByRole('button', { name: 'Task counts (1 or more loaded)' }))
 
     expect(screen.getByText('1+')).toBeInTheDocument()
+    expect(screen.getByText('loaded so far')).toBeInTheDocument()
   })
 
-  it('loading/empty/error states show the page title but no count (nothing loaded yet)', () => {
-    mockTasksResult({ status: 'loading' })
+  it('the counts panel breaks the loaded tasks down by status and priority', async () => {
+    mockTasksResult({
+      status: 'success',
+      tasks: [
+        makeTask({ id: 't1', status: 'pending', priority: 'high' }),
+        makeTask({ id: 't2', status: 'done', priority: 'high' }),
+        makeTask({ id: 't3', status: 'pending', priority: 'low' }),
+      ],
+    })
+    const user = userEvent.setup()
     render(<TaskList />)
-    expect(screen.queryByRole('heading', { name: 'Tasks' })).not.toBeInTheDocument()
 
-    mockTasksResult({ status: 'empty', tasks: [] })
-    render(<TaskList />)
-    expect(screen.getByRole('heading', { name: 'Tasks' })).toBeInTheDocument()
-    expect(screen.queryByText('0')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /^Task counts/ }))
+
+    // Scoped to each group: "Pending"/"High" are also filter options.
+    const byStatus = within(screen.getByText('By status').parentElement!.querySelector('dl')!)
+    expect(within(byStatus.getByText('Pending').closest('div')!).getByText('2')).toBeInTheDocument()
+    expect(within(byStatus.getByText('Done').closest('div')!).getByText('1')).toBeInTheDocument()
+    expect(
+      within(byStatus.getByText('Cancelled').closest('div')!).getByText('0'),
+    ).toBeInTheDocument()
+
+    const byPriority = within(
+      screen.getByText('By priority').parentElement!.querySelector('dl')!,
+    )
+    expect(within(byPriority.getByText('High').closest('div')!).getByText('2')).toBeInTheDocument()
+    expect(within(byPriority.getByText('Low').closest('div')!).getByText('1')).toBeInTheDocument()
   })
 
   // The caption that used to spell out "sorted by creation date, oldest
