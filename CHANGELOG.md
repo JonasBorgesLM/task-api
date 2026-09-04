@@ -6,6 +6,30 @@ versionamento seguindo [Semantic Versioning](https://semver.org/lang/pt-BR/).
 Este é o primeiro release versionado do projeto — não há tags anteriores.
 `v1.0.0` marca o ponto em que a API passa a ter contrato estável (`/v1`).
 
+## [1.4.0] — a definir na tag
+
+Fase 14, restante (CI-10 a CI-12) — PRs #190, #191, #192. **Minor, não
+major, e sem mudança de contrato nenhuma desta vez:** verificado contra
+o histórico real (`git diff v1.3.0..develop -- docs/openapi.yaml
+internal/ cmd/` vazio) — nada em `docs/openapi.yaml`, `internal/` ou
+`cmd/` mudou desde `v1.3.0`. Este lote inteiro é frontend: tema escuro
+(paleta, alternância, aplicação) e o redesenho do controle de status da
+task como menu de ícone. Nenhum endpoint, campo, código de status ou
+comportamento de resposta muda para um cliente da API.
+
+### Alterado
+- `web/` ganha tema escuro: segue a preferência do sistema
+  operacional por padrão, com um controle (Sistema/Claro/Escuro) que
+  permite escolher explicitamente e persiste a escolha entre sessões.
+  Paleta própria para o modo escuro (não é o modo claro escurecido),
+  auditada em WCAG AA nas duas variantes.
+- `web/`'s `TaskStatusControls` — os até três botões de texto sempre
+  visíveis ("Move to X") viram um único gatilho de ícone que abre um
+  menu com as transições legais da task (mesmo padrão de pull-down
+  menu do macOS/iOS); uma transição ilegal fica ausente do menu, não
+  mais visível-e-desabilitada. A tabela de transições legais em si não
+  muda — só a apresentação.
+
 ## [1.3.0] — a definir na tag
 
 Fase 14 (redesenho visual do frontend + filtro de tasks) — PRs #165,
