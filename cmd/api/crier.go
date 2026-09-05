@@ -131,9 +131,16 @@ func buildCrier(cfg config.Config) (*core.Crier, error) {
 
 	metrics := &core.CountingMetrics{}
 	c, err := core.New(core.Options{
-		ServiceName: crierServiceName,
-		Exporters:   map[string]core.Exporter{"otlp": exporter},
-		Metrics:     metrics,
+		ServiceName:    crierServiceName,
+		ServiceVersion: version,
+		Exporters:      map[string]core.Exporter{"otlp": exporter},
+		Metrics:        metrics,
+		// Zero-value guard: caps any attribute key past 1000 distinct
+		// values in a 10-minute window. internal/middleware/logging.go
+		// logs the raw URL path, and every task ID or file storage key
+		// ever created makes "path" an unbounded-cardinality attribute
+		// without this (issue #205).
+		Cardinality: &core.CardinalityGuard{},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("crier: %w", err)
