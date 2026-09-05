@@ -53,3 +53,32 @@ export async function registerAndLogin(page: Page): Promise<{ email: string; pas
 
   return { email, password }
 }
+
+/**
+ * Creates a task via the real "New task" modal and waits for it to
+ * close. Deliberately does not assert the new row is visible: a task is
+ * always the newest (created_at ascending order — see
+ * src/features/tasks/useTasks.tsx), so once more than PAGE_SIZE tasks
+ * exist it lands on the *last* page, not necessarily the one currently
+ * in view. Callers on a page where the row is expected to show up
+ * assert that themselves.
+ */
+export async function createTask(page: Page, title: string): Promise<void> {
+  await page.getByRole('button', { name: 'New task' }).click()
+  await page.getByLabel(/^Title/).fill(title)
+  await page.getByRole('button', { name: 'Create task' }).click()
+  await expect(page.getByRole('dialog', { name: 'New task' })).toHaveCount(0)
+}
+
+/**
+ * Drives one status transition through TaskStatusControls' pull-down
+ * menu (Fase 14 CI-12), scoped to taskTitle rather than the bare
+ * `/Change status of/` pattern task-lifecycle.spec.ts uses — that's
+ * only unambiguous with a single task on screen, which several of the
+ * filter/pagination specs deliberately are not.
+ */
+export async function moveToStatus(page: Page, taskTitle: string, target: string): Promise<void> {
+  const escapedTitle = taskTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  await page.getByRole('button', { name: new RegExp(`Change status of "${escapedTitle}"`) }).click()
+  await page.getByRole('menuitem', { name: `Move to ${target}` }).click()
+}
