@@ -23,11 +23,26 @@ type userService interface {
 	Register(ctx context.Context, email, password string) (User, error)
 	Authenticate(ctx context.Context, email, password string) (User, error)
 	ChangePassword(ctx context.Context, userID, currentPassword, newPassword, currentSessionToken string) error
+	VerifyPassword(ctx context.Context, userID, password string) error
+	DeleteAccount(ctx context.Context, userID string) error
 	CreateSession(ctx context.Context, userID string) (token string, expiresAt time.Time, err error)
 	Logout(ctx context.Context, token string) error
 	LogoutAll(ctx context.Context, userID string) error
 	GetUser(ctx context.Context, id string) (User, error)
 }
+
+// AccountCascadeFunc deletes everything belonging to userID that this
+// package cannot reach itself: every task, and every attachment (bytes
+// in the BlobStore, and its metadata row) — see CLAUDE.md's layering,
+// which forbids user importing task or attachment. Supplied by cmd/api,
+// the composition root where all three domains meet, the same pattern
+// attachment.TaskOwnershipFunc already uses for the same reason.
+//
+// Handler.deleteAccount calls this after VerifyPassword succeeds and
+// before Service.DeleteAccount — a failure here must stop the account's
+// own row and sessions from being deleted, since retrying afterward
+// would have nothing left to reach the cascade's own failure through.
+type AccountCascadeFunc func(ctx context.Context, userID string) error
 
 // Handler exposes the user Service over HTTP.
 type Handler struct {
@@ -36,6 +51,7 @@ type Handler struct {
 	cookieInsecure     bool
 	csrfProtector      *csrf.Protector
 	attachmentsEnabled bool
+	cascade            AccountCascadeFunc
 }
 
 // NewHandler returns a new Handler with the given userService and logger.
@@ -51,8 +67,9 @@ type Handler struct {
 // /auth/me (see meResponse) so a frontend knows whether to offer
 // attachment upload UI without probing an endpoint that may 404 either
 // because it doesn't exist or because of something else entirely.
-func NewHandler(svc userService, logger *slog.Logger, cookieInsecure bool, csrfProtector *csrf.Protector, attachmentsEnabled bool) *Handler {
-	return &Handler{svc: svc, logger: logger, cookieInsecure: cookieInsecure, csrfProtector: csrfProtector, attachmentsEnabled: attachmentsEnabled}
+// cascade is DELETE /auth/me's own dependency — see AccountCascadeFunc.
+func NewHandler(svc userService, logger *slog.Logger, cookieInsecure bool, csrfProtector *csrf.Protector, attachmentsEnabled bool, cascade AccountCascadeFunc) *Handler {
+	return &Handler{svc: svc, logger: logger, cookieInsecure: cookieInsecure, csrfProtector: csrfProtector, attachmentsEnabled: attachmentsEnabled, cascade: cascade}
 }
 
 // RegisterRoutes registers every /auth/* route on mux. Register and Login
@@ -83,6 +100,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth, rateLimit midd
 	mux.Handle("POST /auth/logout", requireAuth(http.HandlerFunc(h.logout)))
 	mux.Handle("POST /auth/logout-all", requireAuth(http.HandlerFunc(h.logoutAll)))
 	mux.Handle("GET /auth/me", requireAuth(http.HandlerFunc(h.me)))
+	mux.Handle("DELETE /auth/me", requireAuth(http.HandlerFunc(h.deleteAccount)))
 }
 
 type registerRequest struct {
@@ -353,6 +371,69 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, r, http.StatusOK, meResponse{User: u, AttachmentsEnabled: h.attachmentsEnabled})
+}
+
+type deleteAccountRequest struct {
+	CurrentPassword string `json:"current_password"`
+}
+
+// deleteAccount handles DELETE /auth/me — permanently deletes the
+// caller's account: every session, every task, every attachment (bytes
+// and rows), and the account itself. Immediate, not soft-delete with a
+// grace period — see docs/DECISIONS.md § "Exclusão de conta" for that
+// decision and its trade-off.
+//
+// Order is load-bearing:
+//  1. VerifyPassword — an authenticated session alone is not enough
+//     (same reasoning as ChangePassword); confirming this first is what
+//     keeps a wrong password from deleting anything at all.
+//  2. h.cascade — every task and attachment this package cannot reach
+//     itself (see AccountCascadeFunc). Must complete before step 3:
+//     tasks.user_id has no ON DELETE CASCADE (see
+//     Repository.DeleteUser's doc comment), so the database itself
+//     would refuse to delete the user row first even if this didn't.
+//  3. Service.DeleteAccount — sessions, then the user row.
+//
+// A cascade failure is reported as 500 and logged with userID: unlike
+// h.svc's own errors, nothing in AccountCascadeFunc's contract names a
+// domain sentinel handleServiceError would know how to map, and by this
+// point the account may be left with some tasks/attachments gone and
+// others not — worth an operator's attention, not a silent retry.
+func (h *Handler) deleteAccount(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	defer r.Body.Close()
+
+	var req deleteAccountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	userID, _ := middleware.UserIDFromContext(r.Context())
+
+	if err := h.svc.VerifyPassword(r.Context(), userID, req.CurrentPassword); err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
+	if err := h.cascade(r.Context(), userID); err != nil {
+		requestID, _ := middleware.RequestIDFromContext(r.Context())
+		h.logger.Error("account deletion cascade failed",
+			"error", err,
+			"request_id", requestID,
+			"user_id", userID,
+		)
+		h.writeError(w, r, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	if err := h.svc.DeleteAccount(r.Context(), userID); err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
+	clearSessionCookie(w, h.cookieInsecure)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleServiceError maps known domain errors to HTTP status codes,

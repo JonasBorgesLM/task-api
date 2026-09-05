@@ -25,6 +25,15 @@ type Repository interface {
 	// plaintext password, only the bcrypt hash of one.
 	UpdateUserPassword(ctx context.Context, id, passwordHash string) error
 
+	// DeleteUser removes the user row itself. Returns ErrNotFound if no
+	// user with that id exists. Backs Service.DeleteAccount, and must be
+	// called only after every task the user owns is already gone:
+	// tasks.user_id has no ON DELETE CASCADE (unlike sessions.user_id —
+	// see 0004_add_user_id_to_tasks.up.sql's own comment), so
+	// postgresRepository's implementation errors instead of silently
+	// leaving orphaned tasks behind if any still reference this id.
+	DeleteUser(ctx context.Context, id string) error
+
 	// CreateSession stores s and evicts s.UserID's oldest sessions (by
 	// CreatedAt) past maxSessions, inside one transaction serialized per
 	// user by a PostgreSQL advisory lock — see postgresRepository.

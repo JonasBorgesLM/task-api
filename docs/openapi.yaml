@@ -448,11 +448,11 @@ paths:
         '404':
           description: >
             The token authenticated successfully but its owning user no
-            longer exists. Only reachable if the account was removed out
-            of band (direct SQL, `cmd/seed -reset`) between the session
-            lookup and this read — this API exposes no endpoint that
-            deletes a user, and deleting one normally cascades its
-            sessions away, which would produce a 401 instead.
+            longer exists. Essentially unreachable in practice: deleting
+            an account (`DELETE /v1/auth/me`) removes its sessions in the
+            same operation, which would produce a `401` here instead —
+            this would need the account removed out of band (direct SQL,
+            `cmd/seed -reset`) between the session lookup and this read.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -462,6 +462,75 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: user not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    delete:
+      tags: [Auth]
+      operationId: deleteAccount
+      summary: Permanently delete the caller's own account
+      description: >
+        Deletes everything belonging to the authenticated account,
+        immediately — every session, every task, every attachment (its
+        stored bytes and its metadata row), and the account itself. There
+        is no grace period and no way to undo this once the response
+        comes back; see `docs/DECISIONS.md` § "Exclusão de conta" for
+        that decision.
+
+
+        Requires the current password in the request body — an
+        authenticated session alone is not enough, the same reasoning
+        `POST /v1/auth/password` follows: a hijacked-but-live session
+        must not be able to destroy the account on its own.
+      requestBody:
+        required: true
+        description: >
+          Request bodies larger than 1 MiB are rejected, surfacing as the
+          same 400 "invalid request body" response as malformed JSON.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteAccountRequest'
+            example:
+              current_password: correct horse battery staple
+      responses:
+        '204':
+          description: >
+            Account deleted. No response body. The session cookie, if
+            any, is cleared the same way logout's is.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+        '400':
+          description: Malformed JSON body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: invalid request body
+        '401':
+          description: >
+            Missing/expired/malformed bearer token, or `current_password`
+            does not match the account's stored password — deliberately
+            the same response either way.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: invalid email or password
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '500':
@@ -1638,6 +1707,17 @@ components:
       required:
         - current_password
         - new_password
+
+    DeleteAccountRequest:
+      type: object
+      description: Accepted body for DELETE /auth/me.
+      properties:
+        current_password:
+          type: string
+          description: The account's current password. Required — see the operation's own description.
+          example: correct horse battery staple
+      required:
+        - current_password
 
     LoginResponse:
       type: object

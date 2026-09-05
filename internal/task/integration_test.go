@@ -27,6 +27,7 @@ package task
 //     TestIntegration_OwnershipIsolation.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,7 +76,11 @@ func newIntegrationServer(t *testing.T) (*httptest.Server, string) {
 	}
 
 	userSvc := user.NewService(user.NewMemoryRepository(), 24*time.Hour, 1000)
-	userHandler := user.NewHandler(userSvc, logger, false, csrfProtector, false)
+	// This file's tests exercise the task/auth stack, never DELETE
+	// /auth/me — a no-op cascade is enough, there's nothing for it to
+	// ever be called against.
+	noopCascade := func(context.Context, string) error { return nil }
+	userHandler := user.NewHandler(userSvc, logger, false, csrfProtector, false, noopCascade)
 	requireAuth := user.RequireAuth(userSvc, logger)
 
 	// A generous limit here: these tests exercise the task/auth stack, not

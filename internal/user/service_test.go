@@ -31,6 +31,9 @@ type fakeRepository struct {
 		passwordHash string
 	}
 
+	deleteUserErr        error
+	deleteUserCalledWith string
+
 	createSessionErr        error
 	savedSession            Session
 	createSessionCalledWith int // maxSessions passed to CreateSession
@@ -72,6 +75,11 @@ func (f *fakeRepository) UpdateUserPassword(_ context.Context, id, passwordHash 
 	f.updateUserPasswordCalledWith.id = id
 	f.updateUserPasswordCalledWith.passwordHash = passwordHash
 	return f.updateUserPasswordErr
+}
+
+func (f *fakeRepository) DeleteUser(_ context.Context, id string) error {
+	f.deleteUserCalledWith = id
+	return f.deleteUserErr
 }
 
 func (f *fakeRepository) CreateSession(_ context.Context, s Session, maxSessions int) error {
@@ -399,6 +407,81 @@ func TestChangePassword_RevokeRepositoryError(t *testing.T) {
 	// not just that an error came back.
 	if repo.updateUserPasswordCalledWith.id != "u1" {
 		t.Error("ChangePassword() should have already persisted the new password before the revoke step failed")
+	}
+}
+
+// --- VerifyPassword ---
+
+func TestVerifyPassword_Valid(t *testing.T) {
+	stored := User{ID: "u1", PasswordHash: mustHash(t, "password123")}
+	repo := &fakeRepository{findUserByIDUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	if err := svc.VerifyPassword(context.Background(), "u1", "password123"); err != nil {
+		t.Errorf("VerifyPassword() unexpected error: %v", err)
+	}
+}
+
+func TestVerifyPassword_Wrong(t *testing.T) {
+	stored := User{ID: "u1", PasswordHash: mustHash(t, "password123")}
+	repo := &fakeRepository{findUserByIDUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.VerifyPassword(context.Background(), "u1", "wrong-password")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("VerifyPassword() wrong password error = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+func TestVerifyPassword_UnknownUser(t *testing.T) {
+	repo := &fakeRepository{findUserByIDErr: ErrNotFound}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.VerifyPassword(context.Background(), "gone", "whatever")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("VerifyPassword() unknown user error = %v, want ErrInvalidCredentials (never a distinct 'not found')", err)
+	}
+}
+
+// --- DeleteAccount ---
+
+func TestDeleteAccount_DeletesSessionsThenUser(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	if err := svc.DeleteAccount(context.Background(), "u1"); err != nil {
+		t.Fatalf("DeleteAccount() unexpected error: %v", err)
+	}
+	if repo.deleteSessionsForUserCalledWith != "u1" {
+		t.Errorf("DeleteAccount() called DeleteSessionsForUser with %q, want %q", repo.deleteSessionsForUserCalledWith, "u1")
+	}
+	if repo.deleteUserCalledWith != "u1" {
+		t.Errorf("DeleteAccount() called DeleteUser with %q, want %q", repo.deleteUserCalledWith, "u1")
+	}
+}
+
+func TestDeleteAccount_SessionRepositoryError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	repo := &fakeRepository{deleteSessionsForUserErr: repoErr}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.DeleteAccount(context.Background(), "u1")
+	if !errors.Is(err, repoErr) {
+		t.Errorf("DeleteAccount() DeleteSessionsForUser error = %v, want %v", err, repoErr)
+	}
+	if repo.deleteUserCalledWith != "" {
+		t.Error("DeleteAccount() must not delete the user row when revoking sessions already failed")
+	}
+}
+
+func TestDeleteAccount_UserRepositoryError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	repo := &fakeRepository{deleteUserErr: repoErr}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.DeleteAccount(context.Background(), "u1")
+	if !errors.Is(err, repoErr) {
+		t.Errorf("DeleteAccount() DeleteUser error = %v, want %v", err, repoErr)
 	}
 }
 

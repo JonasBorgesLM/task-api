@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/JonasBorgesLM/moat/csrf"
 
+	"github.com/JonasBorgesLM/task-api/internal/attachment"
 	"github.com/JonasBorgesLM/task-api/internal/config"
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 	"github.com/JonasBorgesLM/task-api/internal/task"
@@ -1969,6 +1971,104 @@ func TestIntegration_ChangePassword_RevokesOtherSessionsButKeepsCaller(t *testin
 	newLoginResp.Body.Close()
 	if newLoginResp.StatusCode != http.StatusOK {
 		t.Errorf("POST /auth/login with new password after change: status = %d, want %d", newLoginResp.StatusCode, http.StatusOK)
+	}
+}
+
+// TestIntegration_DeleteAccount_CascadesEverything drives the real full
+// stack — register, create a task, upload an attachment, then
+// DELETE /auth/me — and confirms every layer of the cascade this issue
+// (#197) asked for actually ran, not just that the route returns 204:
+//
+//   - a wrong current password is rejected and deletes nothing (checked
+//     by confirming the task survives the rejected attempt);
+//   - the session is invalidated afterward, same as logout;
+//   - the account's own row is really gone, not just its sessions — the
+//     only way to observe that from outside is that the same email can
+//     register a fresh account afterward, which a live UNIQUE
+//     constraint would otherwise refuse;
+//   - the attachment's blob is gone from disk, not just its metadata
+//     row — the specific acceptance criterion issue #197 named
+//     explicitly, checked here via a second attachment.BlobStore
+//     pointed at the same directory the server itself used.
+func TestIntegration_DeleteAccount_CascadesEverything(t *testing.T) {
+	cfg := attachmentConfig(t)
+	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
+	defer srv.Close()
+
+	const email = "delete-account@example.com"
+	const password = "password12345"
+
+	token := registerAndLoginAs(t, srv, email)
+	taskID := createTask(t, srv, token)
+
+	content := append([]byte("%PDF-1.7\n"), []byte("report body")...)
+	uploadResp := uploadFile(t, srv, token, taskID, "report.pdf", content)
+	defer uploadResp.Body.Close()
+	if uploadResp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(uploadResp.Body)
+		t.Fatalf("upload status = %d, body = %s", uploadResp.StatusCode, respBody)
+	}
+	var uploaded struct {
+		StorageKey string `json:"storage_key"`
+	}
+	if err := json.NewDecoder(uploadResp.Body).Decode(&uploaded); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+
+	// A wrong current password must be rejected, and delete nothing.
+	wrongResp, err := srv.Client().Do(authedRequest(t, token, http.MethodDelete, srv.URL+apiPrefix+"/auth/me", `{"current_password":"wrong-password"}`))
+	if err != nil {
+		t.Fatalf("DELETE /auth/me with wrong password: %v", err)
+	}
+	wrongResp.Body.Close()
+	if wrongResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("DELETE /auth/me with wrong password: status = %d, want %d", wrongResp.StatusCode, http.StatusUnauthorized)
+	}
+	stillThereResp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/tasks/"+taskID, ""))
+	if err != nil {
+		t.Fatalf("GET /tasks/%s after a rejected delete attempt: %v", taskID, err)
+	}
+	stillThereResp.Body.Close()
+	if stillThereResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /tasks/%s after a rejected delete attempt: status = %d, want %d (nothing should have been deleted)", taskID, stillThereResp.StatusCode, http.StatusOK)
+	}
+
+	// The real deletion.
+	delResp, err := srv.Client().Do(authedRequest(t, token, http.MethodDelete, srv.URL+apiPrefix+"/auth/me", `{"current_password":"`+password+`"}`))
+	if err != nil {
+		t.Fatalf("DELETE /auth/me: %v", err)
+	}
+	defer delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(delResp.Body)
+		t.Fatalf("DELETE /auth/me status = %d, want %d, body = %s", delResp.StatusCode, http.StatusNoContent, respBody)
+	}
+
+	// The session is gone.
+	meResp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/auth/me", ""))
+	if err != nil {
+		t.Fatalf("GET /auth/me after account deletion: %v", err)
+	}
+	meResp.Body.Close()
+	if meResp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /auth/me after account deletion: status = %d, want %d", meResp.StatusCode, http.StatusUnauthorized)
+	}
+
+	// The email is free again — proof the user row itself, not just its
+	// sessions, is gone: a live users.email UNIQUE constraint would
+	// otherwise refuse this exact registration.
+	if newToken := registerAndLoginAs(t, srv, email); newToken == "" {
+		t.Error("re-registering with the deleted account's email: expected a fresh session, got none")
+	}
+
+	// The attachment's blob is gone from disk, not just its row.
+	blobs, closeStore, err := attachment.NewFSBlobStore(cfg.AttachmentStorageDir)
+	if err != nil {
+		t.Fatalf("open a blob store on the same directory to verify deletion: %v", err)
+	}
+	defer closeStore()
+	if _, err := blobs.Open(context.Background(), uploaded.StorageKey); !errors.Is(err, attachment.ErrNotFound) {
+		t.Errorf("blob %s after account deletion: Open() error = %v, want attachment.ErrNotFound", uploaded.StorageKey, err)
 	}
 }
 

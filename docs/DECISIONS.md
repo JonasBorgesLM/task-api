@@ -1220,3 +1220,48 @@ nada para avisar quando isso acontecesse.
 aqui sozinhas — alguém precisa notar, revisar, e subir
 `CRIER_DASHBOARD_REF` de propósito, o mesmo custo que este `Makefile` já
 aceita para `STATICCHECK_VERSION`/`GOVULNCHECK_VERSION`.
+
+---
+
+## Exclusão de conta (`DELETE /v1/auth/me`, issue #197): imediata, não soft-delete
+
+`DELETE /v1/auth/me` apaga a conta **na hora** da chamada — sessões,
+tasks, anexos (linhas e bytes) e o próprio usuário. Não existe estado
+"pendente de exclusão", carência, nem forma de desfazer depois que a
+resposta volta `204`.
+
+**Por quê:** a alternativa considerada — soft-delete com carência (ex.:
+7–30 dias antes da exclusão de verdade) — exigiria um job de limpeza
+recorrente, um estado que bloqueia login sem ser um dos existentes, e um
+jeito de cancelar o pedido; nada disso existe hoje neste projeto, e nada
+aqui pediu essa complexidade antes desta issue. Escolha do usuário
+(`JonasBorgesLM`), levada explicitamente porque o próprio texto da issue
+marcava isso como decisão de produto, não técnica.
+
+**Trade-off aceito:** nenhuma proteção contra arrependimento (a exclusão
+não tem "desfazer") nem contra uma sessão sequestrada destruindo a conta
+— mitigado apenas por exigir a senha atual no corpo da requisição (a
+mesma exigência de `POST /v1/auth/password`), nunca a sessão sozinha.
+
+### Ordem de exclusão dos anexos: linha antes do blob, não o inverso
+
+O texto original da issue propunha apagar os **bytes antes das linhas**
+dos anexos durante essa cascata, citando o mesmo raciocínio já registrado
+em `CLAUDE.md`/`docs/DECISIONS.md` § "Delete de anexo: síncrono, não só o
+coletor" — mas invertido: aquela seção decidiu **linha primeiro, blob
+depois** (best-effort), exatamente pelo espelho do `Upload` (bytes antes
+da linha na escrita, porque a ordem inversa deixaria uma linha apontando
+para um arquivo nunca escrito). Bytes-antes-da-linha no delete produz o
+mesmo tipo de referência quebrada que essa regra já existe para evitar:
+se o passo de apagar a linha falhar depois do blob já ter sumido, sobra
+uma linha apontando para um arquivo inexistente — pior, e mais permanente
+neste caminho de cascata, que ninguém revisita depois, do que o blob
+órfão (que o coletor já recolhe) que a ordem linha-primeiro deixaria no
+mesmo cenário de falha.
+
+**Decisão:** a cascata de exclusão de conta reaproveita
+`attachment.Service.Delete` — o mesmo caminho, já testado, que
+`DELETE /v1/files/{key}` usa — em vez de inventar uma segunda ordem só
+para este caso. Levado ao usuário antes de implementar, por ser
+exatamente o caso que `CLAUDE.md` descreve: "se uma issue parecer
+contradizer uma decisão registrada, pare e pergunte antes de prosseguir."

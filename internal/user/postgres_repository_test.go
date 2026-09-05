@@ -597,3 +597,71 @@ func TestPostgres_DeleteSessionsForUserExcept_LeavesOtherUsersAlone(t *testing.T
 		t.Errorf("the other user's session count = %d, want 1 (must survive)", got)
 	}
 }
+
+func TestPostgres_DeleteUser(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "delete-account@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	if err := repo.DeleteUser(context.Background(), u.ID); err != nil {
+		t.Fatalf("DeleteUser() unexpected error: %v", err)
+	}
+
+	if _, err := repo.FindUserByID(context.Background(), u.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("FindUserByID() after DeleteUser() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPostgres_DeleteUser_NotFound(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+
+	id, err := newID()
+	if err != nil {
+		t.Fatalf("generate user id: %v", err)
+	}
+
+	err = repo.DeleteUser(context.Background(), id)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeleteUser() on an unknown id error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestPostgres_DeleteUser_RefusedWhileTasksExist proves the safety net
+// Repository.DeleteUser's own doc comment describes: tasks.user_id has
+// no ON DELETE CASCADE (see 0004_add_user_id_to_tasks.up.sql), so
+// PostgreSQL itself refuses to delete a user who still owns a task
+// rather than silently cascading it or leaving an orphaned row. This is
+// the condition a cascade-ordering bug in cmd/api's AccountCascadeFunc
+// would trip — deliberately never mapped to ErrNotFound or any other
+// sentinel Service.DeleteAccount's contract names, since a caller
+// reaching this has a bug, not an expected outcome to handle gracefully.
+func TestPostgres_DeleteUser_RefusedWhileTasksExist(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "delete-account-with-tasks@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	taskID, err := newID()
+	if err != nil {
+		t.Fatalf("generate task id: %v", err)
+	}
+	const insertTask = `INSERT INTO tasks (id, title, user_id) VALUES ($1::uuid, 'a task', $2::uuid)`
+	if _, err := repo.db.ExecContext(context.Background(), insertTask, taskID, u.ID); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+
+	err = repo.DeleteUser(context.Background(), u.ID)
+	if err == nil {
+		t.Fatal("DeleteUser() with a task still referencing this user: want an error, got nil")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("DeleteUser() with a task still referencing this user: error = %v, want something other than ErrNotFound (this is a foreign key violation, not a missing row)", err)
+	}
+
+	if _, err := repo.FindUserByID(context.Background(), u.ID); err != nil {
+		t.Errorf("FindUserByID() after a refused DeleteUser(): error = %v, want nil (the user must still exist)", err)
+	}
+}

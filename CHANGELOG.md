@@ -18,6 +18,13 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   `POST /v1/auth/logout-all`, que derruba todas, inclusive a chamadora.
   `401` para senha atual errada, sem distinguir de qualquer outra causa
   de credencial inválida.
+- `DELETE /v1/auth/me` (issue #197) — exclui a própria conta. Imediata,
+  sem carência (decisão registrada em `docs/DECISIONS.md` § "Exclusão de
+  conta"): sessões, tasks e anexos (bytes no `BlobStore` **e** as linhas
+  de metadado, não só uma das duas) somem na mesma requisição, junto com
+  o próprio usuário. Exige a senha atual no corpo, mesma razão de
+  `POST /v1/auth/password` — uma sessão sequestrada não deve conseguir
+  destruir a conta sozinha.
 
 ## [1.5.0] — a definir na tag
 

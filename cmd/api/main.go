@@ -275,6 +275,52 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	taskSvc := task.NewService(taskRepo)
 	userSvc := user.NewService(userRepo, cfg.AuthSessionTTL, cfg.AuthMaxSessionsPerUser)
 
+	// attachmentSvc is set below, inside the `if attachmentsEnabled(cfg)`
+	// block — but deleteAccountCascade (built now, for userHandler) has
+	// to close over the same variable rather than a value copied at this
+	// point, since it isn't known yet whether attachments are even on.
+	// The closure only ever runs once the server is already handling
+	// requests, well after that block has run, so by the time it reads
+	// attachmentSvc the assignment (a plain `=`, not `:=` — shadowing it
+	// inside the if-block would defeat this entirely) has already
+	// happened.
+	var attachmentSvc *attachment.Service
+
+	// deleteAccountCascade is user.AccountCascadeFunc's implementation:
+	// the composition-root seam that lets Handler.deleteAccount reach
+	// every task and attachment belonging to an account without
+	// internal/user ever importing internal/task or internal/attachment
+	// (see CLAUDE.md's layering, and AccountCascadeFunc's own doc
+	// comment). Deletes each attachment through attachment.Service.Delete
+	// — the same row-then-blob, best-effort-blob order DELETE
+	// /v1/files/{key} already uses and docs/DECISIONS.md's "Delete de
+	// anexo" section already decided — rather than inventing a second
+	// order for this one cascade path.
+	deleteAccountCascade := func(ctx context.Context, userID string) error {
+		const noLimit = -1
+		tasks, err := taskSvc.ListTasks(ctx, userID, noLimit, 0, nil, nil)
+		if err != nil {
+			return fmt.Errorf("delete account cascade: list tasks: %w", err)
+		}
+		for _, t := range tasks {
+			if attachmentSvc != nil {
+				atts, err := attachmentSvc.ListByTask(ctx, userID, t.ID)
+				if err != nil {
+					return fmt.Errorf("delete account cascade: list attachments for task %s: %w", t.ID, err)
+				}
+				for _, a := range atts {
+					if err := attachmentSvc.Delete(ctx, userID, a.StorageKey); err != nil {
+						return fmt.Errorf("delete account cascade: delete attachment %s: %w", a.StorageKey, err)
+					}
+				}
+			}
+			if err := taskSvc.DeleteTask(ctx, userID, t.ID); err != nil {
+				return fmt.Errorf("delete account cascade: delete task %s: %w", t.ID, err)
+			}
+		}
+		return nil
+	}
+
 	// csrfProtector is built here, in the composition root, the same
 	// reason ratelimit/secureheaders are (see CLAUDE.md § "Composition
 	// root"). CSRF_SECRET is intentionally not validated in
@@ -311,7 +357,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	}
 
 	taskHandler := task.NewHandler(taskSvc, logger)
-	userHandler := user.NewHandler(userSvc, logger, cfg.CookieInsecure, csrfProtector, attachmentsEnabled(cfg))
+	userHandler := user.NewHandler(userSvc, logger, cfg.CookieInsecure, csrfProtector, attachmentsEnabled(cfg), deleteAccountCascade)
 	requireAuth := user.RequireAuth(userSvc, logger)
 
 	// Three rate-limit tiers, each answering a threat the others cannot.
@@ -462,7 +508,11 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 			attachmentRepo = attachment.NewPostgresRepository(db)
 		}
 
-		attachmentSvc := attachment.NewService(attachmentRepo, blobs, cfg.AttachmentMaxBytes, cfg.AttachmentMaxBytesPerUser)
+		// = , not := : this must assign to the attachmentSvc declared
+		// above deleteAccountCascade's closure, not shadow it with a new
+		// variable scoped to this if-block — see that declaration's own
+		// doc comment.
+		attachmentSvc = attachment.NewService(attachmentRepo, blobs, cfg.AttachmentMaxBytes, cfg.AttachmentMaxBytesPerUser)
 		attachment.NewHandler(attachmentSvc, logger, cfg.AttachmentMaxBytes).RegisterRoutes(v1, authenticated)
 		collectOrphans = func(ctx context.Context) (int, error) {
 			return attachmentSvc.CollectOrphans(ctx, cfg.AttachmentOrphanMinAge)

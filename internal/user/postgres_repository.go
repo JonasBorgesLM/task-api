@@ -107,6 +107,35 @@ func (r *postgresRepository) UpdateUserPassword(ctx context.Context, id, passwor
 	return nil
 }
 
+// DeleteUser removes the user row itself. Returns ErrNotFound if no user
+// with that id exists.
+//
+// tasks.user_id references users(id) with no ON DELETE CASCADE (see
+// 0004_add_user_id_to_tasks.up.sql's own comment) — deliberately, unlike
+// sessions.user_id. If any task still references id, PostgreSQL itself
+// refuses this DELETE with a foreign key violation rather than either
+// cascading it (which would leave attachment blobs orphaned with nothing
+// left to reach them through) or silently succeeding with an orphaned
+// task row. That surfaces here as a wrapped, non-sentinel error — a
+// caller reaching this with tasks still in place has a cascade-ordering
+// bug, not a condition Service.DeleteAccount's contract is meant to
+// paper over.
+func (r *postgresRepository) DeleteUser(ctx context.Context, id string) error {
+	const query = `DELETE FROM users WHERE id = $1::uuid`
+	result, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("postgres: delete user: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("postgres: delete user: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // CreateSession persists a new session.
 // CreateSession inserts s and evicts s.UserID's oldest sessions past
 // maxSessions. The DELETE's subquery orders by created_at DESC and keeps

@@ -175,16 +175,8 @@ func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, n
 		return err
 	}
 
-	u, err := s.repo.FindUserByID(ctx, userID)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return ErrInvalidCredentials
-		}
-		return fmt.Errorf("change password: %w", err)
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(currentPassword)); err != nil {
-		return ErrInvalidCredentials
+	if err := s.verifyPassword(ctx, userID, currentPassword); err != nil {
+		return err
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
@@ -205,6 +197,64 @@ func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, n
 		return fmt.Errorf("change password: revoke other sessions: %w", err)
 	}
 
+	return nil
+}
+
+// verifyPassword confirms password matches userID's stored hash, without
+// changing anything. Returns ErrInvalidCredentials for either a wrong
+// password or (essentially unreachable in practice) userID no longer
+// existing — the same non-distinguishing discipline Authenticate follows
+// for its own ErrNotFound branch. Shared by ChangePassword and
+// VerifyPassword, the two callers that both need to confirm the caller
+// still knows the account's password before something significant
+// happens.
+func (s *Service) verifyPassword(ctx context.Context, userID, password string) error {
+	u, err := s.repo.FindUserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return ErrInvalidCredentials
+		}
+		return fmt.Errorf("verify password: %w", err)
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
+		return ErrInvalidCredentials
+	}
+	return nil
+}
+
+// VerifyPassword confirms password matches userID's stored hash. Used by
+// Handler.deleteAccount before it runs the cross-domain cascade (every
+// task and attachment belonging to the account) that this package
+// cannot reach itself (see CLAUDE.md's layering, and
+// AccountCascadeFunc's doc comment) — proving the caller still knows the
+// password has to happen before anything irreversible does, not folded
+// into DeleteAccount itself, which runs only after that cascade already
+// succeeded.
+func (s *Service) VerifyPassword(ctx context.Context, userID, password string) error {
+	return s.verifyPassword(ctx, userID, password)
+}
+
+// DeleteAccount deletes every session belonging to userID and the
+// account itself. Callers must have already removed everything else the
+// account owns (tasks, attachments — rows and bytes) and verified the
+// caller's password (see VerifyPassword) — this method does neither: the
+// former lives outside what this package can reach at all, and the
+// latter has already been proven true by the time this runs.
+//
+// Sessions are deleted explicitly, not left to sessions.user_id's own
+// ON DELETE CASCADE: memoryRepository has no such cascade to rely on
+// (see its own doc comment), so the two backends would otherwise
+// disagree about whether a session outlives its user for even an
+// instant. The user row goes last — after every task, or PostgreSQL's
+// FK on tasks.user_id refuses this same call (see Repository.DeleteUser).
+func (s *Service) DeleteAccount(ctx context.Context, userID string) error {
+	if err := s.repo.DeleteSessionsForUser(ctx, userID); err != nil {
+		return fmt.Errorf("delete account: revoke sessions: %w", err)
+	}
+	if err := s.repo.DeleteUser(ctx, userID); err != nil {
+		return fmt.Errorf("delete account: %w", err)
+	}
 	return nil
 }
 
