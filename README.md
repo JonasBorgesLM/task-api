@@ -286,5 +286,6 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — project structure, the reasoning behind every non-obvious design decision (session tokens, ownership model, status transitions, and more), and what's deliberately deferred.
 - **[docs/DECISIONS.md](docs/DECISIONS.md)** — the decisions a future change could undo without noticing, stated as decisions rather than as descriptions: why auth is a header and not a cookie, why attachment bytes are written before their metadata row, why the content-type allow-list ignores what the client declared, and the deploy topology the rate limiter's design assumes. Read it before implementing a backlog issue; if an issue seems to contradict it, ask rather than choose.
 - **[docs/openapi.yaml](docs/openapi.yaml)** — the full API contract.
+- **[docs/RUNBOOK-BACKUP-RESTORE.md](docs/RUNBOOK-BACKUP-RESTORE.md)** — backing up and restoring Postgres *and* attachment storage together (a backup of only one restores rows pointing at missing files, or vice versa), tested end to end, not just written.
 - **[CLAUDE.md](CLAUDE.md)** — conventions and rules for anyone (human or agent) changing this codebase.
 - **[web/README.md](web/README.md)** — the SPA frontend (Vite + React + TypeScript); versioned and released with the rest of this repo, not separately.
