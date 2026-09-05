@@ -612,6 +612,20 @@ export interface components {
              */
             error: string;
         };
+        /** @description ErrorResponse plus a machine-readable discriminator, used only by PATCH /tasks/{id}/status's 409 (issue #153) — no other response in this API carries `reason`. */
+        TransitionConflictResponse: {
+            /**
+             * @description Human-readable error message. Never contains internal details.
+             * @example invalid status transition: cannot move from "cancelled" to "done"
+             */
+            error: string;
+            /**
+             * @description Which of the two conditions this 409 means — see this response's own description for what each one is.
+             * @example invalid_transition
+             * @enum {string}
+             */
+            reason: "invalid_transition" | "concurrency";
+        };
     };
     responses: {
         /** @description Missing, malformed, or invalid/expired `Authorization: Bearer` header. */
@@ -1480,14 +1494,14 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            /** @description Either an optimistic concurrency conflict (see PUT /tasks/{id}'s 409), or the requested transition is not legal from the task's current status (e.g. `cancelled` → `done`) — distinguishable by the error message, both map to 409 since both mean "this request conflicts with the resource's current state." */
+            /** @description Either an optimistic concurrency conflict (see PUT /tasks/{id}'s 409), or the requested transition is not legal from the task's current status (e.g. `cancelled` → `done`) — both mean "this request conflicts with the resource's current state," so both map to 409. Unlike PUT /tasks/{id}'s 409 (concurrency only — no transition-legality ambiguity there), this route's body carries a machine-readable `reason` alongside the human-readable `error` (issue #153) — `"invalid_transition"` or `"concurrency"` — so a caller does not have to pattern-match the message text to tell the two conditions apart. */
             409: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["TransitionConflictResponse"];
                 };
             };
             429: components["responses"]["TooManyRequests"];

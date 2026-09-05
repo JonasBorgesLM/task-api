@@ -25,6 +25,13 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   o próprio usuário. Exige a senha atual no corpo, mesma razão de
   `POST /v1/auth/password` — uma sessão sequestrada não deve conseguir
   destruir a conta sozinha.
+- `PATCH /v1/tasks/{id}/status`'s `409` ganha um campo `reason`
+  (`"invalid_transition"` ou `"concurrency"`, issue #153) — aditivo,
+  quem já lia só `error` continua funcionando. Antes, distinguir uma
+  transição ilegal de um conflito de concorrência exigia casar texto na
+  mensagem; agora é um campo dedicado. Escopo deliberadamente restrito a
+  esta rota — `PUT /tasks/{id}`'s `409` (só concorrência, sem
+  ambiguidade de transição) não ganhou o campo.
 
 ## [1.5.0] — a definir na tag
 

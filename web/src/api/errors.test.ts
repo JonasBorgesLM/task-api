@@ -44,30 +44,41 @@ describe('classifyError', () => {
     expect(result).toEqual({ requestId: null, kind: 'not_found' })
   })
 
-  it('409 with "invalid status transition" → conflict/invalid_transition', async () => {
+  // issue #153: PATCH /tasks/{id}/status's 409 carries a machine-readable
+  // "reason" field (docs/openapi.yaml's TransitionConflictResponse) —
+  // classifyError reads that directly rather than pattern-matching the
+  // human-readable message, which used to be the only way to tell the
+  // two conditions apart and broke the moment either message's wording
+  // changed for an unrelated reason (a typo fix, a clarity pass).
+  it('409 with reason "invalid_transition" → conflict/invalid_transition', async () => {
     const message = 'invalid status transition: cannot move from "cancelled" to "done"'
-    const result = await classifyError(jsonResponse(409, { error: message }))
+    const result = await classifyError(jsonResponse(409, { error: message, reason: 'invalid_transition' }))
     expect(result).toEqual({ requestId: null, kind: 'conflict', reason: 'invalid_transition', message })
   })
 
-  it('409 with "modified concurrently" → conflict/concurrency', async () => {
+  it('409 with reason "concurrency" → conflict/concurrency', async () => {
     const message = 'task was modified concurrently, please retry'
-    const result = await classifyError(jsonResponse(409, { error: message }))
+    const result = await classifyError(jsonResponse(409, { error: message, reason: 'concurrency' }))
     expect(result).toEqual({ requestId: null, kind: 'conflict', reason: 'concurrency', message })
   })
 
-  it('409 with the /done-specific prefix still matches invalid_transition', async () => {
-    // PATCH /tasks/{id}/done prefixes the same underlying message with
-    // "complete task: " — see docs/openapi.yaml:898. A reason classifier
-    // that only worked for the /status wording would silently misclassify
-    // every transition conflict raised through /done.
-    const message = 'complete task: invalid status transition: cannot move from "cancelled" to "done"'
+  // PUT /tasks/{id}'s own 409 deliberately never got this field (see
+  // issue #153's "Não faz" — no transition-legality ambiguity there to
+  // begin with) — its body is message-only, same as every other error
+  // response in this API. A body without "reason" must classify as
+  // 'unknown' regardless of what the message text happens to say, not
+  // fall back to guessing from it — that guesswork is exactly what this
+  // issue replaced.
+  it('409 with no reason field → conflict/unknown, even when the message text looks like a transition conflict', async () => {
+    const message = 'invalid status transition: cannot move from "cancelled" to "done"'
     const result = await classifyError(jsonResponse(409, { error: message }))
-    expect(result).toEqual({ requestId: null, kind: 'conflict', reason: 'invalid_transition', message })
+    expect(result).toEqual({ requestId: null, kind: 'conflict', reason: 'unknown', message })
   })
 
-  it('409 with an unrecognized message → conflict/unknown, not a thrown error', async () => {
-    const result = await classifyError(jsonResponse(409, { error: 'something new the API added later' }))
+  it('409 with an unrecognized reason value → conflict/unknown, not a thrown error', async () => {
+    const result = await classifyError(
+      jsonResponse(409, { error: 'something new the API added later', reason: 'something_new' }),
+    )
     expect(result).toEqual({
       requestId: null,
       kind: 'conflict',
