@@ -80,6 +80,8 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 
 `config.Load()` returns an error (and the process refuses to start) if a timeout/TTL/max-age isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
+With `CRIER_OTLP_ENDPOINT` set, `make signoz-dashboard` provisions the SigNoz dashboard [crier](https://github.com/JonasBorgesLM/crier) ships for exactly this log shape — needs `SIGNOZ_API_KEY_FILE` pointing at a SigNoz API key; see `docs/DECISIONS.md`.
+
 ## Running Locally
 
 ```bash
@@ -226,9 +228,11 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 |---|---|---|---|
 | `POST` | `/v1/auth/register` | — | Create a user account |
 | `POST` | `/v1/auth/login` | — | Authenticate, receive a bearer session token |
+| `POST` | `/v1/auth/password` | required | Change the caller's own password, revoking every other session |
 | `POST` | `/v1/auth/logout` | required | Invalidate the current session token |
 | `POST` | `/v1/auth/logout-all` | required | Invalidate every session for the account, including the one making the call |
 | `GET` | `/v1/auth/me` | required | Get the authenticated user |
+| `DELETE` | `/v1/auth/me` | required | Permanently delete the account — sessions, tasks, attachments, immediately, no grace period |
 | `POST` | `/v1/tasks` | required | Create a task |
 | `GET` | `/v1/tasks` | required | List the caller's tasks, oldest first (`?limit=`, `?offset=`, `?status=`, `?priority=`; `status`/`priority` may repeat, e.g. `?status=pending&status=done`, matching any of the given values) |
 | `GET` | `/v1/tasks/{id}` | required | Get a task by ID |
@@ -282,5 +286,6 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — project structure, the reasoning behind every non-obvious design decision (session tokens, ownership model, status transitions, and more), and what's deliberately deferred.
 - **[docs/DECISIONS.md](docs/DECISIONS.md)** — the decisions a future change could undo without noticing, stated as decisions rather than as descriptions: why auth is a header and not a cookie, why attachment bytes are written before their metadata row, why the content-type allow-list ignores what the client declared, and the deploy topology the rate limiter's design assumes. Read it before implementing a backlog issue; if an issue seems to contradict it, ask rather than choose.
 - **[docs/openapi.yaml](docs/openapi.yaml)** — the full API contract.
+- **[docs/RUNBOOK-BACKUP-RESTORE.md](docs/RUNBOOK-BACKUP-RESTORE.md)** — backing up and restoring Postgres *and* attachment storage together (a backup of only one restores rows pointing at missing files, or vice versa), tested end to end, not just written.
 - **[CLAUDE.md](CLAUDE.md)** — conventions and rules for anyone (human or agent) changing this codebase.
 - **[web/README.md](web/README.md)** — the SPA frontend (Vite + React + TypeScript); versioned and released with the rest of this repo, not separately.

@@ -491,3 +491,177 @@ func TestPostgres_DeleteSessionsForUser_LeavesOtherUsersAlone(t *testing.T) {
 		t.Errorf("the other user's session count = %d, want 1 (must survive)", got)
 	}
 }
+
+func TestPostgres_UpdateUserPassword(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "change-password@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	if err := repo.UpdateUserPassword(context.Background(), u.ID, "a-new-hash"); err != nil {
+		t.Fatalf("UpdateUserPassword() unexpected error: %v", err)
+	}
+
+	got, err := repo.FindUserByID(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("FindUserByID() unexpected error: %v", err)
+	}
+	if got.PasswordHash != "a-new-hash" {
+		t.Errorf("PasswordHash after UpdateUserPassword() = %q, want %q", got.PasswordHash, "a-new-hash")
+	}
+	if !got.UpdatedAt.After(u.UpdatedAt) {
+		t.Errorf("UpdatedAt after UpdateUserPassword() = %v, want it advanced past the original %v", got.UpdatedAt, u.UpdatedAt)
+	}
+}
+
+func TestPostgres_UpdateUserPassword_NotFound(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+
+	id, err := newID()
+	if err != nil {
+		t.Fatalf("generate user id: %v", err)
+	}
+
+	err = repo.UpdateUserPassword(context.Background(), id, "a-new-hash")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("UpdateUserPassword() on an unknown id error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestPostgres_DeleteSessionsForUserExcept_KeepsOnlyGivenSession is the
+// Service.ChangePassword half TestPostgres_DeleteSessionsForUser_RemovesAll
+// deliberately doesn't cover: unlike LogoutAll, changing a password must
+// not also sign out the session that made the call.
+func TestPostgres_DeleteSessionsForUserExcept_KeepsOnlyGivenSession(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "change-password-sessions@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	for _, hash := range []string{"a", "b", "c"} {
+		s := Session{TokenHash: hash, UserID: u.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now}
+		if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
+			t.Fatalf("CreateSession(%s) unexpected error: %v", hash, err)
+		}
+	}
+
+	if err := repo.DeleteSessionsForUserExcept(context.Background(), u.ID, "b"); err != nil {
+		t.Fatalf("DeleteSessionsForUserExcept() unexpected error: %v", err)
+	}
+
+	if got := countSessions(t, repo.db, u.ID); got != 1 {
+		t.Errorf("session count after DeleteSessionsForUserExcept() = %d, want 1", got)
+	}
+	if _, err := repo.FindSessionByTokenHash(context.Background(), "b"); err != nil {
+		t.Errorf("FindSessionByTokenHash(\"b\") after DeleteSessionsForUserExcept(keep=\"b\") error = %v, want nil (the kept session must survive)", err)
+	}
+	for _, hash := range []string{"a", "c"} {
+		if _, err := repo.FindSessionByTokenHash(context.Background(), hash); !errors.Is(err, ErrNotFound) {
+			t.Errorf("FindSessionByTokenHash(%q) after DeleteSessionsForUserExcept(keep=\"b\") error = %v, want ErrNotFound", hash, err)
+		}
+	}
+}
+
+func TestPostgres_DeleteSessionsForUserExcept_LeavesOtherUsersAlone(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	mine := newPostgresTestUser(t, "mine-except@example.com")
+	theirs := newPostgresTestUser(t, "theirs-except@example.com")
+	if err := repo.CreateUser(context.Background(), mine); err != nil {
+		t.Fatalf("CreateUser(mine) unexpected error: %v", err)
+	}
+	if err := repo.CreateUser(context.Background(), theirs); err != nil {
+		t.Fatalf("CreateUser(theirs) unexpected error: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if err := repo.CreateSession(context.Background(), Session{TokenHash: "mine-token", UserID: mine.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now}, unlimitedSessions); err != nil {
+		t.Fatalf("CreateSession(mine) unexpected error: %v", err)
+	}
+	if err := repo.CreateSession(context.Background(), Session{TokenHash: "their-token", UserID: theirs.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now}, unlimitedSessions); err != nil {
+		t.Fatalf("CreateSession(theirs) unexpected error: %v", err)
+	}
+
+	// keepTokenHash matches nothing of mine's — every one of mine's
+	// sessions should still go, and theirs must be untouched regardless.
+	if err := repo.DeleteSessionsForUserExcept(context.Background(), mine.ID, "not-a-real-hash"); err != nil {
+		t.Fatalf("DeleteSessionsForUserExcept() unexpected error: %v", err)
+	}
+
+	if got := countSessions(t, repo.db, mine.ID); got != 0 {
+		t.Errorf("mine's session count = %d, want 0", got)
+	}
+	if got := countSessions(t, repo.db, theirs.ID); got != 1 {
+		t.Errorf("the other user's session count = %d, want 1 (must survive)", got)
+	}
+}
+
+func TestPostgres_DeleteUser(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "delete-account@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	if err := repo.DeleteUser(context.Background(), u.ID); err != nil {
+		t.Fatalf("DeleteUser() unexpected error: %v", err)
+	}
+
+	if _, err := repo.FindUserByID(context.Background(), u.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("FindUserByID() after DeleteUser() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPostgres_DeleteUser_NotFound(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+
+	id, err := newID()
+	if err != nil {
+		t.Fatalf("generate user id: %v", err)
+	}
+
+	err = repo.DeleteUser(context.Background(), id)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeleteUser() on an unknown id error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestPostgres_DeleteUser_RefusedWhileTasksExist proves the safety net
+// Repository.DeleteUser's own doc comment describes: tasks.user_id has
+// no ON DELETE CASCADE (see 0004_add_user_id_to_tasks.up.sql), so
+// PostgreSQL itself refuses to delete a user who still owns a task
+// rather than silently cascading it or leaving an orphaned row. This is
+// the condition a cascade-ordering bug in cmd/api's AccountCascadeFunc
+// would trip — deliberately never mapped to ErrNotFound or any other
+// sentinel Service.DeleteAccount's contract names, since a caller
+// reaching this has a bug, not an expected outcome to handle gracefully.
+func TestPostgres_DeleteUser_RefusedWhileTasksExist(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "delete-account-with-tasks@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	taskID, err := newID()
+	if err != nil {
+		t.Fatalf("generate task id: %v", err)
+	}
+	const insertTask = `INSERT INTO tasks (id, title, user_id) VALUES ($1::uuid, 'a task', $2::uuid)`
+	if _, err := repo.db.ExecContext(context.Background(), insertTask, taskID, u.ID); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+
+	err = repo.DeleteUser(context.Background(), u.ID)
+	if err == nil {
+		t.Fatal("DeleteUser() with a task still referencing this user: want an error, got nil")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("DeleteUser() with a task still referencing this user: error = %v, want something other than ErrNotFound (this is a foreign key violation, not a missing row)", err)
+	}
+
+	if _, err := repo.FindUserByID(context.Background(), u.ID); err != nil {
+		t.Errorf("FindUserByID() after a refused DeleteUser(): error = %v, want nil (the user must still exist)", err)
+	}
+}

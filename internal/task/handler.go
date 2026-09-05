@@ -241,7 +241,7 @@ func (h *Handler) transitionStatus(w http.ResponseWriter, r *http.Request) {
 
 	task, err := h.svc.TransitionStatus(r.Context(), userID, id, Status(req.Status))
 	if err != nil {
-		h.handleServiceError(w, r, err)
+		h.handleTransitionStatusError(w, r, err)
 		return
 	}
 
@@ -298,6 +298,29 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, r *http.Request, err
 	}
 }
 
+// handleTransitionStatusError is handleServiceError plus a machine-readable
+// "reason" discriminator (see errorResponse) on this route's two 409
+// conditions — see docs/openapi.yaml's 409 response for PATCH
+// /tasks/{id}/status, and issue #153.
+//
+// Added only here, not to handleServiceError itself, deliberately:
+// PUT /tasks/{id}'s own 409 has no transition-legality ambiguity to
+// begin with (concurrency is the only condition it can report), so it
+// keeps its existing wire shape — {"error": "..."} with no reason —
+// unless a similar need shows up for it independently. Everything other
+// than the two 409 cases below is unchanged, delegated straight to
+// handleServiceError.
+func (h *Handler) handleTransitionStatusError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, ErrConflict):
+		h.writeErrorWithReason(w, r, http.StatusConflict, "task was modified concurrently, please retry", "concurrency")
+	case errors.Is(err, ErrInvalidTransition):
+		h.writeErrorWithReason(w, r, http.StatusConflict, err.Error(), "invalid_transition")
+	default:
+		h.handleServiceError(w, r, err)
+	}
+}
+
 // writeJSON sets Content-Type, writes the status code and encodes data as JSON.
 func (h *Handler) writeJSON(w http.ResponseWriter, r *http.Request, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -313,7 +336,23 @@ func (h *Handler) writeJSON(w http.ResponseWriter, r *http.Request, status int, 
 	}
 }
 
+// errorResponse is writeError/writeErrorWithReason's JSON body. Reason
+// is new (issue #153) and omitempty: every response but the two
+// handleTransitionStatusError writes it for carries only "error", the
+// same shape this API has always sent.
+type errorResponse struct {
+	Error  string `json:"error"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // writeError writes a JSON error envelope: {"error": "message"}.
 func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, status int, message string) {
-	h.writeJSON(w, r, status, map[string]string{"error": message})
+	h.writeJSON(w, r, status, errorResponse{Error: message})
+}
+
+// writeErrorWithReason is writeError plus a machine-readable "reason"
+// field alongside the existing human-readable message — see
+// handleTransitionStatusError, the only caller.
+func (h *Handler) writeErrorWithReason(w http.ResponseWriter, r *http.Request, status int, message, reason string) {
+	h.writeJSON(w, r, status, errorResponse{Error: message, Reason: reason})
 }

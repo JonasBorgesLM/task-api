@@ -33,6 +33,21 @@ const crierServiceName = "task-api"
 // shutdown against.
 const crierShutdownTimeout = 5 * time.Second
 
+// crierHealthCheckMinSeverity raises the effective threshold for
+// internal/middleware/logging.go's "http request" line on /health and
+// /health/ready to Error, via the AttributeRule below. Liveness/readiness
+// probes hit these routes on a short interval and normally return 200 —
+// exactly the health-check noise ADR-0022 (crier's attribute-matched
+// sampling) exists to narrow for a single-source app like this one.
+//
+// A real failure still gets through: this codebase's Logging middleware
+// only raises the log level to Error for a 5xx response (see its
+// doc comment), so a genuinely unready backend is never silenced by this
+// rule — only the routine 200s are. It narrows only crier's mirrored
+// copy; the primary stdout log is untouched (Filter runs inside crier's
+// own pipeline, never the wrapped slog.Handler).
+var crierHealthCheckMinSeverity = core.SeverityError
+
 // currentCrierMetrics is what the /debug/vars entries published by
 // publishCrierExpvarOnce read from. A package-level atomic pointer rather
 // than a value closed over by buildCrier's own caller: expvar.Publish
@@ -131,9 +146,25 @@ func buildCrier(cfg config.Config) (*core.Crier, error) {
 
 	metrics := &core.CountingMetrics{}
 	c, err := core.New(core.Options{
-		ServiceName: crierServiceName,
-		Exporters:   map[string]core.Exporter{"otlp": exporter},
-		Metrics:     metrics,
+		ServiceName:    crierServiceName,
+		ServiceVersion: version,
+		Exporters:      map[string]core.Exporter{"otlp": exporter},
+		Metrics:        metrics,
+		// Zero-value guard: caps any attribute key past 1000 distinct
+		// values in a 10-minute window. internal/middleware/logging.go
+		// logs the raw URL path, and every task ID or file storage key
+		// ever created makes "path" an unbounded-cardinality attribute
+		// without this (issue #205).
+		Cardinality: &core.CardinalityGuard{},
+		Filter: &core.Filter{
+			Rules: []core.AttributeRule{
+				{
+					Key:         "path",
+					ValuePrefix: "/health",
+					MinSeverity: &crierHealthCheckMinSeverity,
+				},
+			},
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("crier: %w", err)

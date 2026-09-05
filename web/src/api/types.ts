@@ -66,6 +66,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Change the caller's own password
+         * @description Requires the current password — an authenticated session alone is not enough, so a hijacked-but-live session cannot rotate the credential on its own. On success, replaces the stored password hash and revokes every *other* session belonging to the account, keeping only the one that made this call alive: rotating the credential should not also sign the caller out.
+         */
+        post: operations["changePassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/logout": {
         parameters: {
             query?: never;
@@ -120,7 +140,13 @@ export interface paths {
         get: operations["getMe"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Permanently delete the caller's own account
+         * @description Deletes everything belonging to the authenticated account, immediately — every session, every task, every attachment (its stored bytes and its metadata row), and the account itself. There is no grace period and no way to undo this once the response comes back; see `docs/DECISIONS.md` § "Exclusão de conta" for that decision.
+         *
+         *     Requires the current password in the request body — an authenticated session alone is not enough, the same reasoning `POST /v1/auth/password` follows: a hijacked-but-live session must not be able to destroy the account on its own.
+         */
+        delete: operations["deleteAccount"];
         options?: never;
         head?: never;
         patch?: never;
@@ -409,6 +435,27 @@ export interface components {
             /** @example correct horse battery staple */
             password: string;
         };
+        /** @description Accepted body for POST /auth/password. */
+        ChangePasswordRequest: {
+            /**
+             * @description The account's current password. Required — see the operation's own description.
+             * @example correct horse battery staple
+             */
+            current_password: string;
+            /**
+             * @description Required, 8–72 characters — the same bounds RegisterRequest's password enforces, for the same bcrypt-input-limit reason.
+             * @example another correct horse battery staple
+             */
+            new_password: string;
+        };
+        /** @description Accepted body for DELETE /auth/me. */
+        DeleteAccountRequest: {
+            /**
+             * @description The account's current password. Required — see the operation's own description.
+             * @example correct horse battery staple
+             */
+            current_password: string;
+        };
         /** @description Body returned by a successful POST /auth/login. */
         LoginResponse: {
             /**
@@ -564,6 +611,20 @@ export interface components {
              * @example task not found
              */
             error: string;
+        };
+        /** @description ErrorResponse plus a machine-readable discriminator, used only by PATCH /tasks/{id}/status's 409 (issue #153) — no other response in this API carries `reason`. */
+        TransitionConflictResponse: {
+            /**
+             * @description Human-readable error message. Never contains internal details.
+             * @example invalid status transition: cannot move from "cancelled" to "done"
+             */
+            error: string;
+            /**
+             * @description Which of the two conditions this 409 means — see this response's own description for what each one is.
+             * @example invalid_transition
+             * @enum {string}
+             */
+            reason: "invalid_transition" | "concurrency";
         };
     };
     responses: {
@@ -865,6 +926,73 @@ export interface operations {
             500: components["responses"]["InternalServerError"];
         };
     };
+    changePassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Request bodies larger than 1 MiB are rejected, surfacing as the same 400 "invalid request body" response as malformed JSON. */
+        requestBody: {
+            content: {
+                /**
+                 * @example {
+                 *       "current_password": "correct horse battery staple",
+                 *       "new_password": "another correct horse battery staple"
+                 *     }
+                 */
+                "application/json": components["schemas"]["ChangePasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description Password changed. Every other session was revoked. */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /** @example {} */
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description Malformed JSON body, or a `new_password` shorter than 8 or longer than 72 characters (bcrypt's own input limit). */
+            400: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "invalid input: password must be at least 8 characters"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing/expired/malformed bearer token, or `current_password` does not match the account's stored password — deliberately the same response either way. */
+            401: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "invalid email or password"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
     logout: {
         parameters: {
             query?: never;
@@ -933,7 +1061,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
-            /** @description The token authenticated successfully but its owning user no longer exists. Only reachable if the account was removed out of band (direct SQL, `cmd/seed -reset`) between the session lookup and this read — this API exposes no endpoint that deletes a user, and deleting one normally cascades its sessions away, which would produce a 401 instead. */
+            /** @description The token authenticated successfully but its owning user no longer exists. Essentially unreachable in practice: deleting an account (`DELETE /v1/auth/me`) removes its sessions in the same operation, which would produce a `401` here instead — this would need the account removed out of band (direct SQL, `cmd/seed -reset`) between the session lookup and this read. */
             404: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
@@ -948,6 +1076,69 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    deleteAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Request bodies larger than 1 MiB are rejected, surfacing as the same 400 "invalid request body" response as malformed JSON. */
+        requestBody: {
+            content: {
+                /**
+                 * @example {
+                 *       "current_password": "correct horse battery staple"
+                 *     }
+                 */
+                "application/json": components["schemas"]["DeleteAccountRequest"];
+            };
+        };
+        responses: {
+            /** @description Account deleted. No response body. The session cookie, if any, is cleared the same way logout's is. */
+            204: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Malformed JSON body. */
+            400: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "invalid request body"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing/expired/malformed bearer token, or `current_password` does not match the account's stored password — deliberately the same response either way. */
+            401: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "invalid email or password"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalServerError"];
             503: components["responses"]["ServiceUnavailable"];
@@ -1303,14 +1494,14 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            /** @description Either an optimistic concurrency conflict (see PUT /tasks/{id}'s 409), or the requested transition is not legal from the task's current status (e.g. `cancelled` → `done`) — distinguishable by the error message, both map to 409 since both mean "this request conflicts with the resource's current state." */
+            /** @description Either an optimistic concurrency conflict (see PUT /tasks/{id}'s 409), or the requested transition is not legal from the task's current status (e.g. `cancelled` → `done`) — both mean "this request conflicts with the resource's current state," so both map to 409. Unlike PUT /tasks/{id}'s 409 (concurrency only — no transition-legality ambiguity there), this route's body carries a machine-readable `reason` alongside the human-readable `error` (issue #153) — `"invalid_transition"` or `"concurrency"` — so a caller does not have to pattern-match the message text to tell the two conditions apart. */
             409: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["TransitionConflictResponse"];
                 };
             };
             429: components["responses"]["TooManyRequests"];

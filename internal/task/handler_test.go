@@ -578,6 +578,61 @@ func TestTransitionStatus_Handler_InvalidTransition_Returns409(t *testing.T) {
 	if w.Code != http.StatusConflict {
 		t.Errorf("transitionStatus invalid transition status = %d, want %d", w.Code, http.StatusConflict)
 	}
+
+	var body errorResponse
+	decodeBody(t, w, &body)
+	if body.Reason != "invalid_transition" {
+		t.Errorf(`transitionStatus invalid transition body reason = %q, want "invalid_transition" (issue #153)`, body.Reason)
+	}
+}
+
+// TestTransitionStatus_Handler_Conflict_Returns409WithReason is
+// InvalidTransition's counterpart: the *other* condition this route's
+// 409 can mean (see handleTransitionStatusError) gets its own,
+// distinct reason, not the same one.
+func TestTransitionStatus_Handler_Conflict_Returns409WithReason(t *testing.T) {
+	svc := &fakeService{
+		transitionStatusFn: func(_, _ string, _ Status) (Task, error) {
+			return Task{}, ErrConflict
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(t, h.transitionStatus, http.MethodPatch, "/tasks/abc-123/status", `{"status":"done"}`)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("transitionStatus concurrency conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+
+	var body errorResponse
+	decodeBody(t, w, &body)
+	if body.Reason != "concurrency" {
+		t.Errorf(`transitionStatus concurrency conflict body reason = %q, want "concurrency"`, body.Reason)
+	}
+}
+
+// TestUpdateTask_Handler_Conflict_HasNoReason proves the deliberate
+// scope limit issue #153's own "Não faz" section states: PUT
+// /tasks/{id}'s 409 has no transition-legality ambiguity to begin with,
+// so it keeps its existing wire shape — no "reason" field — unlike
+// PATCH /status's.
+func TestUpdateTask_Handler_Conflict_HasNoReason(t *testing.T) {
+	svc := &fakeService{
+		updateTaskFn: func(_, _, _, _, _ string) (Task, error) { return Task{}, ErrConflict },
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(t, h.updateTask, http.MethodPut, "/tasks/abc-123", `{"title":"x"}`)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("updateTask conflict status = %d, want %d", w.Code, http.StatusConflict)
+	}
+
+	var raw map[string]any
+	decodeBody(t, w, &raw)
+	if _, present := raw["reason"]; present {
+		t.Errorf(`updateTask conflict body has a "reason" field = %v, want it absent — PUT never got this issue's change`, raw["reason"])
+	}
 }
 
 func TestTransitionStatus_Handler_InvalidJSON(t *testing.T) {

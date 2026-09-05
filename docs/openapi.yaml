@@ -59,7 +59,15 @@ info:
     would disable it behind the TLS-terminating proxy it exists for.
     `HSTS_MAX_AGE=0` is the opt-out. See docs/ARCHITECTURE.md's
     "Operational Behavior".
-  version: "2.3.0"
+  # Tracks the product's own release tag (see CHANGELOG.md), not a
+  # separate OpenAPI-document version — this project's actual contract
+  # versioning is the /v1 path mount (see the "Versioning" section
+  # below and .claude/rules/api-contract.md), not this field. Before
+  # this it had drifted for five releases (last touched in PR #139,
+  # 2026-08-29, months before v1.1.0 even existed) because nothing
+  # required bumping it. Bump it as part of every release from now on
+  # — see CLAUDE.md's "Keep documentation in sync".
+  version: "1.6.0"
   license:
     name: MIT
     url: https://github.com/JonasBorgesLM/task-api/blob/main/LICENSE
@@ -276,6 +284,78 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /v1/auth/password:
+    post:
+      tags: [Auth]
+      operationId: changePassword
+      summary: Change the caller's own password
+      description: >
+        Requires the current password — an authenticated session alone
+        is not enough, so a hijacked-but-live session cannot rotate the
+        credential on its own. On success, replaces the stored password
+        hash and revokes every *other* session belonging to the account,
+        keeping only the one that made this call alive: rotating the
+        credential should not also sign the caller out.
+      requestBody:
+        required: true
+        description: >
+          Request bodies larger than 1 MiB are rejected, surfacing as the
+          same 400 "invalid request body" response as malformed JSON.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+            example:
+              current_password: correct horse battery staple
+              new_password: another correct horse battery staple
+      responses:
+        '200':
+          description: Password changed. Every other session was revoked.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Empty object.
+              example: {}
+        '400':
+          description: >
+            Malformed JSON body, or a `new_password` shorter than 8 or
+            longer than 72 characters (bcrypt's own input limit).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "invalid input: password must be at least 8 characters"
+        '401':
+          description: >
+            Missing/expired/malformed bearer token, or `current_password`
+            does not match the account's stored password — deliberately
+            the same response either way.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: invalid email or password
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /v1/auth/logout:
     post:
       tags: [Auth]
@@ -368,11 +448,11 @@ paths:
         '404':
           description: >
             The token authenticated successfully but its owning user no
-            longer exists. Only reachable if the account was removed out
-            of band (direct SQL, `cmd/seed -reset`) between the session
-            lookup and this read — this API exposes no endpoint that
-            deletes a user, and deleting one normally cascades its
-            sessions away, which would produce a 401 instead.
+            longer exists. Essentially unreachable in practice: deleting
+            an account (`DELETE /v1/auth/me`) removes its sessions in the
+            same operation, which would produce a `401` here instead —
+            this would need the account removed out of band (direct SQL,
+            `cmd/seed -reset`) between the session lookup and this read.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -382,6 +462,75 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error: user not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    delete:
+      tags: [Auth]
+      operationId: deleteAccount
+      summary: Permanently delete the caller's own account
+      description: >
+        Deletes everything belonging to the authenticated account,
+        immediately — every session, every task, every attachment (its
+        stored bytes and its metadata row), and the account itself. There
+        is no grace period and no way to undo this once the response
+        comes back; see `docs/DECISIONS.md` § "Exclusão de conta" for
+        that decision.
+
+
+        Requires the current password in the request body — an
+        authenticated session alone is not enough, the same reasoning
+        `POST /v1/auth/password` follows: a hijacked-but-live session
+        must not be able to destroy the account on its own.
+      requestBody:
+        required: true
+        description: >
+          Request bodies larger than 1 MiB are rejected, surfacing as the
+          same 400 "invalid request body" response as malformed JSON.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteAccountRequest'
+            example:
+              current_password: correct horse battery staple
+      responses:
+        '204':
+          description: >
+            Account deleted. No response body. The session cookie, if
+            any, is cleared the same way logout's is.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+        '400':
+          description: Malformed JSON body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: invalid request body
+        '401':
+          description: >
+            Missing/expired/malformed bearer token, or `current_password`
+            does not match the account's stored password — deliberately
+            the same response either way.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: invalid email or password
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '500':
@@ -853,25 +1002,32 @@ paths:
             Either an optimistic concurrency conflict (see PUT
             /tasks/{id}'s 409), or the requested transition is not legal
             from the task's current status (e.g. `cancelled` →
-            `done`) — distinguishable by the error message, both map to
-            409 since both mean "this request conflicts with the
-            resource's current state."
+            `done`) — both mean "this request conflicts with the
+            resource's current state," so both map to 409. Unlike PUT
+            /tasks/{id}'s 409 (concurrency only — no transition-legality
+            ambiguity there), this route's body carries a
+            machine-readable `reason` alongside the human-readable
+            `error` (issue #153) — `"invalid_transition"` or
+            `"concurrency"` — so a caller does not have to pattern-match
+            the message text to tell the two conditions apart.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/TransitionConflictResponse'
               examples:
                 invalidTransition:
                   summary: Illegal transition
                   value:
                     error: 'invalid status transition: cannot move from "cancelled" to "done"'
+                    reason: invalid_transition
                 concurrencyConflict:
                   summary: Optimistic concurrency conflict
                   value:
                     error: task was modified concurrently, please retry
+                    reason: concurrency
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '500':
@@ -1539,6 +1695,37 @@ components:
         - email
         - password
 
+    ChangePasswordRequest:
+      type: object
+      description: Accepted body for POST /auth/password.
+      properties:
+        current_password:
+          type: string
+          description: The account's current password. Required — see the operation's own description.
+          example: correct horse battery staple
+        new_password:
+          type: string
+          minLength: 8
+          maxLength: 72
+          description: >
+            Required, 8–72 characters — the same bounds RegisterRequest's
+            password enforces, for the same bcrypt-input-limit reason.
+          example: another correct horse battery staple
+      required:
+        - current_password
+        - new_password
+
+    DeleteAccountRequest:
+      type: object
+      description: Accepted body for DELETE /auth/me.
+      properties:
+        current_password:
+          type: string
+          description: The account's current password. Required — see the operation's own description.
+          example: correct horse battery staple
+      required:
+        - current_password
+
     LoginResponse:
       type: object
       description: Body returned by a successful POST /auth/login.
@@ -1801,6 +1988,28 @@ components:
           example: task not found
       required:
         - error
+
+    TransitionConflictResponse:
+      type: object
+      description: >
+        ErrorResponse plus a machine-readable discriminator, used only by
+        PATCH /tasks/{id}/status's 409 (issue #153) — no other response
+        in this API carries `reason`.
+      properties:
+        error:
+          type: string
+          description: Human-readable error message. Never contains internal details.
+          example: 'invalid status transition: cannot move from "cancelled" to "done"'
+        reason:
+          type: string
+          enum: [invalid_transition, concurrency]
+          description: >
+            Which of the two conditions this 409 means — see this
+            response's own description for what each one is.
+          example: invalid_transition
+      required:
+        - error
+        - reason
 
   responses:
     Unauthorized:

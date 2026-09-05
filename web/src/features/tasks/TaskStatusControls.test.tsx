@@ -111,6 +111,9 @@ describe('TaskStatusControls', () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(409, {
         error: 'invalid status transition: cannot move from "cancelled" to "done"',
+        // Real PATCH /status responses carry this (issue #153) — a mock
+        // missing it would test a shape the real backend never sends.
+        reason: 'invalid_transition',
       }),
     )
     const onSuccess = vi.fn()
@@ -128,7 +131,7 @@ describe('TaskStatusControls', () => {
     const fetchMock = vi.mocked(fetch)
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { csrf_token: 'tok' }))
     fetchMock.mockResolvedValueOnce(
-      jsonResponse(409, { error: 'task was modified concurrently, please retry' }),
+      jsonResponse(409, { error: 'task was modified concurrently, please retry', reason: 'concurrency' }),
     )
     const user = userEvent.setup()
     render(<TaskStatusControls task={makeTask('pending')} onSuccess={vi.fn()} />)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/JonasBorgesLM/moat/csrf"
 
+	"github.com/JonasBorgesLM/task-api/internal/attachment"
 	"github.com/JonasBorgesLM/task-api/internal/config"
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 	"github.com/JonasBorgesLM/task-api/internal/task"
@@ -1854,6 +1856,219 @@ func TestIntegration_LogoutAll_InvalidatesEverySession(t *testing.T) {
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("GET /auth/me (token %s) after logout-all: status = %d, want %d", name, resp.StatusCode, http.StatusUnauthorized)
 		}
+	}
+}
+
+// TestIntegration_ChangePassword_RevokesOtherSessionsButKeepsCaller
+// drives two real logins for the same account, changes the password
+// using the *second* session's token, and confirms the split
+// Service.ChangePassword's doc comment promises: the first session is
+// rejected afterward, the second (the one that made the call) still
+// works, the old password no longer authenticates a new login, and the
+// new one does. This is the integration counterpart of the fakeRepository
+// unit tests in internal/user/service_test.go (issue #196) — it proves
+// the same behavior against the real HTTP/middleware/memoryRepository
+// wiring, not just a fake.
+func TestIntegration_ChangePassword_RevokesOtherSessionsButKeepsCaller(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	const email = "change-password@example.com"
+	const oldPassword = "password12345"
+	const newPassword = "new-password-6789"
+
+	tokenA := registerAndLoginAs(t, srv, email)
+
+	client := csrfClient(t, srv)
+	csrfTok := fetchCSRFToken(t, client, srv)
+	loginBody := `{"email":"` + email + `","password":"` + oldPassword + `"}`
+	loginResp, err := client.Do(csrfPost(t, srv, csrfTok, apiPrefix+"/auth/login", loginBody))
+	if err != nil {
+		t.Fatalf("second POST /auth/login: %v", err)
+	}
+	defer loginResp.Body.Close()
+	var loginRespBody struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(loginResp.Body).Decode(&loginRespBody); err != nil {
+		t.Fatalf("decode second login response: %v", err)
+	}
+	tokenB := loginRespBody.Token
+
+	// Both sessions work before the password change.
+	for name, token := range map[string]string{"A": tokenA, "B": tokenB} {
+		resp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/auth/me", ""))
+		if err != nil {
+			t.Fatalf("GET /auth/me (token %s): %v", name, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /auth/me (token %s) before password change: status = %d, want %d", name, resp.StatusCode, http.StatusOK)
+		}
+	}
+
+	// Change the password using token B. Authorization is present, so
+	// this skips CSRF entirely (see middleware.CSRF's doc comment) —
+	// authedRequest, not csrfPost, is the right builder here.
+	changeBody := `{"current_password":"` + oldPassword + `","new_password":"` + newPassword + `"}`
+	changeResp, err := srv.Client().Do(authedRequest(t, tokenB, http.MethodPost, srv.URL+apiPrefix+"/auth/password", changeBody))
+	if err != nil {
+		t.Fatalf("POST /auth/password: %v", err)
+	}
+	defer changeResp.Body.Close()
+	if changeResp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(changeResp.Body)
+		t.Fatalf("POST /auth/password status = %d, want %d, body = %s", changeResp.StatusCode, http.StatusOK, respBody)
+	}
+
+	// Token A must now be rejected...
+	respA, err := srv.Client().Do(authedRequest(t, tokenA, http.MethodGet, srv.URL+apiPrefix+"/auth/me", ""))
+	if err != nil {
+		t.Fatalf("GET /auth/me (token A) after password change: %v", err)
+	}
+	respA.Body.Close()
+	if respA.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /auth/me (token A) after password change: status = %d, want %d", respA.StatusCode, http.StatusUnauthorized)
+	}
+
+	// ...but token B — the one that made the change — must still work.
+	// This is the one behavior that distinguishes ChangePassword from
+	// LogoutAll: rotating the credential must not also sign out the
+	// session that just proved it knows the current password.
+	respB, err := srv.Client().Do(authedRequest(t, tokenB, http.MethodGet, srv.URL+apiPrefix+"/auth/me", ""))
+	if err != nil {
+		t.Fatalf("GET /auth/me (token B, the caller) after password change: %v", err)
+	}
+	respB.Body.Close()
+	if respB.StatusCode != http.StatusOK {
+		t.Errorf("GET /auth/me (token B, the caller) after password change: status = %d, want %d", respB.StatusCode, http.StatusOK)
+	}
+
+	// The old password must no longer authenticate a new login... A
+	// fresh CSRF token is required here: the second login above rotated
+	// the one client's jar started with (see user.Handler.login's doc
+	// comment on Rotate), so reusing csrfTok would 403 for an unrelated
+	// reason and mask whatever this assertion is actually checking.
+	csrfTok = fetchCSRFToken(t, client, srv)
+	oldLoginResp, err := client.Do(csrfPost(t, srv, csrfTok, apiPrefix+"/auth/login", loginBody))
+	if err != nil {
+		t.Fatalf("POST /auth/login with old password: %v", err)
+	}
+	oldLoginResp.Body.Close()
+	if oldLoginResp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("POST /auth/login with old password after change: status = %d, want %d", oldLoginResp.StatusCode, http.StatusUnauthorized)
+	}
+
+	// ...and the new one must. Not rotated by the failed attempt above
+	// (Rotate only ever runs on a successful login), but fetched fresh
+	// anyway so this assertion never depends on that fact holding.
+	csrfTok = fetchCSRFToken(t, client, srv)
+	newLoginBody := `{"email":"` + email + `","password":"` + newPassword + `"}`
+	newLoginResp, err := client.Do(csrfPost(t, srv, csrfTok, apiPrefix+"/auth/login", newLoginBody))
+	if err != nil {
+		t.Fatalf("POST /auth/login with new password: %v", err)
+	}
+	newLoginResp.Body.Close()
+	if newLoginResp.StatusCode != http.StatusOK {
+		t.Errorf("POST /auth/login with new password after change: status = %d, want %d", newLoginResp.StatusCode, http.StatusOK)
+	}
+}
+
+// TestIntegration_DeleteAccount_CascadesEverything drives the real full
+// stack — register, create a task, upload an attachment, then
+// DELETE /auth/me — and confirms every layer of the cascade this issue
+// (#197) asked for actually ran, not just that the route returns 204:
+//
+//   - a wrong current password is rejected and deletes nothing (checked
+//     by confirming the task survives the rejected attempt);
+//   - the session is invalidated afterward, same as logout;
+//   - the account's own row is really gone, not just its sessions — the
+//     only way to observe that from outside is that the same email can
+//     register a fresh account afterward, which a live UNIQUE
+//     constraint would otherwise refuse;
+//   - the attachment's blob is gone from disk, not just its metadata
+//     row — the specific acceptance criterion issue #197 named
+//     explicitly, checked here via a second attachment.BlobStore
+//     pointed at the same directory the server itself used.
+func TestIntegration_DeleteAccount_CascadesEverything(t *testing.T) {
+	cfg := attachmentConfig(t)
+	srv := httptest.NewServer(newTestServer(t, cfg, discardLogger()).Handler)
+	defer srv.Close()
+
+	const email = "delete-account@example.com"
+	const password = "password12345"
+
+	token := registerAndLoginAs(t, srv, email)
+	taskID := createTask(t, srv, token)
+
+	content := append([]byte("%PDF-1.7\n"), []byte("report body")...)
+	uploadResp := uploadFile(t, srv, token, taskID, "report.pdf", content)
+	defer uploadResp.Body.Close()
+	if uploadResp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(uploadResp.Body)
+		t.Fatalf("upload status = %d, body = %s", uploadResp.StatusCode, respBody)
+	}
+	var uploaded struct {
+		StorageKey string `json:"storage_key"`
+	}
+	if err := json.NewDecoder(uploadResp.Body).Decode(&uploaded); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+
+	// A wrong current password must be rejected, and delete nothing.
+	wrongResp, err := srv.Client().Do(authedRequest(t, token, http.MethodDelete, srv.URL+apiPrefix+"/auth/me", `{"current_password":"wrong-password"}`))
+	if err != nil {
+		t.Fatalf("DELETE /auth/me with wrong password: %v", err)
+	}
+	wrongResp.Body.Close()
+	if wrongResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("DELETE /auth/me with wrong password: status = %d, want %d", wrongResp.StatusCode, http.StatusUnauthorized)
+	}
+	stillThereResp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/tasks/"+taskID, ""))
+	if err != nil {
+		t.Fatalf("GET /tasks/%s after a rejected delete attempt: %v", taskID, err)
+	}
+	stillThereResp.Body.Close()
+	if stillThereResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /tasks/%s after a rejected delete attempt: status = %d, want %d (nothing should have been deleted)", taskID, stillThereResp.StatusCode, http.StatusOK)
+	}
+
+	// The real deletion.
+	delResp, err := srv.Client().Do(authedRequest(t, token, http.MethodDelete, srv.URL+apiPrefix+"/auth/me", `{"current_password":"`+password+`"}`))
+	if err != nil {
+		t.Fatalf("DELETE /auth/me: %v", err)
+	}
+	defer delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(delResp.Body)
+		t.Fatalf("DELETE /auth/me status = %d, want %d, body = %s", delResp.StatusCode, http.StatusNoContent, respBody)
+	}
+
+	// The session is gone.
+	meResp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/auth/me", ""))
+	if err != nil {
+		t.Fatalf("GET /auth/me after account deletion: %v", err)
+	}
+	meResp.Body.Close()
+	if meResp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /auth/me after account deletion: status = %d, want %d", meResp.StatusCode, http.StatusUnauthorized)
+	}
+
+	// The email is free again — proof the user row itself, not just its
+	// sessions, is gone: a live users.email UNIQUE constraint would
+	// otherwise refuse this exact registration.
+	if newToken := registerAndLoginAs(t, srv, email); newToken == "" {
+		t.Error("re-registering with the deleted account's email: expected a fresh session, got none")
+	}
+
+	// The attachment's blob is gone from disk, not just its row.
+	blobs, closeStore, err := attachment.NewFSBlobStore(cfg.AttachmentStorageDir)
+	if err != nil {
+		t.Fatalf("open a blob store on the same directory to verify deletion: %v", err)
+	}
+	defer closeStore()
+	if _, err := blobs.Open(context.Background(), uploaded.StorageKey); !errors.Is(err, attachment.ErrNotFound) {
+		t.Errorf("blob %s after account deletion: Open() error = %v, want attachment.ErrNotFound", uploaded.StorageKey, err)
 	}
 }
 

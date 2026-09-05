@@ -6,6 +6,33 @@ versionamento seguindo [Semantic Versioning](https://semver.org/lang/pt-BR/).
 Este é o primeiro release versionado do projeto — não há tags anteriores.
 `v1.0.0` marca o ponto em que a API passa a ter contrato estável (`/v1`).
 
+## [1.6.0] — a definir na tag
+
+**Minor, não major:** rota nova, aditiva — nenhum contrato existente muda.
+
+### Adicionado
+- `POST /v1/auth/password` (issue #196) — troca a própria senha. Exige a
+  senha atual (uma sessão sequestrada, sozinha, não basta para rotacionar
+  a credencial) e, ao trocar com sucesso, revoga toda **outra** sessão da
+  conta — mantém viva só a que fez a própria chamada, diferente de
+  `POST /v1/auth/logout-all`, que derruba todas, inclusive a chamadora.
+  `401` para senha atual errada, sem distinguir de qualquer outra causa
+  de credencial inválida.
+- `DELETE /v1/auth/me` (issue #197) — exclui a própria conta. Imediata,
+  sem carência (decisão registrada em `docs/DECISIONS.md` § "Exclusão de
+  conta"): sessões, tasks e anexos (bytes no `BlobStore` **e** as linhas
+  de metadado, não só uma das duas) somem na mesma requisição, junto com
+  o próprio usuário. Exige a senha atual no corpo, mesma razão de
+  `POST /v1/auth/password` — uma sessão sequestrada não deve conseguir
+  destruir a conta sozinha.
+- `PATCH /v1/tasks/{id}/status`'s `409` ganha um campo `reason`
+  (`"invalid_transition"` ou `"concurrency"`, issue #153) — aditivo,
+  quem já lia só `error` continua funcionando. Antes, distinguir uma
+  transição ilegal de um conflito de concorrência exigia casar texto na
+  mensagem; agora é um campo dedicado. Escopo deliberadamente restrito a
+  esta rota — `PUT /tasks/{id}`'s `409` (só concorrência, sem
+  ambiguidade de transição) não ganhou o campo.
+
 ## [1.5.0] — a definir na tag
 
 Passe de revisão de design sobre a SPA (identidade visual, paginação,

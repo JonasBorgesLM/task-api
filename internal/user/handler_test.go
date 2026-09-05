@@ -48,17 +48,31 @@ var testCSRFProtector = func() *csrf.Protector {
 // sessionValidator (RequireAuth) — one fake implements both, since
 // RequireAuth only needs ValidateToken.
 type fakeService struct {
-	registerFn      func(email, password string) (User, error)
-	authenticateFn  func(email, password string) (User, error)
-	createSessionFn func(userID string) (string, time.Time, error)
-	logoutFn        func(token string) error
-	logoutAllFn     func(userID string) error
-	getUserFn       func(id string) (User, error)
-	validateTokenFn func(token string) (string, error)
+	registerFn       func(email, password string) (User, error)
+	authenticateFn   func(email, password string) (User, error)
+	changePasswordFn func(userID, currentPassword, newPassword, currentSessionToken string) error
+	verifyPasswordFn func(userID, password string) error
+	deleteAccountFn  func(userID string) error
+	createSessionFn  func(userID string) (string, time.Time, error)
+	logoutFn         func(token string) error
+	logoutAllFn      func(userID string) error
+	getUserFn        func(id string) (User, error)
+	validateTokenFn  func(token string) (string, error)
 
-	logoutCalledWith    string
-	logoutAllCalledWith string
-	getUserCalledWith   string
+	logoutCalledWith         string
+	logoutAllCalledWith      string
+	getUserCalledWith        string
+	deleteAccountCalledWith  string
+	changePasswordCalledWith struct {
+		userID              string
+		currentPassword     string
+		newPassword         string
+		currentSessionToken string
+	}
+	verifyPasswordCalledWith struct {
+		userID   string
+		password string
+	}
 }
 
 func (f *fakeService) Register(_ context.Context, email, password string) (User, error) {
@@ -73,6 +87,34 @@ func (f *fakeService) Authenticate(_ context.Context, email, password string) (U
 		return f.authenticateFn(email, password)
 	}
 	return User{}, nil
+}
+
+func (f *fakeService) ChangePassword(_ context.Context, userID, currentPassword, newPassword, currentSessionToken string) error {
+	f.changePasswordCalledWith.userID = userID
+	f.changePasswordCalledWith.currentPassword = currentPassword
+	f.changePasswordCalledWith.newPassword = newPassword
+	f.changePasswordCalledWith.currentSessionToken = currentSessionToken
+	if f.changePasswordFn != nil {
+		return f.changePasswordFn(userID, currentPassword, newPassword, currentSessionToken)
+	}
+	return nil
+}
+
+func (f *fakeService) VerifyPassword(_ context.Context, userID, password string) error {
+	f.verifyPasswordCalledWith.userID = userID
+	f.verifyPasswordCalledWith.password = password
+	if f.verifyPasswordFn != nil {
+		return f.verifyPasswordFn(userID, password)
+	}
+	return nil
+}
+
+func (f *fakeService) DeleteAccount(_ context.Context, userID string) error {
+	f.deleteAccountCalledWith = userID
+	if f.deleteAccountFn != nil {
+		return f.deleteAccountFn(userID)
+	}
+	return nil
 }
 
 func (f *fakeService) CreateSession(_ context.Context, userID string) (string, time.Time, error) {
@@ -126,10 +168,20 @@ func newHandlerWithFakeCookieMode(svc *fakeService, cookieInsecure bool) *Handle
 
 // newHandlerWithFakeAttachments is newHandlerWithFakeCookieMode with
 // attachmentsEnabled exposed, for the tests that specifically exercise
-// its effect on GET /auth/me's response.
+// its effect on GET /auth/me's response. Its AccountCascadeFunc is a
+// no-op that always succeeds — every test that cares what the cascade
+// does, or whether it ran at all, builds its own Handler via
+// newHandlerWithFakeCascade instead.
 func newHandlerWithFakeAttachments(svc *fakeService, cookieInsecure, attachmentsEnabled bool) *Handler {
+	noopCascade := func(context.Context, string) error { return nil }
+	return newHandlerWithFakeCascade(svc, cookieInsecure, attachmentsEnabled, noopCascade)
+}
+
+// newHandlerWithFakeCascade is newHandlerWithFakeAttachments with the
+// AccountCascadeFunc exposed, for DELETE /auth/me's own tests.
+func newHandlerWithFakeCascade(svc *fakeService, cookieInsecure, attachmentsEnabled bool, cascade AccountCascadeFunc) *Handler {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewHandler(svc, logger, cookieInsecure, testCSRFProtector, attachmentsEnabled)
+	return NewHandler(svc, logger, cookieInsecure, testCSRFProtector, attachmentsEnabled, cascade)
 }
 
 func do(handler http.HandlerFunc, method, target, body string) *httptest.ResponseRecorder {
@@ -326,6 +378,84 @@ func TestLogin_Handler_InvalidJSON(t *testing.T) {
 	}
 }
 
+// --- POST /auth/password ---
+
+func TestChangePassword_Handler_UsesUserIDAndTokenFromContext(t *testing.T) {
+	svc := &fakeService{}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/password",
+		strings.NewReader(`{"current_password":"old-password123","new_password":"new-password456"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	req = req.WithContext(middleware.ContextWithSessionToken(req.Context(), "the-token"))
+	w := httptest.NewRecorder()
+	h.changePassword(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("change password status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if svc.changePasswordCalledWith.userID != "u1" {
+		t.Errorf("change password called Service.ChangePassword with userID %q, want %q", svc.changePasswordCalledWith.userID, "u1")
+	}
+	if svc.changePasswordCalledWith.currentPassword != "old-password123" {
+		t.Errorf("change password called Service.ChangePassword with currentPassword %q, want %q", svc.changePasswordCalledWith.currentPassword, "old-password123")
+	}
+	if svc.changePasswordCalledWith.newPassword != "new-password456" {
+		t.Errorf("change password called Service.ChangePassword with newPassword %q, want %q", svc.changePasswordCalledWith.newPassword, "new-password456")
+	}
+	if svc.changePasswordCalledWith.currentSessionToken != "the-token" {
+		t.Errorf("change password called Service.ChangePassword with currentSessionToken %q, want %q", svc.changePasswordCalledWith.currentSessionToken, "the-token")
+	}
+}
+
+func TestChangePassword_Handler_InvalidJSON(t *testing.T) {
+	h := newHandlerWithFake(&fakeService{})
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/password", strings.NewReader(`{invalid}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.changePassword(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("change password invalid JSON status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestChangePassword_Handler_WrongCurrentPassword(t *testing.T) {
+	svc := &fakeService{
+		changePasswordFn: func(_, _, _, _ string) error { return ErrInvalidCredentials },
+	}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/password",
+		strings.NewReader(`{"current_password":"wrong","new_password":"new-password456"}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.changePassword(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("change password with wrong current password: status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestChangePassword_Handler_InvalidNewPassword(t *testing.T) {
+	svc := &fakeService{
+		changePasswordFn: func(_, _, _, _ string) error { return ErrInvalidInput },
+	}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/password",
+		strings.NewReader(`{"current_password":"old-password123","new_password":"short"}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.changePassword(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("change password with invalid new password: status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
 // --- POST /auth/logout ---
 
 func TestLogout_Handler_UsesTokenFromContext(t *testing.T) {
@@ -483,6 +613,140 @@ func TestMe_Handler_IncludesAttachmentsEnabled(t *testing.T) {
 				t.Errorf("me body attachments_enabled = %v, want %v", got.AttachmentsEnabled, tt.want)
 			}
 		})
+	}
+}
+
+// --- DELETE /auth/me ---
+
+func TestDeleteAccount_Handler_Success(t *testing.T) {
+	var cascadeCalledWith string
+	cascade := func(_ context.Context, userID string) error {
+		cascadeCalledWith = userID
+		return nil
+	}
+	svc := &fakeService{}
+	h := newHandlerWithFakeCascade(svc, false, false, cascade)
+
+	req := httptest.NewRequest(http.MethodDelete, "/auth/me", strings.NewReader(`{"current_password":"password123"}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.deleteAccount(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("delete account status = %d, want %d, body: %s", w.Code, http.StatusNoContent, w.Body.String())
+	}
+	if svc.verifyPasswordCalledWith.userID != "u1" || svc.verifyPasswordCalledWith.password != "password123" {
+		t.Errorf("delete account called VerifyPassword with (%q, %q), want (%q, %q)",
+			svc.verifyPasswordCalledWith.userID, svc.verifyPasswordCalledWith.password, "u1", "password123")
+	}
+	if cascadeCalledWith != "u1" {
+		t.Errorf("delete account called the cascade with %q, want %q", cascadeCalledWith, "u1")
+	}
+	if svc.deleteAccountCalledWith != "u1" {
+		t.Errorf("delete account called Service.DeleteAccount with %q, want %q", svc.deleteAccountCalledWith, "u1")
+	}
+}
+
+// TestDeleteAccount_Handler_ExpiresSessionCookie mirrors
+// TestLogout_Handler_ExpiresSessionCookie — the account, and every
+// session on it, is gone, so the browser must stop sending its cookie
+// exactly the same way.
+func TestDeleteAccount_Handler_ExpiresSessionCookie(t *testing.T) {
+	noopCascade := func(context.Context, string) error { return nil }
+	h := newHandlerWithFakeCascade(&fakeService{}, false, false, noopCascade)
+
+	req := httptest.NewRequest(http.MethodDelete, "/auth/me", strings.NewReader(`{"current_password":"password123"}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.deleteAccount(w, req)
+
+	cookie := findCookie(t, w, sessionCookieName)
+	if cookie.MaxAge >= 0 {
+		t.Errorf("cookie MaxAge = %d, want negative (net/http's spelling for immediate deletion)", cookie.MaxAge)
+	}
+}
+
+func TestDeleteAccount_Handler_InvalidJSON(t *testing.T) {
+	noopCascade := func(context.Context, string) error { return nil }
+	h := newHandlerWithFakeCascade(&fakeService{}, false, false, noopCascade)
+
+	req := httptest.NewRequest(http.MethodDelete, "/auth/me", strings.NewReader(`{invalid}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.deleteAccount(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("delete account invalid JSON status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// TestDeleteAccount_Handler_WrongPassword is the one test in this file
+// that most matters for this endpoint: a wrong password must reject the
+// request *before* anything is deleted — never run the cascade, never
+// call Service.DeleteAccount.
+func TestDeleteAccount_Handler_WrongPassword(t *testing.T) {
+	cascadeCalled := false
+	cascade := func(context.Context, string) error {
+		cascadeCalled = true
+		return nil
+	}
+	svc := &fakeService{
+		verifyPasswordFn: func(_, _ string) error { return ErrInvalidCredentials },
+	}
+	h := newHandlerWithFakeCascade(svc, false, false, cascade)
+
+	req := httptest.NewRequest(http.MethodDelete, "/auth/me", strings.NewReader(`{"current_password":"wrong"}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.deleteAccount(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("delete account with wrong password: status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+	if cascadeCalled {
+		t.Error("delete account with wrong password must not run the cascade at all")
+	}
+	if svc.deleteAccountCalledWith != "" {
+		t.Error("delete account with wrong password must not call Service.DeleteAccount")
+	}
+}
+
+// TestDeleteAccount_Handler_CascadeError proves a cascade failure stops
+// short of Service.DeleteAccount — the account's own row and its
+// sessions must not be deleted while its tasks/attachments might not
+// all be gone.
+func TestDeleteAccount_Handler_CascadeError(t *testing.T) {
+	cascade := func(context.Context, string) error { return errors.New("boom") }
+	svc := &fakeService{}
+	h := newHandlerWithFakeCascade(svc, false, false, cascade)
+
+	req := httptest.NewRequest(http.MethodDelete, "/auth/me", strings.NewReader(`{"current_password":"password123"}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.deleteAccount(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("delete account with a cascade error: status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if svc.deleteAccountCalledWith != "" {
+		t.Error("delete account must not call Service.DeleteAccount when the cascade already failed")
+	}
+}
+
+func TestDeleteAccount_Handler_RepositoryError(t *testing.T) {
+	noopCascade := func(context.Context, string) error { return nil }
+	svc := &fakeService{
+		deleteAccountFn: func(_ string) error { return errors.New("boom") },
+	}
+	h := newHandlerWithFakeCascade(svc, false, false, noopCascade)
+
+	req := httptest.NewRequest(http.MethodDelete, "/auth/me", strings.NewReader(`{"current_password":"password123"}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.deleteAccount(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("delete account with a repository error: status = %d, want %d", w.Code, http.StatusInternalServerError)
 	}
 }
 

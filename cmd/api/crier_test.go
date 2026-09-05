@@ -152,6 +152,69 @@ func TestBuildCrier_ValidEndpoint_ExportsOverRealHTTP(t *testing.T) {
 	}
 }
 
+// TestBuildCrier_HealthCheckNoise_FilteredUnlessError proves buildCrier's
+// AttributeRule (crier's ADR-0022) actually narrows the mirrored copy: a
+// routine, Info-level /health* record must never reach the collector, and
+// a genuine failure on the same path must still get through — the
+// distinction the whole rule exists to draw, not just "something got
+// filtered".
+func TestBuildCrier_HealthCheckNoise_FilteredUnlessError(t *testing.T) {
+	receivedCh := make(chan *collogs.ExportLogsServiceRequest, 4)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedCh <- decodeOTLPLogsRequest(t, r)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	c, err := buildCrier(config.Config{CrierOTLPEndpoint: collector.URL})
+	if err != nil {
+		t.Fatalf("buildCrier() unexpected error: %v", err)
+	}
+	if c == nil {
+		t.Fatal("buildCrier() with a valid endpoint: expected a non-nil *core.Crier")
+	}
+
+	toLog := []core.LogRecord{
+		{Severity: core.SeverityInfo, Body: "routine probe", Attributes: map[string]any{"path": "/health"}},
+		{Severity: core.SeverityInfo, Body: "routine probe", Attributes: map[string]any{"path": "/health/ready"}},
+		{Severity: core.SeverityError, Body: "probe failed", Attributes: map[string]any{"path": "/health/ready"}},
+	}
+	for _, rec := range toLog {
+		if err := c.Log(context.Background(), rec); err != nil {
+			t.Fatalf("Log() unexpected error: %v", err)
+		}
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	summary, err := c.Shutdown(shutdownCtx)
+	if err != nil {
+		t.Fatalf("Shutdown() unexpected error: %v", err)
+	}
+	if !summary.Clean() {
+		t.Fatalf("Shutdown() summary = %v, want a clean drain (a filtered record is not a lost one)", summary)
+	}
+
+	var bodies []string
+	for {
+		select {
+		case req := <-receivedCh:
+			for _, rl := range req.GetResourceLogs() {
+				for _, sl := range rl.GetScopeLogs() {
+					for _, rec := range sl.GetLogRecords() {
+						bodies = append(bodies, rec.GetBody().GetStringValue())
+					}
+				}
+			}
+		case <-time.After(500 * time.Millisecond):
+			if len(bodies) != 1 || bodies[0] != "probe failed" {
+				t.Errorf("mirrored record bodies = %v, want exactly [\"probe failed\"]: the two Info-level /health* records should have been filtered, and the Error-level one should still export", bodies)
+			}
+			return
+		}
+	}
+}
+
 // extractFirstLogBody digs the body string out of the first log record in
 // req's nested resource/scope structure, failing the test if the shape
 // does not match what otlp.New's transform is documented to produce.
@@ -260,9 +323,16 @@ func TestRun_CrierMirrorsAccessLogWithRequestID(t *testing.T) {
 
 	waitForLogLine(t, out, "server started")
 
-	resp, err := http.Get("http://" + addr + "/health")
+	// Not /health: buildCrier's Filter rule (ADR-0022 in crier) raises the
+	// mirrored copy's threshold to Error for that path prefix specifically
+	// to narrow routine, 200-status probe noise — so a 200 GET /health
+	// would never reach receivedCh, and this test would hang until its own
+	// deadline instead of proving anything about the wiring. /v1/auth/me
+	// with no credentials is unauthenticated (401, Warn), unaffected by
+	// that rule, and just as free of side effects.
+	resp, err := http.Get("http://" + addr + "/v1/auth/me")
 	if err != nil {
-		t.Fatalf("GET /health: %v", err)
+		t.Fatalf("GET /v1/auth/me: %v", err)
 	}
 	resp.Body.Close()
 
@@ -294,31 +364,29 @@ func TestRun_CrierMirrorsAccessLogWithRequestID(t *testing.T) {
 		t.Errorf(`expected an INFO "crier drain completed" line in run()'s own log output, got: %s`, out.String())
 	}
 
-	// /health is public and outside RequestID? No — RequestID wraps the
-	// whole rootHandler chain, /health included (see newServer's
-	// middleware.Chain), so this request does carry one; only auth is
-	// what /health skips. By now the drain above has already forced the
-	// flush, so the record is either already on receivedCh or arriving
-	// within the HTTP round trip that follows — no more waiting out the
-	// batch window.
+	// RequestID wraps the whole rootHandler chain, so this request carries
+	// one regardless of the 401 it gets back. By now the drain above has
+	// already forced the flush, so the record is either already on
+	// receivedCh or arriving within the HTTP round trip that follows — no
+	// more waiting out the batch window.
 	var accessLogAttrs map[string]string
 	deadline := time.After(5 * time.Second)
 	for accessLogAttrs == nil {
 		select {
 		case req := <-receivedCh:
-			if attrs := allLogRecordAttrs(req); attrs["path"] == "/health" && attrs["method"] == "GET" {
+			if attrs := allLogRecordAttrs(req); attrs["path"] == "/v1/auth/me" && attrs["method"] == "GET" {
 				accessLogAttrs = attrs
 			}
 		case <-deadline:
-			t.Fatal("collector never received the /health access log record even after a clean drain")
+			t.Fatal("collector never received the /v1/auth/me access log record even after a clean drain")
 		}
 	}
 
 	if accessLogAttrs["request_id"] == "" {
 		t.Error(`mirrored access log record has no "request_id" attribute`)
 	}
-	if accessLogAttrs["status"] != "200" {
-		t.Errorf(`mirrored access log record "status" = %q, want "200"`, accessLogAttrs["status"])
+	if accessLogAttrs["status"] != "401" {
+		t.Errorf(`mirrored access log record "status" = %q, want "401"`, accessLogAttrs["status"])
 	}
 }
 

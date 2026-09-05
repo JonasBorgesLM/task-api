@@ -1143,3 +1143,125 @@ O frontend nunca guarda a credencial de sessão em `localStorage`/`sessionStorag
 Nenhum item de `docs/changes/web-frontend/plan.md` (`CI-1`–`CI-11`) nem as issues `#119`–`#129` decidiam isso explicitamente antes de `CI-6` — só nomeavam "Page"s (`RegisterPage`, `LoginPage`, e mais tarde a lista de tasks), sem dizer se cada uma teria sua própria URL ou seria só uma troca de view por estado local. Como a decisão molda a estrutura de todo o resto da Fase 13 (CRUD de task, anexos), foi levada ao usuário em vez de escolhida em silêncio — decisão: `react-router-dom`, com URLs reais desde já (`/login`, `/register`, `/`), não uma alternativa sem dependência nova baseada em estado local.
 
 Consequência direta, não antecipação: `RequireAuth` (`web/src/features/auth/RequireAuth.tsx`) — um guard de rota que redireciona para `/login` quando `useAuth()` não está autenticado — não está na lista de arquivos de `CI-6` em `plan.md`, mas é o que torna a rota `/` protegida possível; sem ele, "URLs reais" e "sessão só sabida via `GET /auth/me`" não se sustentam juntas.
+
+---
+
+## crier: ruído de health-check filtrado por severidade, não por amostragem
+
+`cmd/api/crier.go`'s `buildCrier` passa um `core.Filter` com um `AttributeRule`
+(`Key: "path", ValuePrefix: "/health"`) que eleva `MinSeverity` para
+`core.SeverityError` só para essa regra — recurso do crier `core` v0.3.0
+(ADR-0022 do próprio crier, "attribute-matched sampling"). Isso não muda o
+log em stdout (`internal/middleware/logging.go` continua igual); afeta só a
+cópia espelhada que sai para o `CRIER_OTLP_ENDPOINT`.
+
+**Por quê:** `/health` e `/health/ready` são batidos por probes de
+liveness/readiness em intervalo curto e quase sempre devolvem `200` — volume
+que domina o espelho sem carregar sinal, exatamente o caso que o próprio
+dashboard do crier documenta ("Health checks: o ruído que a ADR-0022 existe
+para conter"). `middleware.Logging` só sobe o nível para `Error` numa
+resposta `5xx` (ver seu próprio doc comment) — essas duas rotas não aceitam
+parâmetro nenhum, então não têm caminho de `4xx` hoje — o que faz
+`MinSeverity: SeverityError` bloquear exatamente o `200` rotineiro e deixar
+passar uma falha real (`/health/ready` respondendo `503`) sem exceção.
+
+**Alternativa rejeitada:** `SampleRate` em vez de `MinSeverity` na mesma
+regra. Rejeitada porque `SampleRate` é probabilístico — usado aqui,
+descartaria uma fração aleatória de qualquer severidade que bater na regra,
+inclusive uma falha intermitente de `503`. `MinSeverity` só filtra o que já
+sabemos ser ruído puro (o `200` de rotina), nunca por sorte.
+
+**Trade-off aceito:** se `/health`/`/health/ready` um dia passarem a devolver
+`4xx` (não acontece hoje — nenhuma delas lê corpo, query string ou parâmetro
+de rota), essas linhas também seriam engolidas pelo espelho, silenciosamente,
+até alguém notar e revisitar esta regra. Coberto por
+`TestBuildCrier_HealthCheckNoise_FilteredUnlessError`
+(`cmd/api/crier_test.go`), que prova as duas metades — o `200` rotineiro
+some, o `503` continua chegando ao coletor.
+
+---
+
+## crier: dashboard SigNoz provisionado a partir do template oficial, fixado em um commit
+
+`make signoz-dashboard` busca
+`docs/observability/signoz/dashboard.json` do próprio repositório do crier
+via `raw.githubusercontent.com`, substitui `{{.ServiceName}}` por
+`task-api` e faz o `POST /api/v2/dashboards` documentado no README daquele
+arquivo. A referência é um SHA de commit fixo
+(`CRIER_DASHBOARD_REF` no `Makefile`, hoje `87048ec4…`), não `main`.
+
+**Verificado rodando, não só lendo o `Makefile` (ver § "Princípio geral de
+validação" acima):** `make signoz-dashboard` executado de ponta a ponta
+contra um SigNoz real (Foundry Compose local, workspace novo) em
+2026-09-05 — `POST` retornou `201`, e o dashboard aberto na UI mostrou os
+10 de 10 painéis com dado real, não série vazia, contra tráfego real
+gerado pela stack local do task-api (registro, login, tasks, respostas
+`200`/`401`/`404`). O painel "Health checks" especificamente mostrou `0`
+apesar de 12 requisições reais a `/health`/`/health/ready` no mesmo
+intervalo — confirmação, contra uma instância real, de que a regra da
+seção anterior filtra o que diz filtrar.
+
+**Por quê:** o crier decidiu (ADR-0023 de lá) que esse arquivo é
+"documentação, não contrato testado" — nada em CI do crier o exercita, e o
+próprio README dele já registrou uma mudança de forma incompatível entre
+versões do SigNoz (`tags` deixou de aceitar array de strings). Um `main`
+sem pin mudaria o que este `make` alvo provisiona aqui sem nenhum changelog
+deste lado. O SHA fixado é o commit que o crier verificou de ponta a ponta
+contra um SigNoz real (`v0.139.0`, 10 de 10 painéis retornando dado, não
+série vazia) — ver `docs/observability/signoz/README.md` no repositório do
+crier.
+
+**Alternativa rejeitada:** vendorizar uma cópia do `dashboard.json` dentro
+deste repositório. Rejeitada porque o crier já é a fonte única desse
+template (ADR-0023 de lá) — uma segunda cópia aqui divergiria da de lá sem
+nada para avisar quando isso acontecesse.
+
+**Trade-off aceito:** melhorias futuras no template do crier não chegam
+aqui sozinhas — alguém precisa notar, revisar, e subir
+`CRIER_DASHBOARD_REF` de propósito, o mesmo custo que este `Makefile` já
+aceita para `STATICCHECK_VERSION`/`GOVULNCHECK_VERSION`.
+
+---
+
+## Exclusão de conta (`DELETE /v1/auth/me`, issue #197): imediata, não soft-delete
+
+`DELETE /v1/auth/me` apaga a conta **na hora** da chamada — sessões,
+tasks, anexos (linhas e bytes) e o próprio usuário. Não existe estado
+"pendente de exclusão", carência, nem forma de desfazer depois que a
+resposta volta `204`.
+
+**Por quê:** a alternativa considerada — soft-delete com carência (ex.:
+7–30 dias antes da exclusão de verdade) — exigiria um job de limpeza
+recorrente, um estado que bloqueia login sem ser um dos existentes, e um
+jeito de cancelar o pedido; nada disso existe hoje neste projeto, e nada
+aqui pediu essa complexidade antes desta issue. Escolha do usuário
+(`JonasBorgesLM`), levada explicitamente porque o próprio texto da issue
+marcava isso como decisão de produto, não técnica.
+
+**Trade-off aceito:** nenhuma proteção contra arrependimento (a exclusão
+não tem "desfazer") nem contra uma sessão sequestrada destruindo a conta
+— mitigado apenas por exigir a senha atual no corpo da requisição (a
+mesma exigência de `POST /v1/auth/password`), nunca a sessão sozinha.
+
+### Ordem de exclusão dos anexos: linha antes do blob, não o inverso
+
+O texto original da issue propunha apagar os **bytes antes das linhas**
+dos anexos durante essa cascata, citando o mesmo raciocínio já registrado
+em `CLAUDE.md`/`docs/DECISIONS.md` § "Delete de anexo: síncrono, não só o
+coletor" — mas invertido: aquela seção decidiu **linha primeiro, blob
+depois** (best-effort), exatamente pelo espelho do `Upload` (bytes antes
+da linha na escrita, porque a ordem inversa deixaria uma linha apontando
+para um arquivo nunca escrito). Bytes-antes-da-linha no delete produz o
+mesmo tipo de referência quebrada que essa regra já existe para evitar:
+se o passo de apagar a linha falhar depois do blob já ter sumido, sobra
+uma linha apontando para um arquivo inexistente — pior, e mais permanente
+neste caminho de cascata, que ninguém revisita depois, do que o blob
+órfão (que o coletor já recolhe) que a ordem linha-primeiro deixaria no
+mesmo cenário de falha.
+
+**Decisão:** a cascata de exclusão de conta reaproveita
+`attachment.Service.Delete` — o mesmo caminho, já testado, que
+`DELETE /v1/files/{key}` usa — em vez de inventar uma segunda ordem só
+para este caso. Levado ao usuário antes de implementar, por ser
+exatamente o caso que `CLAUDE.md` descreve: "se uma issue parecer
+contradizer uma decisão registrada, pare e pergunte antes de prosseguir."

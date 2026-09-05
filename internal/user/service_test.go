@@ -25,6 +25,15 @@ type fakeRepository struct {
 	findUserByIDUser User
 	findUserByIDErr  error
 
+	updateUserPasswordErr        error
+	updateUserPasswordCalledWith struct {
+		id           string
+		passwordHash string
+	}
+
+	deleteUserErr        error
+	deleteUserCalledWith string
+
 	createSessionErr        error
 	savedSession            Session
 	createSessionCalledWith int // maxSessions passed to CreateSession
@@ -37,6 +46,12 @@ type fakeRepository struct {
 
 	deleteSessionsForUserErr        error
 	deleteSessionsForUserCalledWith string
+
+	deleteSessionsForUserExceptErr        error
+	deleteSessionsForUserExceptCalledWith struct {
+		userID        string
+		keepTokenHash string
+	}
 
 	deleteExpiredSessionsErr        error
 	deleteExpiredSessionsCalledWith time.Time
@@ -56,6 +71,17 @@ func (f *fakeRepository) FindUserByID(_ context.Context, _ string) (User, error)
 	return f.findUserByIDUser, f.findUserByIDErr
 }
 
+func (f *fakeRepository) UpdateUserPassword(_ context.Context, id, passwordHash string) error {
+	f.updateUserPasswordCalledWith.id = id
+	f.updateUserPasswordCalledWith.passwordHash = passwordHash
+	return f.updateUserPasswordErr
+}
+
+func (f *fakeRepository) DeleteUser(_ context.Context, id string) error {
+	f.deleteUserCalledWith = id
+	return f.deleteUserErr
+}
+
 func (f *fakeRepository) CreateSession(_ context.Context, s Session, maxSessions int) error {
 	f.savedSession = s
 	f.createSessionCalledWith = maxSessions
@@ -65,6 +91,12 @@ func (f *fakeRepository) CreateSession(_ context.Context, s Session, maxSessions
 func (f *fakeRepository) DeleteSessionsForUser(_ context.Context, userID string) error {
 	f.deleteSessionsForUserCalledWith = userID
 	return f.deleteSessionsForUserErr
+}
+
+func (f *fakeRepository) DeleteSessionsForUserExcept(_ context.Context, userID, keepTokenHash string) error {
+	f.deleteSessionsForUserExceptCalledWith.userID = userID
+	f.deleteSessionsForUserExceptCalledWith.keepTokenHash = keepTokenHash
+	return f.deleteSessionsForUserExceptErr
 }
 
 func (f *fakeRepository) FindSessionByTokenHash(_ context.Context, _ string) (Session, error) {
@@ -268,6 +300,190 @@ func TestAuthenticate_NormalizesEmailCase(t *testing.T) {
 }
 
 // --- CreateSession ---
+
+// --- ChangePassword ---
+
+func TestChangePassword_Valid(t *testing.T) {
+	stored := User{ID: "u1", PasswordHash: mustHash(t, "old-password123")}
+	repo := &fakeRepository{findUserByIDUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.ChangePassword(context.Background(), "u1", "old-password123", "new-password456", "current-token")
+	if err != nil {
+		t.Fatalf("ChangePassword() unexpected error: %v", err)
+	}
+
+	if repo.updateUserPasswordCalledWith.id != "u1" {
+		t.Errorf("ChangePassword() called UpdateUserPassword with id %q, want %q", repo.updateUserPasswordCalledWith.id, "u1")
+	}
+	if err := bcrypt.CompareHashAndPassword(
+		[]byte(repo.updateUserPasswordCalledWith.passwordHash), []byte("new-password456"),
+	); err != nil {
+		t.Error("ChangePassword() persisted hash does not match the new password")
+	}
+
+	if repo.deleteSessionsForUserExceptCalledWith.userID != "u1" {
+		t.Errorf("ChangePassword() called DeleteSessionsForUserExcept with userID %q, want %q",
+			repo.deleteSessionsForUserExceptCalledWith.userID, "u1")
+	}
+	if got, want := repo.deleteSessionsForUserExceptCalledWith.keepTokenHash, hashToken("current-token"); got != want {
+		t.Errorf("ChangePassword() called DeleteSessionsForUserExcept with keepTokenHash %q, want %q (hash of the calling session's own token)", got, want)
+	}
+}
+
+func TestChangePassword_WrongCurrentPassword(t *testing.T) {
+	stored := User{ID: "u1", PasswordHash: mustHash(t, "old-password123")}
+	repo := &fakeRepository{findUserByIDUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.ChangePassword(context.Background(), "u1", "wrong-password", "new-password456", "current-token")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("ChangePassword() wrong current password error = %v, want ErrInvalidCredentials", err)
+	}
+	if repo.updateUserPasswordCalledWith.id != "" {
+		t.Error("ChangePassword() must not update the password when the current one is wrong")
+	}
+	if repo.deleteSessionsForUserExceptCalledWith.userID != "" {
+		t.Error("ChangePassword() must not revoke any session when the current password is wrong")
+	}
+}
+
+// TestChangePassword_UnknownUser exercises the branch documented as
+// essentially unreachable in practice (an authenticated session whose
+// user vanished out from under it) — it still must not be distinguished
+// from a plain wrong password, the same non-enumeration discipline
+// Authenticate follows for its own ErrNotFound branch.
+func TestChangePassword_UnknownUser(t *testing.T) {
+	repo := &fakeRepository{findUserByIDErr: ErrNotFound}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.ChangePassword(context.Background(), "gone", "whatever", "new-password456", "current-token")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("ChangePassword() unknown user error = %v, want ErrInvalidCredentials (never a distinct 'not found')", err)
+	}
+}
+
+func TestChangePassword_InvalidNewPassword(t *testing.T) {
+	stored := User{ID: "u1", PasswordHash: mustHash(t, "old-password123")}
+	repo := &fakeRepository{findUserByIDUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.ChangePassword(context.Background(), "u1", "old-password123", "short", "current-token")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("ChangePassword() short new password error = %v, want ErrInvalidInput", err)
+	}
+	if repo.updateUserPasswordCalledWith.id != "" {
+		t.Error("ChangePassword() must validate the new password before touching the repository at all")
+	}
+}
+
+func TestChangePassword_UpdateRepositoryError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	stored := User{ID: "u1", PasswordHash: mustHash(t, "old-password123")}
+	repo := &fakeRepository{findUserByIDUser: stored, updateUserPasswordErr: repoErr}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.ChangePassword(context.Background(), "u1", "old-password123", "new-password456", "current-token")
+	if !errors.Is(err, repoErr) {
+		t.Errorf("ChangePassword() UpdateUserPassword error = %v, want %v", err, repoErr)
+	}
+	if repo.deleteSessionsForUserExceptCalledWith.userID != "" {
+		t.Error("ChangePassword() must not revoke sessions when persisting the new password failed")
+	}
+}
+
+func TestChangePassword_RevokeRepositoryError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	stored := User{ID: "u1", PasswordHash: mustHash(t, "old-password123")}
+	repo := &fakeRepository{findUserByIDUser: stored, deleteSessionsForUserExceptErr: repoErr}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.ChangePassword(context.Background(), "u1", "old-password123", "new-password456", "current-token")
+	if !errors.Is(err, repoErr) {
+		t.Errorf("ChangePassword() DeleteSessionsForUserExcept error = %v, want %v", err, repoErr)
+	}
+	// The password was already changed by this point (see ChangePassword's
+	// doc comment on ordering) — this asserts that half actually happened,
+	// not just that an error came back.
+	if repo.updateUserPasswordCalledWith.id != "u1" {
+		t.Error("ChangePassword() should have already persisted the new password before the revoke step failed")
+	}
+}
+
+// --- VerifyPassword ---
+
+func TestVerifyPassword_Valid(t *testing.T) {
+	stored := User{ID: "u1", PasswordHash: mustHash(t, "password123")}
+	repo := &fakeRepository{findUserByIDUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	if err := svc.VerifyPassword(context.Background(), "u1", "password123"); err != nil {
+		t.Errorf("VerifyPassword() unexpected error: %v", err)
+	}
+}
+
+func TestVerifyPassword_Wrong(t *testing.T) {
+	stored := User{ID: "u1", PasswordHash: mustHash(t, "password123")}
+	repo := &fakeRepository{findUserByIDUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.VerifyPassword(context.Background(), "u1", "wrong-password")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("VerifyPassword() wrong password error = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+func TestVerifyPassword_UnknownUser(t *testing.T) {
+	repo := &fakeRepository{findUserByIDErr: ErrNotFound}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.VerifyPassword(context.Background(), "gone", "whatever")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("VerifyPassword() unknown user error = %v, want ErrInvalidCredentials (never a distinct 'not found')", err)
+	}
+}
+
+// --- DeleteAccount ---
+
+func TestDeleteAccount_DeletesSessionsThenUser(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	if err := svc.DeleteAccount(context.Background(), "u1"); err != nil {
+		t.Fatalf("DeleteAccount() unexpected error: %v", err)
+	}
+	if repo.deleteSessionsForUserCalledWith != "u1" {
+		t.Errorf("DeleteAccount() called DeleteSessionsForUser with %q, want %q", repo.deleteSessionsForUserCalledWith, "u1")
+	}
+	if repo.deleteUserCalledWith != "u1" {
+		t.Errorf("DeleteAccount() called DeleteUser with %q, want %q", repo.deleteUserCalledWith, "u1")
+	}
+}
+
+func TestDeleteAccount_SessionRepositoryError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	repo := &fakeRepository{deleteSessionsForUserErr: repoErr}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.DeleteAccount(context.Background(), "u1")
+	if !errors.Is(err, repoErr) {
+		t.Errorf("DeleteAccount() DeleteSessionsForUser error = %v, want %v", err, repoErr)
+	}
+	if repo.deleteUserCalledWith != "" {
+		t.Error("DeleteAccount() must not delete the user row when revoking sessions already failed")
+	}
+}
+
+func TestDeleteAccount_UserRepositoryError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	repo := &fakeRepository{deleteUserErr: repoErr}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.DeleteAccount(context.Background(), "u1")
+	if !errors.Is(err, repoErr) {
+		t.Errorf("DeleteAccount() DeleteUser error = %v, want %v", err, repoErr)
+	}
+}
 
 func TestCreateSession_ReturnsTokenAndPersistsOnlyItsHash(t *testing.T) {
 	repo := &fakeRepository{}

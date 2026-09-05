@@ -28,6 +28,14 @@ export type ApiError = { requestId: string | null } & (
 
 interface ErrorResponseBody {
   error?: string
+  /**
+   * Only ever present on PATCH /tasks/{id}/status's 409 (see
+   * docs/openapi.yaml's TransitionConflictResponse and issue #153) —
+   * absent everywhere else, PUT /tasks/{id}'s own 409 included, which
+   * classifyConflict below reads the same way: an absent reason is
+   * 'unknown', not a guess reconstructed from the message text.
+   */
+  reason?: string
 }
 
 // 403 (CSRF) and 429 (rate limit) are the two exceptions in this API's
@@ -38,22 +46,25 @@ interface ErrorResponseBody {
 // reading those libraries' source, not assumed from docs/openapi.yaml
 // alone — see this PR's description for the ratelimit case, which
 // docs/openapi.yaml still (incorrectly) documents as JSON.
-async function readErrorMessage(response: Response): Promise<string | undefined> {
+async function readErrorBody(response: Response): Promise<ErrorResponseBody> {
   try {
-    const body = (await response.json()) as ErrorResponseBody
-    return body.error
+    return (await response.json()) as ErrorResponseBody
   } catch {
-    return undefined
+    return {}
   }
 }
 
-const INVALID_TRANSITION_MARKER = 'invalid status transition'
-const CONCURRENCY_MARKER = 'modified concurrently'
+async function readErrorMessage(response: Response): Promise<string | undefined> {
+  return (await readErrorBody(response)).error
+}
 
-function classifyConflict(message: string | undefined): 'invalid_transition' | 'concurrency' | 'unknown' {
-  if (!message) return 'unknown'
-  if (message.includes(INVALID_TRANSITION_MARKER)) return 'invalid_transition'
-  if (message.includes(CONCURRENCY_MARKER)) return 'concurrency'
+// Reads the server's own machine-readable discriminator (issue #153)
+// instead of pattern-matching the human-readable message, which used to
+// be the only way to tell "the transition itself is illegal" apart from
+// "someone else changed this task first" — fragile, since nothing on
+// the Go side enforced that either message's text stayed matchable.
+function classifyConflict(reason: string | undefined): 'invalid_transition' | 'concurrency' | 'unknown' {
+  if (reason === 'invalid_transition' || reason === 'concurrency') return reason
   return 'unknown'
 }
 
@@ -79,8 +90,8 @@ export async function classifyError(response: Response): Promise<ApiError> {
     case 404:
       return { requestId, kind: 'not_found' }
     case 409: {
-      const message = await readErrorMessage(response)
-      return { requestId, kind: 'conflict', reason: classifyConflict(message), message: message ?? '' }
+      const body = await readErrorBody(response)
+      return { requestId, kind: 'conflict', reason: classifyConflict(body.reason), message: body.error ?? '' }
     }
     case 429: {
       const retryAfter = response.headers.get('Retry-After')

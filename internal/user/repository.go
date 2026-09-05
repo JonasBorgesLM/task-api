@@ -19,6 +19,21 @@ type Repository interface {
 	FindUserByEmail(ctx context.Context, email string) (User, error)
 	FindUserByID(ctx context.Context, id string) (User, error)
 
+	// UpdateUserPassword replaces id's stored password hash and bumps
+	// updated_at to now. Returns ErrNotFound if no user with that id
+	// exists. Backs Service.ChangePassword — never called with a
+	// plaintext password, only the bcrypt hash of one.
+	UpdateUserPassword(ctx context.Context, id, passwordHash string) error
+
+	// DeleteUser removes the user row itself. Returns ErrNotFound if no
+	// user with that id exists. Backs Service.DeleteAccount, and must be
+	// called only after every task the user owns is already gone:
+	// tasks.user_id has no ON DELETE CASCADE (unlike sessions.user_id —
+	// see 0004_add_user_id_to_tasks.up.sql's own comment), so
+	// postgresRepository's implementation errors instead of silently
+	// leaving orphaned tasks behind if any still reference this id.
+	DeleteUser(ctx context.Context, id string) error
+
 	// CreateSession stores s and evicts s.UserID's oldest sessions (by
 	// CreatedAt) past maxSessions, inside one transaction serialized per
 	// user by a PostgreSQL advisory lock — see postgresRepository.
@@ -54,6 +69,15 @@ type Repository interface {
 	// live session is gone, active one included, rather than having to
 	// enumerate and delete them individually.
 	DeleteSessionsForUser(ctx context.Context, userID string) error
+
+	// DeleteSessionsForUserExcept removes every session belonging to
+	// userID other than the one whose hash is keepTokenHash. Backs
+	// Service.ChangePassword: rotating the credential should not also
+	// sign out the session that just proved it knows the current
+	// password, only every *other* one — the opposite split from
+	// DeleteSessionsForUser, which is unconditional on purpose (see its
+	// own doc comment) because LogoutAll has no session left to spare.
+	DeleteSessionsForUserExcept(ctx context.Context, userID, keepTokenHash string) error
 
 	// DeleteExpiredSessions removes every session whose ExpiresAt is
 	// before now. See Service.PruneExpiredSessions — the only caller —

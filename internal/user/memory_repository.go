@@ -77,6 +77,52 @@ func (r *memoryRepository) FindUserByID(ctx context.Context, id string) (User, e
 	return u, nil
 }
 
+// UpdateUserPassword replaces id's stored password hash and bumps
+// updated_at to now. Returns ErrNotFound if id doesn't exist.
+func (r *memoryRepository) UpdateUserPassword(ctx context.Context, id, passwordHash string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	u, ok := r.usersByID[id]
+	if !ok {
+		return ErrNotFound
+	}
+	u.PasswordHash = passwordHash
+	u.UpdatedAt = time.Now()
+	r.usersByID[id] = u
+	return nil
+}
+
+// DeleteUser removes the user row itself. Returns ErrNotFound if id
+// doesn't exist.
+//
+// Unlike postgresRepository, this cannot refuse to delete a user who
+// still owns a task — memoryRepository has no visibility into
+// task.memoryRepository's data at all, the two are wired together only
+// through cmd/api. The ordering guarantee (cascade before this) has to
+// hold on its own merits here; there is no foreign key standing in as a
+// second check the way there is in PostgreSQL.
+func (r *memoryRepository) DeleteUser(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	u, ok := r.usersByID[id]
+	if !ok {
+		return ErrNotFound
+	}
+	delete(r.usersByID, id)
+	delete(r.usersByEmail, u.Email)
+	return nil
+}
+
 // CreateSession persists a new session and evicts s.UserID's oldest
 // sessions past maxSessions, all under one write lock — see Repository's
 // doc comment on CreateSession for why that matters for two logins
@@ -119,6 +165,24 @@ func (r *memoryRepository) DeleteSessionsForUser(ctx context.Context, userID str
 
 	for hash, s := range r.sessions {
 		if s.UserID == userID {
+			delete(r.sessions, hash)
+		}
+	}
+	return nil
+}
+
+// DeleteSessionsForUserExcept removes every session belonging to userID
+// other than the one whose hash is keepTokenHash.
+func (r *memoryRepository) DeleteSessionsForUserExcept(ctx context.Context, userID, keepTokenHash string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for hash, s := range r.sessions {
+		if s.UserID == userID && hash != keepTokenHash {
 			delete(r.sessions, hash)
 		}
 	}
