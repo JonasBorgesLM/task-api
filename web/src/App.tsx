@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
+import { ErrorBoundary, SectionErrorFallback } from './components/ErrorBoundary'
 import { LoginPage } from './features/auth/LoginPage'
 import { RegisterPage } from './features/auth/RegisterPage'
 import { RequireAuth } from './features/auth/RequireAuth'
@@ -28,7 +29,14 @@ function AuthenticatedHome() {
       onLogout={() => void logout()}
       onLogoutAll={() => void logoutAll()}
     >
-      <TaskList />
+      {/* A second, narrower boundary than the app-wide one in main.tsx:
+          a malformed task shouldn't also take the header and account
+          menu off screen along with the list. */}
+      <ErrorBoundary
+        fallback={<SectionErrorFallback message="Something went wrong loading your tasks." />}
+      >
+        <TaskList />
+      </ErrorBoundary>
     </AppShell>
   )
 }
