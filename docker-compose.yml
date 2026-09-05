@@ -112,6 +112,18 @@ services:
       # frontend on another port) instead, or set it to an empty value to
       # disable CORS again.
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8082}
+      # Passed through from the host shell the same way
+      # CORS_ALLOWED_ORIGINS is above — without this, setting either
+      # variable before `docker compose up` had no effect at all inside
+      # the container, and the binary's own tight defaults (10 / 0.05,
+      # see config.Config.AuthRateLimitBurst/AuthRateLimitPerSec) stayed
+      # in force regardless. That silently broke the exact recipe
+      # web/playwright.config.ts documents for running the full E2E
+      # suite against this stack (issue #188): register/login-heavy
+      # specs hit 429 in cascade, which then look like unrelated
+      # navigation failures downstream.
+      AUTH_RATE_LIMIT_BURST: ${AUTH_RATE_LIMIT_BURST:-10}
+      AUTH_RATE_LIMIT_PER_SEC: ${AUTH_RATE_LIMIT_PER_SEC:-0.05}
       # Attachments are opt-in (see config.Config.AttachmentStorageDir):
       # without ATTACHMENT_STORAGE_DIR or the ATTACHMENT_S3_* variables
       # set, attachmentsEnabled(cfg) is false and the upload/download
