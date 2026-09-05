@@ -66,6 +66,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Change the caller's own password
+         * @description Requires the current password — an authenticated session alone is not enough, so a hijacked-but-live session cannot rotate the credential on its own. On success, replaces the stored password hash and revokes every *other* session belonging to the account, keeping only the one that made this call alive: rotating the credential should not also sign the caller out.
+         */
+        post: operations["changePassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/logout": {
         parameters: {
             query?: never;
@@ -408,6 +428,19 @@ export interface components {
             email: string;
             /** @example correct horse battery staple */
             password: string;
+        };
+        /** @description Accepted body for POST /auth/password. */
+        ChangePasswordRequest: {
+            /**
+             * @description The account's current password. Required — see the operation's own description.
+             * @example correct horse battery staple
+             */
+            current_password: string;
+            /**
+             * @description Required, 8–72 characters — the same bounds RegisterRequest's password enforces, for the same bcrypt-input-limit reason.
+             * @example another correct horse battery staple
+             */
+            new_password: string;
         };
         /** @description Body returned by a successful POST /auth/login. */
         LoginResponse: {
@@ -863,6 +896,73 @@ export interface operations {
             };
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalServerError"];
+        };
+    };
+    changePassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Request bodies larger than 1 MiB are rejected, surfacing as the same 400 "invalid request body" response as malformed JSON. */
+        requestBody: {
+            content: {
+                /**
+                 * @example {
+                 *       "current_password": "correct horse battery staple",
+                 *       "new_password": "another correct horse battery staple"
+                 *     }
+                 */
+                "application/json": components["schemas"]["ChangePasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description Password changed. Every other session was revoked. */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /** @example {} */
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description Malformed JSON body, or a `new_password` shorter than 8 or longer than 72 characters (bcrypt's own input limit). */
+            400: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "invalid input: password must be at least 8 characters"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing/expired/malformed bearer token, or `current_password` does not match the account's stored password — deliberately the same response either way. */
+            401: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "invalid email or password"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     logout: {

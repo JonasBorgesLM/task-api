@@ -77,6 +77,26 @@ func (r *memoryRepository) FindUserByID(ctx context.Context, id string) (User, e
 	return u, nil
 }
 
+// UpdateUserPassword replaces id's stored password hash and bumps
+// updated_at to now. Returns ErrNotFound if id doesn't exist.
+func (r *memoryRepository) UpdateUserPassword(ctx context.Context, id, passwordHash string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	u, ok := r.usersByID[id]
+	if !ok {
+		return ErrNotFound
+	}
+	u.PasswordHash = passwordHash
+	u.UpdatedAt = time.Now()
+	r.usersByID[id] = u
+	return nil
+}
+
 // CreateSession persists a new session and evicts s.UserID's oldest
 // sessions past maxSessions, all under one write lock — see Repository's
 // doc comment on CreateSession for why that matters for two logins
@@ -119,6 +139,24 @@ func (r *memoryRepository) DeleteSessionsForUser(ctx context.Context, userID str
 
 	for hash, s := range r.sessions {
 		if s.UserID == userID {
+			delete(r.sessions, hash)
+		}
+	}
+	return nil
+}
+
+// DeleteSessionsForUserExcept removes every session belonging to userID
+// other than the one whose hash is keepTokenHash.
+func (r *memoryRepository) DeleteSessionsForUserExcept(ctx context.Context, userID, keepTokenHash string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for hash, s := range r.sessions {
+		if s.UserID == userID && hash != keepTokenHash {
 			delete(r.sessions, hash)
 		}
 	}

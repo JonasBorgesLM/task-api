@@ -1857,6 +1857,121 @@ func TestIntegration_LogoutAll_InvalidatesEverySession(t *testing.T) {
 	}
 }
 
+// TestIntegration_ChangePassword_RevokesOtherSessionsButKeepsCaller
+// drives two real logins for the same account, changes the password
+// using the *second* session's token, and confirms the split
+// Service.ChangePassword's doc comment promises: the first session is
+// rejected afterward, the second (the one that made the call) still
+// works, the old password no longer authenticates a new login, and the
+// new one does. This is the integration counterpart of the fakeRepository
+// unit tests in internal/user/service_test.go (issue #196) — it proves
+// the same behavior against the real HTTP/middleware/memoryRepository
+// wiring, not just a fake.
+func TestIntegration_ChangePassword_RevokesOtherSessionsButKeepsCaller(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	const email = "change-password@example.com"
+	const oldPassword = "password12345"
+	const newPassword = "new-password-6789"
+
+	tokenA := registerAndLoginAs(t, srv, email)
+
+	client := csrfClient(t, srv)
+	csrfTok := fetchCSRFToken(t, client, srv)
+	loginBody := `{"email":"` + email + `","password":"` + oldPassword + `"}`
+	loginResp, err := client.Do(csrfPost(t, srv, csrfTok, apiPrefix+"/auth/login", loginBody))
+	if err != nil {
+		t.Fatalf("second POST /auth/login: %v", err)
+	}
+	defer loginResp.Body.Close()
+	var loginRespBody struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(loginResp.Body).Decode(&loginRespBody); err != nil {
+		t.Fatalf("decode second login response: %v", err)
+	}
+	tokenB := loginRespBody.Token
+
+	// Both sessions work before the password change.
+	for name, token := range map[string]string{"A": tokenA, "B": tokenB} {
+		resp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/auth/me", ""))
+		if err != nil {
+			t.Fatalf("GET /auth/me (token %s): %v", name, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /auth/me (token %s) before password change: status = %d, want %d", name, resp.StatusCode, http.StatusOK)
+		}
+	}
+
+	// Change the password using token B. Authorization is present, so
+	// this skips CSRF entirely (see middleware.CSRF's doc comment) —
+	// authedRequest, not csrfPost, is the right builder here.
+	changeBody := `{"current_password":"` + oldPassword + `","new_password":"` + newPassword + `"}`
+	changeResp, err := srv.Client().Do(authedRequest(t, tokenB, http.MethodPost, srv.URL+apiPrefix+"/auth/password", changeBody))
+	if err != nil {
+		t.Fatalf("POST /auth/password: %v", err)
+	}
+	defer changeResp.Body.Close()
+	if changeResp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(changeResp.Body)
+		t.Fatalf("POST /auth/password status = %d, want %d, body = %s", changeResp.StatusCode, http.StatusOK, respBody)
+	}
+
+	// Token A must now be rejected...
+	respA, err := srv.Client().Do(authedRequest(t, tokenA, http.MethodGet, srv.URL+apiPrefix+"/auth/me", ""))
+	if err != nil {
+		t.Fatalf("GET /auth/me (token A) after password change: %v", err)
+	}
+	respA.Body.Close()
+	if respA.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /auth/me (token A) after password change: status = %d, want %d", respA.StatusCode, http.StatusUnauthorized)
+	}
+
+	// ...but token B — the one that made the change — must still work.
+	// This is the one behavior that distinguishes ChangePassword from
+	// LogoutAll: rotating the credential must not also sign out the
+	// session that just proved it knows the current password.
+	respB, err := srv.Client().Do(authedRequest(t, tokenB, http.MethodGet, srv.URL+apiPrefix+"/auth/me", ""))
+	if err != nil {
+		t.Fatalf("GET /auth/me (token B, the caller) after password change: %v", err)
+	}
+	respB.Body.Close()
+	if respB.StatusCode != http.StatusOK {
+		t.Errorf("GET /auth/me (token B, the caller) after password change: status = %d, want %d", respB.StatusCode, http.StatusOK)
+	}
+
+	// The old password must no longer authenticate a new login... A
+	// fresh CSRF token is required here: the second login above rotated
+	// the one client's jar started with (see user.Handler.login's doc
+	// comment on Rotate), so reusing csrfTok would 403 for an unrelated
+	// reason and mask whatever this assertion is actually checking.
+	csrfTok = fetchCSRFToken(t, client, srv)
+	oldLoginResp, err := client.Do(csrfPost(t, srv, csrfTok, apiPrefix+"/auth/login", loginBody))
+	if err != nil {
+		t.Fatalf("POST /auth/login with old password: %v", err)
+	}
+	oldLoginResp.Body.Close()
+	if oldLoginResp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("POST /auth/login with old password after change: status = %d, want %d", oldLoginResp.StatusCode, http.StatusUnauthorized)
+	}
+
+	// ...and the new one must. Not rotated by the failed attempt above
+	// (Rotate only ever runs on a successful login), but fetched fresh
+	// anyway so this assertion never depends on that fact holding.
+	csrfTok = fetchCSRFToken(t, client, srv)
+	newLoginBody := `{"email":"` + email + `","password":"` + newPassword + `"}`
+	newLoginResp, err := client.Do(csrfPost(t, srv, csrfTok, apiPrefix+"/auth/login", newLoginBody))
+	if err != nil {
+		t.Fatalf("POST /auth/login with new password: %v", err)
+	}
+	newLoginResp.Body.Close()
+	if newLoginResp.StatusCode != http.StatusOK {
+		t.Errorf("POST /auth/login with new password after change: status = %d, want %d", newLoginResp.StatusCode, http.StatusOK)
+	}
+}
+
 // TestIntegration_AccessLog_IncludesUserIDForAuthenticatedRequest drives
 // a real authenticated request through the full middleware chain
 // newServer builds — Logging wraps the mux, RequireAuth is wired inside

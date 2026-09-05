@@ -85,6 +85,28 @@ func (r *postgresRepository) FindUserByID(ctx context.Context, id string) (User,
 	return u, nil
 }
 
+// UpdateUserPassword replaces id's stored password hash and bumps
+// updated_at to now. Returns ErrNotFound if no user with that id exists.
+func (r *postgresRepository) UpdateUserPassword(ctx context.Context, id, passwordHash string) error {
+	const query = `
+		UPDATE users
+		SET password_hash = $2, updated_at = now()
+		WHERE id = $1::uuid
+	`
+	result, err := r.db.ExecContext(ctx, query, id, passwordHash)
+	if err != nil {
+		return fmt.Errorf("postgres: update user password: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("postgres: update user password: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // CreateSession persists a new session.
 // CreateSession inserts s and evicts s.UserID's oldest sessions past
 // maxSessions. The DELETE's subquery orders by created_at DESC and keeps
@@ -151,6 +173,16 @@ func (r *postgresRepository) DeleteSessionsForUser(ctx context.Context, userID s
 	const query = `DELETE FROM sessions WHERE user_id = $1::uuid`
 	if _, err := r.db.ExecContext(ctx, query, userID); err != nil {
 		return fmt.Errorf("postgres: delete sessions for user: %w", err)
+	}
+	return nil
+}
+
+// DeleteSessionsForUserExcept removes every session belonging to userID
+// other than the one whose hash is keepTokenHash.
+func (r *postgresRepository) DeleteSessionsForUserExcept(ctx context.Context, userID, keepTokenHash string) error {
+	const query = `DELETE FROM sessions WHERE user_id = $1::uuid AND token_hash != $2`
+	if _, err := r.db.ExecContext(ctx, query, userID, keepTokenHash); err != nil {
+		return fmt.Errorf("postgres: delete sessions for user except: %w", err)
 	}
 	return nil
 }

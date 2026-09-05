@@ -154,6 +154,60 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 	return u, nil
 }
 
+// ChangePassword verifies currentPassword against userID's stored hash,
+// replaces it with a hash of newPassword, and revokes every other
+// session belonging to userID — every one except currentSessionToken,
+// the one that authenticated this call.
+//
+// Returns ErrInvalidCredentials if currentPassword is wrong (including
+// the essentially unreachable case of userID no longer existing — same
+// error either way, the same non-distinguishing discipline
+// Authenticate follows). Returns ErrInvalidInput if newPassword fails
+// validatePassword.
+//
+// Deliberately not a distinct new error/status for "current password
+// wrong" versus "new password invalid": both are input validation
+// problems from the caller's point of view, and handleServiceError
+// already maps ErrInvalidCredentials to 401 and ErrInvalidInput to 400,
+// matching what issue #196 asks for without inventing a third sentinel.
+func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, newPassword, currentSessionToken string) error {
+	if err := validatePassword(newPassword); err != nil {
+		return err
+	}
+
+	u, err := s.repo.FindUserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return ErrInvalidCredentials
+		}
+		return fmt.Errorf("change password: %w", err)
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(currentPassword)); err != nil {
+		return ErrInvalidCredentials
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("change password: hash password: %w", err)
+	}
+
+	if err := s.repo.UpdateUserPassword(ctx, userID, string(hash)); err != nil {
+		return fmt.Errorf("change password: %w", err)
+	}
+
+	// Runs after the password is already changed, not before: a failure
+	// here would leave the new password in place with old sessions still
+	// alive, which is exactly the state issue #196 exists to close —
+	// better to report it (as a 500, via the wrap below) than to silently
+	// treat the password change as if it hadn't happened.
+	if err := s.repo.DeleteSessionsForUserExcept(ctx, userID, hashToken(currentSessionToken)); err != nil {
+		return fmt.Errorf("change password: revoke other sessions: %w", err)
+	}
+
+	return nil
+}
+
 // CreateSession issues a new bearer token for userID, valid for
 // Service's configured sessionTTL. The raw token is returned to the
 // caller exactly once — only its SHA-256 hash is persisted (see Session's

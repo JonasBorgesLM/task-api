@@ -19,6 +19,12 @@ type Repository interface {
 	FindUserByEmail(ctx context.Context, email string) (User, error)
 	FindUserByID(ctx context.Context, id string) (User, error)
 
+	// UpdateUserPassword replaces id's stored password hash and bumps
+	// updated_at to now. Returns ErrNotFound if no user with that id
+	// exists. Backs Service.ChangePassword — never called with a
+	// plaintext password, only the bcrypt hash of one.
+	UpdateUserPassword(ctx context.Context, id, passwordHash string) error
+
 	// CreateSession stores s and evicts s.UserID's oldest sessions (by
 	// CreatedAt) past maxSessions, inside one transaction serialized per
 	// user by a PostgreSQL advisory lock — see postgresRepository.
@@ -54,6 +60,15 @@ type Repository interface {
 	// live session is gone, active one included, rather than having to
 	// enumerate and delete them individually.
 	DeleteSessionsForUser(ctx context.Context, userID string) error
+
+	// DeleteSessionsForUserExcept removes every session belonging to
+	// userID other than the one whose hash is keepTokenHash. Backs
+	// Service.ChangePassword: rotating the credential should not also
+	// sign out the session that just proved it knows the current
+	// password, only every *other* one — the opposite split from
+	// DeleteSessionsForUser, which is unconditional on purpose (see its
+	// own doc comment) because LogoutAll has no session left to spare.
+	DeleteSessionsForUserExcept(ctx context.Context, userID, keepTokenHash string) error
 
 	// DeleteExpiredSessions removes every session whose ExpiresAt is
 	// before now. See Service.PruneExpiredSessions — the only caller —

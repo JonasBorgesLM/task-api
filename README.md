@@ -228,6 +228,7 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 |---|---|---|---|
 | `POST` | `/v1/auth/register` | — | Create a user account |
 | `POST` | `/v1/auth/login` | — | Authenticate, receive a bearer session token |
+| `POST` | `/v1/auth/password` | required | Change the caller's own password, revoking every other session |
 | `POST` | `/v1/auth/logout` | required | Invalidate the current session token |
 | `POST` | `/v1/auth/logout-all` | required | Invalidate every session for the account, including the one making the call |
 | `GET` | `/v1/auth/me` | required | Get the authenticated user |

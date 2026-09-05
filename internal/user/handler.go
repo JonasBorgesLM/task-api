@@ -22,6 +22,7 @@ const maxRequestBodyBytes = 1 << 20 // 1 MiB
 type userService interface {
 	Register(ctx context.Context, email, password string) (User, error)
 	Authenticate(ctx context.Context, email, password string) (User, error)
+	ChangePassword(ctx context.Context, userID, currentPassword, newPassword, currentSessionToken string) error
 	CreateSession(ctx context.Context, userID string) (token string, expiresAt time.Time, err error)
 	Logout(ctx context.Context, token string) error
 	LogoutAll(ctx context.Context, userID string) error
@@ -78,6 +79,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth, rateLimit midd
 	mux.Handle("POST /auth/register", rateLimit(http.HandlerFunc(h.register)))
 	mux.Handle("POST /auth/login", rateLimit(http.HandlerFunc(h.login)))
 	mux.Handle("GET /auth/csrf-token", http.HandlerFunc(h.csrfToken))
+	mux.Handle("POST /auth/password", requireAuth(http.HandlerFunc(h.changePassword)))
 	mux.Handle("POST /auth/logout", requireAuth(http.HandlerFunc(h.logout)))
 	mux.Handle("POST /auth/logout-all", requireAuth(http.HandlerFunc(h.logoutAll)))
 	mux.Handle("GET /auth/me", requireAuth(http.HandlerFunc(h.me)))
@@ -226,6 +228,38 @@ func clearSessionCookie(w http.ResponseWriter, insecure bool) {
 // for longer than the token actually is.
 func sessionCookieMaxAgeSeconds(expiresAt time.Time) int {
 	return int(time.Until(expiresAt).Seconds())
+}
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// changePassword handles POST /auth/password. Requires the current
+// password (see Service.ChangePassword's doc comment for why a
+// hijacked-but-live session still can't rotate the credential without
+// it) and revokes every other session belonging to the caller, keeping
+// only the one that made this call alive — see RegisterRoutes and
+// Service.ChangePassword.
+func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	defer r.Body.Close()
+
+	var req changePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	userID, _ := middleware.UserIDFromContext(r.Context())
+	token, _ := middleware.SessionTokenFromContext(r.Context())
+
+	if err := h.svc.ChangePassword(r.Context(), userID, req.CurrentPassword, req.NewPassword, token); err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
+	h.writeJSON(w, r, http.StatusOK, struct{}{})
 }
 
 // logout handles POST /auth/logout. It reads the raw bearer token

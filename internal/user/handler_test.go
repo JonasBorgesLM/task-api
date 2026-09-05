@@ -48,17 +48,24 @@ var testCSRFProtector = func() *csrf.Protector {
 // sessionValidator (RequireAuth) — one fake implements both, since
 // RequireAuth only needs ValidateToken.
 type fakeService struct {
-	registerFn      func(email, password string) (User, error)
-	authenticateFn  func(email, password string) (User, error)
-	createSessionFn func(userID string) (string, time.Time, error)
-	logoutFn        func(token string) error
-	logoutAllFn     func(userID string) error
-	getUserFn       func(id string) (User, error)
-	validateTokenFn func(token string) (string, error)
+	registerFn       func(email, password string) (User, error)
+	authenticateFn   func(email, password string) (User, error)
+	changePasswordFn func(userID, currentPassword, newPassword, currentSessionToken string) error
+	createSessionFn  func(userID string) (string, time.Time, error)
+	logoutFn         func(token string) error
+	logoutAllFn      func(userID string) error
+	getUserFn        func(id string) (User, error)
+	validateTokenFn  func(token string) (string, error)
 
-	logoutCalledWith    string
-	logoutAllCalledWith string
-	getUserCalledWith   string
+	logoutCalledWith         string
+	logoutAllCalledWith      string
+	getUserCalledWith        string
+	changePasswordCalledWith struct {
+		userID              string
+		currentPassword     string
+		newPassword         string
+		currentSessionToken string
+	}
 }
 
 func (f *fakeService) Register(_ context.Context, email, password string) (User, error) {
@@ -73,6 +80,17 @@ func (f *fakeService) Authenticate(_ context.Context, email, password string) (U
 		return f.authenticateFn(email, password)
 	}
 	return User{}, nil
+}
+
+func (f *fakeService) ChangePassword(_ context.Context, userID, currentPassword, newPassword, currentSessionToken string) error {
+	f.changePasswordCalledWith.userID = userID
+	f.changePasswordCalledWith.currentPassword = currentPassword
+	f.changePasswordCalledWith.newPassword = newPassword
+	f.changePasswordCalledWith.currentSessionToken = currentSessionToken
+	if f.changePasswordFn != nil {
+		return f.changePasswordFn(userID, currentPassword, newPassword, currentSessionToken)
+	}
+	return nil
 }
 
 func (f *fakeService) CreateSession(_ context.Context, userID string) (string, time.Time, error) {
@@ -323,6 +341,84 @@ func TestLogin_Handler_InvalidJSON(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("login invalid JSON status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// --- POST /auth/password ---
+
+func TestChangePassword_Handler_UsesUserIDAndTokenFromContext(t *testing.T) {
+	svc := &fakeService{}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/password",
+		strings.NewReader(`{"current_password":"old-password123","new_password":"new-password456"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	req = req.WithContext(middleware.ContextWithSessionToken(req.Context(), "the-token"))
+	w := httptest.NewRecorder()
+	h.changePassword(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("change password status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if svc.changePasswordCalledWith.userID != "u1" {
+		t.Errorf("change password called Service.ChangePassword with userID %q, want %q", svc.changePasswordCalledWith.userID, "u1")
+	}
+	if svc.changePasswordCalledWith.currentPassword != "old-password123" {
+		t.Errorf("change password called Service.ChangePassword with currentPassword %q, want %q", svc.changePasswordCalledWith.currentPassword, "old-password123")
+	}
+	if svc.changePasswordCalledWith.newPassword != "new-password456" {
+		t.Errorf("change password called Service.ChangePassword with newPassword %q, want %q", svc.changePasswordCalledWith.newPassword, "new-password456")
+	}
+	if svc.changePasswordCalledWith.currentSessionToken != "the-token" {
+		t.Errorf("change password called Service.ChangePassword with currentSessionToken %q, want %q", svc.changePasswordCalledWith.currentSessionToken, "the-token")
+	}
+}
+
+func TestChangePassword_Handler_InvalidJSON(t *testing.T) {
+	h := newHandlerWithFake(&fakeService{})
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/password", strings.NewReader(`{invalid}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.changePassword(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("change password invalid JSON status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestChangePassword_Handler_WrongCurrentPassword(t *testing.T) {
+	svc := &fakeService{
+		changePasswordFn: func(_, _, _, _ string) error { return ErrInvalidCredentials },
+	}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/password",
+		strings.NewReader(`{"current_password":"wrong","new_password":"new-password456"}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.changePassword(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("change password with wrong current password: status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestChangePassword_Handler_InvalidNewPassword(t *testing.T) {
+	svc := &fakeService{
+		changePasswordFn: func(_, _, _, _ string) error { return ErrInvalidInput },
+	}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/password",
+		strings.NewReader(`{"current_password":"old-password123","new_password":"short"}`))
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.changePassword(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("change password with invalid new password: status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }
 
