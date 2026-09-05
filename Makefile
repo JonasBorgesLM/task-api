@@ -3,6 +3,7 @@
         fmt fmt-check vet lint vulncheck tidy-check check \
         docker-build docker-up docker-down db-up storage-up \
         migrate-up migrate-down seed seed-reset db-reset \
+        signoz-dashboard \
         changelog-section
 
 .DEFAULT_GOAL := help
@@ -198,6 +199,30 @@ seed-reset: ## Empty users/sessions/tasks, then reseed with SEED_USERS/SEED_TASK
 
 db-reset: ## Wipe ALL data (users, sessions, tasks) without reseeding
 	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/seed -reset -users=0
+
+##@ Observability
+
+# Where the local SigNoz instance's API lives (see docs/DECISIONS.md's Fase
+# 11 section — it runs via Docker Compose/Foundry, outside this repo).
+SIGNOZ ?= http://localhost:8080
+
+# The crier commit the dashboard template below is fetched from. Pinned to
+# the exact commit it was captured and verified against (SigNoz v0.139.0,
+# see crier's docs/observability/signoz/README.md), not "main" — the
+# template is documentation, not a tested contract (ADR-0023 in crier), so
+# nothing here should change out from under this target until someone
+# deliberately bumps this on purpose, the same policy STATICCHECK_VERSION
+# and GOVULNCHECK_VERSION follow above.
+CRIER_DASHBOARD_REF ?= 87048ec40ef3d3e2a47a32be0c47f4881cd100f3
+
+signoz-dashboard: ## Provision crier's task-api SigNoz dashboard (needs SIGNOZ_API_KEY_FILE=<path to a SigNoz API key from its UI>; SIGNOZ defaults to localhost:8080)
+	@test -n "$(SIGNOZ_API_KEY_FILE)" || { echo "SIGNOZ_API_KEY_FILE is required: a file holding a SigNoz API key minted in its UI, e.g. make signoz-dashboard SIGNOZ_API_KEY_FILE=~/.signoz-pat" >&2; exit 1; }
+	curl -fsSL "https://raw.githubusercontent.com/JonasBorgesLM/crier/$(CRIER_DASHBOARD_REF)/docs/observability/signoz/dashboard.json" \
+		| sed "s/{{\.ServiceName}}/task-api/g" \
+		| curl -sS -w '\nHTTP %{http_code}\n' -X POST "$(SIGNOZ)/api/v2/dashboards" \
+			-H "SIGNOZ-API-KEY: $$(cat $(SIGNOZ_API_KEY_FILE))" \
+			-H 'Content-Type: application/json' \
+			--data-binary @-
 
 ##@ Release
 

@@ -1143,3 +1143,69 @@ O frontend nunca guarda a credencial de sessão em `localStorage`/`sessionStorag
 Nenhum item de `docs/changes/web-frontend/plan.md` (`CI-1`–`CI-11`) nem as issues `#119`–`#129` decidiam isso explicitamente antes de `CI-6` — só nomeavam "Page"s (`RegisterPage`, `LoginPage`, e mais tarde a lista de tasks), sem dizer se cada uma teria sua própria URL ou seria só uma troca de view por estado local. Como a decisão molda a estrutura de todo o resto da Fase 13 (CRUD de task, anexos), foi levada ao usuário em vez de escolhida em silêncio — decisão: `react-router-dom`, com URLs reais desde já (`/login`, `/register`, `/`), não uma alternativa sem dependência nova baseada em estado local.
 
 Consequência direta, não antecipação: `RequireAuth` (`web/src/features/auth/RequireAuth.tsx`) — um guard de rota que redireciona para `/login` quando `useAuth()` não está autenticado — não está na lista de arquivos de `CI-6` em `plan.md`, mas é o que torna a rota `/` protegida possível; sem ele, "URLs reais" e "sessão só sabida via `GET /auth/me`" não se sustentam juntas.
+
+---
+
+## crier: ruído de health-check filtrado por severidade, não por amostragem
+
+`cmd/api/crier.go`'s `buildCrier` passa um `core.Filter` com um `AttributeRule`
+(`Key: "path", ValuePrefix: "/health"`) que eleva `MinSeverity` para
+`core.SeverityError` só para essa regra — recurso do crier `core` v0.3.0
+(ADR-0022 do próprio crier, "attribute-matched sampling"). Isso não muda o
+log em stdout (`internal/middleware/logging.go` continua igual); afeta só a
+cópia espelhada que sai para o `CRIER_OTLP_ENDPOINT`.
+
+**Por quê:** `/health` e `/health/ready` são batidos por probes de
+liveness/readiness em intervalo curto e quase sempre devolvem `200` — volume
+que domina o espelho sem carregar sinal, exatamente o caso que o próprio
+dashboard do crier documenta ("Health checks: o ruído que a ADR-0022 existe
+para conter"). `middleware.Logging` só sobe o nível para `Error` numa
+resposta `5xx` (ver seu próprio doc comment) — essas duas rotas não aceitam
+parâmetro nenhum, então não têm caminho de `4xx` hoje — o que faz
+`MinSeverity: SeverityError` bloquear exatamente o `200` rotineiro e deixar
+passar uma falha real (`/health/ready` respondendo `503`) sem exceção.
+
+**Alternativa rejeitada:** `SampleRate` em vez de `MinSeverity` na mesma
+regra. Rejeitada porque `SampleRate` é probabilístico — usado aqui,
+descartaria uma fração aleatória de qualquer severidade que bater na regra,
+inclusive uma falha intermitente de `503`. `MinSeverity` só filtra o que já
+sabemos ser ruído puro (o `200` de rotina), nunca por sorte.
+
+**Trade-off aceito:** se `/health`/`/health/ready` um dia passarem a devolver
+`4xx` (não acontece hoje — nenhuma delas lê corpo, query string ou parâmetro
+de rota), essas linhas também seriam engolidas pelo espelho, silenciosamente,
+até alguém notar e revisitar esta regra. Coberto por
+`TestBuildCrier_HealthCheckNoise_FilteredUnlessError`
+(`cmd/api/crier_test.go`), que prova as duas metades — o `200` rotineiro
+some, o `503` continua chegando ao coletor.
+
+---
+
+## crier: dashboard SigNoz provisionado a partir do template oficial, fixado em um commit
+
+`make signoz-dashboard` busca
+`docs/observability/signoz/dashboard.json` do próprio repositório do crier
+via `raw.githubusercontent.com`, substitui `{{.ServiceName}}` por
+`task-api` e faz o `POST /api/v2/dashboards` documentado no README daquele
+arquivo. A referência é um SHA de commit fixo
+(`CRIER_DASHBOARD_REF` no `Makefile`, hoje `87048ec4…`), não `main`.
+
+**Por quê:** o crier decidiu (ADR-0023 de lá) que esse arquivo é
+"documentação, não contrato testado" — nada em CI do crier o exercita, e o
+próprio README dele já registrou uma mudança de forma incompatível entre
+versões do SigNoz (`tags` deixou de aceitar array de strings). Um `main`
+sem pin mudaria o que este `make` alvo provisiona aqui sem nenhum changelog
+deste lado. O SHA fixado é o commit que o crier verificou de ponta a ponta
+contra um SigNoz real (`v0.139.0`, 10 de 10 painéis retornando dado, não
+série vazia) — ver `docs/observability/signoz/README.md` no repositório do
+crier.
+
+**Alternativa rejeitada:** vendorizar uma cópia do `dashboard.json` dentro
+deste repositório. Rejeitada porque o crier já é a fonte única desse
+template (ADR-0023 de lá) — uma segunda cópia aqui divergiria da de lá sem
+nada para avisar quando isso acontecesse.
+
+**Trade-off aceito:** melhorias futuras no template do crier não chegam
+aqui sozinhas — alguém precisa notar, revisar, e subir
+`CRIER_DASHBOARD_REF` de propósito, o mesmo custo que este `Makefile` já
+aceita para `STATICCHECK_VERSION`/`GOVULNCHECK_VERSION`.

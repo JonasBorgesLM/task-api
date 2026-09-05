@@ -80,6 +80,8 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 
 `config.Load()` returns an error (and the process refuses to start) if a timeout/TTL/max-age isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
+With `CRIER_OTLP_ENDPOINT` set, `make signoz-dashboard` provisions the SigNoz dashboard [crier](https://github.com/JonasBorgesLM/crier) ships for exactly this log shape — needs `SIGNOZ_API_KEY_FILE` pointing at a SigNoz API key; see `docs/DECISIONS.md`.
+
 ## Running Locally
 
 ```bash
