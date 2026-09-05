@@ -1190,6 +1190,17 @@ via `raw.githubusercontent.com`, substitui `{{.ServiceName}}` por
 arquivo. A referência é um SHA de commit fixo
 (`CRIER_DASHBOARD_REF` no `Makefile`, hoje `87048ec4…`), não `main`.
 
+**Verificado rodando, não só lendo o `Makefile` (ver § "Princípio geral de
+validação" acima):** `make signoz-dashboard` executado de ponta a ponta
+contra um SigNoz real (Foundry Compose local, workspace novo) em
+2026-09-05 — `POST` retornou `201`, e o dashboard aberto na UI mostrou os
+10 de 10 painéis com dado real, não série vazia, contra tráfego real
+gerado pela stack local do task-api (registro, login, tasks, respostas
+`200`/`401`/`404`). O painel "Health checks" especificamente mostrou `0`
+apesar de 12 requisições reais a `/health`/`/health/ready` no mesmo
+intervalo — confirmação, contra uma instância real, de que a regra da
+seção anterior filtra o que diz filtrar.
+
 **Por quê:** o crier decidiu (ADR-0023 de lá) que esse arquivo é
 "documentação, não contrato testado" — nada em CI do crier o exercita, e o
 próprio README dele já registrou uma mudança de forma incompatível entre
