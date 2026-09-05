@@ -2,6 +2,12 @@
 
 Guidance for Claude Code (or any agent) working in this repository. Read this before making changes — it captures conventions and constraints that aren't obvious from the code alone.
 
+The general engineering rules — effort proportional to the task, architecture
+discipline, clean code, testing, review, security, git hygiene, verification —
+are in `~/.claude/CLAUDE.md` and are already loaded. **This file carries only
+what is true of task-api**, and where it repeats a global rule it is because
+this repository is stricter.
+
 ## What this is
 
 A small, production-shaped Go REST API for multi-user task management, with a swappable `Repository` (in-memory or PostgreSQL) behind one interface per domain. It's a reference project: the functional surface is intentionally minimal — the point is the layering, testing discipline, and operational details (config, migrations, graceful shutdown, health checks). Full narrative in [README.md](README.md); full rationale/architecture in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); the decisions behind the non-obvious choices in [docs/DECISIONS.md](docs/DECISIONS.md); full API contract in [docs/openapi.yaml](docs/openapi.yaml).
@@ -47,6 +53,75 @@ they are worth loading whole. Dispatch them in parallel:
 Proportionality is built in: a typo needs no pipeline, a contained fix needs only
 `/change-plan`, and the full sequence is for changes that touch the contract, the
 schema, a dependency, or an invariant recorded here.
+
+## Global tooling, and which layer wins here
+
+The environment carries a global workflow plugin (Superpowers) and a code
+knowledge graph (Graphify). Both are useful; neither outranks what is already
+in `.claude/`.
+
+**The `/change-*` pipeline wins over Superpowers, in this repository.** They do
+the same job — brainstorm, plan, execute — and running both is how a change
+acquires two sets of planning artifacts that disagree. The local one wins
+because it is the one that is actually wired to this project: it triages
+against `docs/DECISIONS.md`, it writes to `docs/changes/<slug>/`, and its
+proportionality rule is already stated above. Superpowers' `brainstorming` and
+`writing-plans` are for a repository that has no pipeline of its own.
+
+What is still worth taking from it: **`systematic-debugging`**, when a failure's
+cause is genuinely unknown. There is no local equivalent, and the failures this
+codebase produces — an ordering bug between blob bytes and the metadata row, a
+filter that silently drops a value — are exactly the kind that guessing gets
+wrong twice before getting right.
+
+## Graphify in this repository
+
+The largest graph in the ecosystem: 2175 nodes, 5227 edges, **9% `INFERRED`**.
+Rebuild with `graphify update .` before trusting it after edits.
+
+**It checks the layering invariant directly.** "Architecture — do not violate
+this" says `Service` and `Handler` must stay completely unaware that PostgreSQL
+exists. That is a reachability question:
+
+```bash
+graphify query "pgx postgres driver"
+# Today this returns postgresRepository, cmd/api's integration tests and
+# config -- all layers that are ALLOWED to know. No handler, no service.
+# A handler appearing in that answer is the violation, visible in one command.
+
+graphify affected "Repository"      # both implementations, before you drift one
+graphify god-nodes                  # where coupling actually concentrates
+```
+
+Use it as a fast pre-check, not as the authority. `make check` and the
+`.claude/rules/go-layering` rule are what decide, because they read the code
+rather than a parsed approximation of it.
+
+**It does not replace the readers.** `.claude/agents/*` distil prose —
+`DECISIONS.md`, `ARCHITECTURE.md`, the 1600-line `openapi.yaml`. Graphify
+traverses structure. A question about *why* a boundary exists goes to a reader;
+a question about *whether* it is still intact goes to the graph.
+
+## Frontend tooling — this is the repository where it applies
+
+`web/` is a real Vite + TypeScript frontend, so the design skills are in scope
+here in a way they are not in the Go libraries:
+
+- **`/impeccable audit`** for accessibility and contrast, **`/impeccable
+  critique`** for layout and hierarchy. This is the tool with WCAG checks.
+- **Emil Kowalski's `animate`, `review-animations`, `apple-design`** for
+  micro-interactions and transitions. Motion needs a purpose — feedback,
+  continuity, or directing attention. Anything else makes the interface slower.
+
+**On Playwright: this repository already has a suite.** `web/playwright.config.ts`
+and `web/e2e/` are the real thing, run with `npm run test:e2e`, and they are
+what CI trusts. The Playwright *MCP* drives a browser interactively and leaves
+nothing behind.
+
+The split: if a flow should be checked forever, extend `web/e2e/` — that is a
+test. If you are verifying one thing once while building it, use the MCP. Do
+not use the MCP as a substitute for adding the test, and do not treat a
+successful MCP click-through as evidence the flow is covered.
 
 ## Commands
 
