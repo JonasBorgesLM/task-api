@@ -41,3 +41,6 @@ go.work.sum
 # purpose: it is project documentation, not personal tooling. Only the
 # per-developer permission allow-list is local.
 .claude/settings.local.json
+
+# Graphify knowledge graph — generated per machine, rebuilt with `graphify update .`
+graphify-out/
