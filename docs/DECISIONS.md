@@ -455,6 +455,40 @@ que já vale para o versionamento.
 
 ---
 
+## ETag de `GET /v1/tasks`: hash de `(id, version)` da própria página, não do corpo inteiro
+
+`GET /v1/tasks/{id}` e `GET /v1/tasks` respondem `ETag`, e aceitam
+`If-None-Match` para devolver `304` sem corpo. No detalhe, o validador é
+direto — `"<id>:<version>"`, reaproveitando o contador de concorrência
+otimista que `Repository` já mantém. Na listagem não há uma única
+`Version` para reaproveitar, então `pageETag` deriva uma a partir de
+`(id, version)` de cada linha efetivamente devolvida, em ordem, e faz o
+hash disso — nunca o corpo JSON inteiro.
+
+**Por que não o corpo inteiro.** Geraria o mesmo resultado prático (um
+hash que muda quando o conteúdo muda), mas obrigaria serializar a
+resposta antes de decidir se ela precisa ser enviada — exatamente o
+trabalho que o `304` existe para evitar. Hash de `(id, version)` é
+suficiente porque `version` já muda exatamente quando a linha muda
+(Update/status transition incrementam), e `id` é o que torna a
+composição da janela — quem entrou, quem saiu, quem trocou de posição —
+parte do hash sem precisar comparar ordem explicitamente.
+
+**Por que isso não lê nada além do que a página já leu.** A issue
+(15.D2) pedia um validador "sem ler tudo para calcular". `pageETag`
+roda sobre as linhas que `Repository.FindAll` já trouxe para montar o
+corpo da resposta — nenhuma consulta adicional, nenhum full-scan da
+tabela do usuário.
+
+**Comparação estrita, sem `W/`.** Este servidor nunca emite um
+validador fraco, então `ifNoneMatchHits` compara por igualdade exata
+(depois de aceitar múltiplos valores separados por vírgula e o
+curinga `*`, como o cabeçalho HTTP permite) — não há necessidade de
+implementar a semântica de comparação fraca que RFC 9110 §8.8.3.2
+define para quando ela existe.
+
+---
+
 ## Drain antes do shutdown: o processo espera, não o orquestrador
 
 O processo continua servindo por `HTTP_PRE_SHUTDOWN_DELAY` depois do

@@ -736,6 +736,7 @@ paths:
           style: form
           explode: true
           example: [high, medium]
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: >
@@ -745,6 +746,8 @@ paths:
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
+            ETag:
+              $ref: '#/components/headers/TaskETag'
           content:
             application/json:
               schema:
@@ -765,6 +768,8 @@ paths:
                 empty:
                   summary: No tasks exist
                   value: []
+        '304':
+          $ref: '#/components/responses/NotModified'
         '400':
           description: >
             `limit`/`offset` is present but not a non-negative integer,
@@ -807,12 +812,15 @@ paths:
       summary: Get one of the authenticated caller's tasks by id
       parameters:
         - $ref: '#/components/parameters/TaskID'
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: Task found.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
+            ETag:
+              $ref: '#/components/headers/TaskETag'
           content:
             application/json:
               schema:
@@ -825,6 +833,8 @@ paths:
                 priority: high
                 created_at: "2026-08-08T12:00:00Z"
                 updated_at: "2026-08-08T12:00:00Z"
+        '304':
+          $ref: '#/components/responses/NotModified'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1608,6 +1618,20 @@ components:
         type: string
       example: f47ac10b-58cc-4372-a567-0e02b2c3d479
 
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: >
+        A value previously seen in this same resource's `ETag` response
+        header (see the `TaskETag` header component). A match, or the
+        wildcard `*`, gets `304` with no body instead of re-sending a
+        representation the caller already has. Comparison is exact
+        (strong) — this API never issues a weak `W/"..."` validator.
+      schema:
+        type: string
+      example: '"f47ac10b-58cc-4372-a567-0e02b2c3d479:3"'
+
   headers:
     XRequestID:
       description: >
@@ -1620,6 +1644,23 @@ components:
       schema:
         type: string
       example: 7a947bb6436a2e5009efcaa55c42cdf8
+
+    TaskETag:
+      description: >
+        A strong validator for conditional requests. On `GET
+        /v1/tasks/{id}` it is derived from that task's own optimistic-
+        concurrency counter (`"<id>:<version>"`); on `GET /v1/tasks` it
+        is derived from every row actually returned, in order, so it
+        changes whenever any row's counter changes or the page's
+        composition changes (a row entering, leaving, or reordering
+        within it). Send back as `If-None-Match` to get `304` when
+        nothing has changed — see the `304` response on each of these
+        two operations, and `docs/DECISIONS.md` for why the listing's
+        validator does not require reading anything beyond the page
+        already being returned.
+      schema:
+        type: string
+      example: '"f47ac10b-58cc-4372-a567-0e02b2c3d479:3"'
 
   schemas:
     HealthResponse:
@@ -2041,6 +2082,19 @@ components:
         - reason
 
   responses:
+    NotModified:
+      description: >
+        The caller's `If-None-Match` names the current representation's
+        `ETag` (see the `TaskETag` header component) — nothing has
+        changed, and the body is intentionally empty. `Cache-Control`
+        and `ETag` are still sent, matching what the `200` would have
+        carried.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestID'
+        ETag:
+          $ref: '#/components/headers/TaskETag'
+
     Unauthorized:
       description: >
         Missing, malformed, or invalid/expired `Authorization: Bearer`

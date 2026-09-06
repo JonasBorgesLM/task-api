@@ -45,6 +45,12 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   fixa — ver `docs/DECISIONS.md` § "SPA deployment: um servidor Go
   próprio" para o porquê da escolha e o porquê nonce foi considerado e
   rejeitado.
+- `GET /v1/tasks` e `GET /v1/tasks/{id}` respondem `ETag` e aceitam
+  `If-None-Match`, devolvendo `304` sem corpo quando nada mudou (issue
+  #233). Aditivo — um cliente que nunca manda `If-None-Match` não
+  percebe diferença. O validador da listagem é derivado das linhas já
+  lidas para montar a resposta, nunca uma consulta a mais; ver
+  `docs/DECISIONS.md` § "ETag de GET /v1/tasks".
 
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em
