@@ -127,6 +127,19 @@ func mustHash(t *testing.T, password string) string {
 	return string(hash)
 }
 
+// freezeTokenCache pins svc's tokenCache clock to a single instant, so a
+// test asserting a cache hit/miss depends only on the invalidation logic
+// under test, never on how much real wall-clock time a slow step (bcrypt,
+// especially under -race on a loaded CI runner) happened to consume
+// relative to tokenCacheTTL. Without this, TestChangePassword_* — which
+// calls bcrypt twice — was observed taking long enough in CI for the
+// cache entry it asserts on to expire for real, failing for the wrong
+// reason.
+func freezeTokenCache(svc *Service) {
+	frozen := time.Now()
+	svc.tokenCache.now = func() time.Time { return frozen }
+}
+
 // --- Register ---
 
 func TestRegister_Valid(t *testing.T) {
@@ -425,6 +438,7 @@ func TestChangePassword_InvalidatesCacheForOtherSessions_ButKeepsCallers(t *test
 		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
 	}
 	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
 
 	if _, err := svc.ValidateToken(context.Background(), "current-token"); err != nil {
 		t.Fatalf("ValidateToken(current-token) unexpected error: %v", err)
@@ -532,6 +546,7 @@ func TestDeleteAccount_InvalidatesCacheForUser(t *testing.T) {
 		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
 	}
 	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
 
 	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
 		t.Fatalf("ValidateToken() unexpected error: %v", err)
@@ -640,6 +655,7 @@ func TestValidateToken_CachesResult_SecondCallSkipsRepository(t *testing.T) {
 		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
 	}
 	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
 
 	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
 		t.Fatalf("first ValidateToken() unexpected error: %v", err)
@@ -695,6 +711,7 @@ func TestLogout_InvalidatesCache_SoARevokedTokenStopsValidatingImmediately(t *te
 		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
 	}
 	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
 
 	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
 		t.Fatalf("ValidateToken() unexpected error: %v", err)
@@ -747,6 +764,7 @@ func TestLogoutAll_InvalidatesCacheForUser(t *testing.T) {
 		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
 	}
 	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
 
 	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
 		t.Fatalf("ValidateToken() unexpected error: %v", err)
