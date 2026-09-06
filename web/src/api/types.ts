@@ -630,6 +630,15 @@ export interface components {
         };
     };
     responses: {
+        /** @description The caller's `If-None-Match` names the current representation's `ETag` (see the `TaskETag` header component) — nothing has changed, and the body is intentionally empty. `Cache-Control` and `ETag` are still sent, matching what the `200` would have carried. */
+        NotModified: {
+            headers: {
+                "X-Request-Id": components["headers"]["XRequestID"];
+                ETag: components["headers"]["TaskETag"];
+                [name: string]: unknown;
+            };
+            content?: never;
+        };
         /** @description Missing, malformed, or invalid/expired `Authorization: Bearer` header. */
         Unauthorized: {
             headers: {
@@ -741,6 +750,11 @@ export interface components {
          * @example f47ac10b-58cc-4372-a567-0e02b2c3d479
          */
         TaskID: string;
+        /**
+         * @description A value previously seen in this same resource's `ETag` response header (see the `TaskETag` header component). A match, or the wildcard `*`, gets `304` with no body instead of re-sending a representation the caller already has. Comparison is exact (strong) — this API never issues a weak `W/"..."` validator.
+         * @example "f47ac10b-58cc-4372-a567-0e02b2c3d479:3"
+         */
+        IfNoneMatch: string;
     };
     requestBodies: never;
     headers: {
@@ -749,6 +763,11 @@ export interface components {
          * @example 7a947bb6436a2e5009efcaa55c42cdf8
          */
         XRequestID: string;
+        /**
+         * @description A strong validator for conditional requests. On `GET /v1/tasks/{id}` it is derived from that task's own optimistic- concurrency counter (`"<id>:<version>"`); on `GET /v1/tasks` it is derived from every row actually returned, in order, so it changes whenever any row's counter changes or the page's composition changes (a row entering, leaving, or reordering within it). Send back as `If-None-Match` to get `304` when nothing has changed — see the `304` response on each of these two operations, and `docs/DECISIONS.md` for why the listing's validator does not require reading anything beyond the page already being returned.
+         * @example "f47ac10b-58cc-4372-a567-0e02b2c3d479:3"
+         */
+        TaskETag: string;
     };
     pathItems: never;
 }
@@ -1180,7 +1199,13 @@ export interface operations {
                  */
                 priority?: components["schemas"]["Priority"][];
             };
-            header?: never;
+            header?: {
+                /**
+                 * @description A value previously seen in this same resource's `ETag` response header (see the `TaskETag` header component). A match, or the wildcard `*`, gets `304` with no body instead of re-sending a representation the caller already has. Comparison is exact (strong) — this API never issues a weak `W/"..."` validator.
+                 * @example "f47ac10b-58cc-4372-a567-0e02b2c3d479:3"
+                 */
+                "If-None-Match"?: components["parameters"]["IfNoneMatch"];
+            };
             path?: never;
             cookie?: never;
         };
@@ -1190,12 +1215,14 @@ export interface operations {
             200: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
+                    ETag: components["headers"]["TaskETag"];
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["Task"][];
                 };
             };
+            304: components["responses"]["NotModified"];
             /** @description `limit`/`offset` is present but not a non-negative integer, or `status`/`priority` is present but not one of the values in their respective enum. */
             400: {
                 headers: {
@@ -1282,7 +1309,13 @@ export interface operations {
     getTask: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description A value previously seen in this same resource's `ETag` response header (see the `TaskETag` header component). A match, or the wildcard `*`, gets `304` with no body instead of re-sending a representation the caller already has. Comparison is exact (strong) — this API never issues a weak `W/"..."` validator.
+                 * @example "f47ac10b-58cc-4372-a567-0e02b2c3d479:3"
+                 */
+                "If-None-Match"?: components["parameters"]["IfNoneMatch"];
+            };
             path: {
                 /**
                  * @description Server-generated task identifier (a UUIDv4 as produced by CreateTask), scoped to the authenticated caller.
@@ -1299,6 +1332,7 @@ export interface operations {
             200: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
+                    ETag: components["headers"]["TaskETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -1316,6 +1350,7 @@ export interface operations {
                     "application/json": components["schemas"]["Task"];
                 };
             };
+            304: components["responses"]["NotModified"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
             429: components["responses"]["TooManyRequests"];

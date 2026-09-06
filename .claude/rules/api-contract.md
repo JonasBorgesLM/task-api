@@ -48,6 +48,7 @@ Then check whether the same change also moves:
 | Missing/expired/malformed bearer token | `401` |
 | Session lookup itself failed (database down) | `503` — never `401` |
 | Rate limit | `429` |
+| `If-None-Match` matches the current `ETag` (`GET /tasks`, `GET /tasks/{id}`) | `304`, no body |
 
 Do not invent a new code for a condition already in this table.
 

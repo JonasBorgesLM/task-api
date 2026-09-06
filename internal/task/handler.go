@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 )
@@ -159,6 +161,13 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 		tasks = make([]Task, 0)
 	}
 
+	etag := pageETag(tasks)
+	w.Header().Set("ETag", etag)
+	if ifNoneMatchHits(r, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
 	h.writeJSON(w, r, http.StatusOK, tasks)
 }
 
@@ -202,7 +211,63 @@ func (h *Handler) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	etag := taskETag(task)
+	w.Header().Set("ETag", etag)
+	if ifNoneMatchHits(r, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
 	h.writeJSON(w, r, http.StatusOK, task)
+}
+
+// taskETag derives a strong validator from Repository's own optimistic-
+// concurrency counter (Version — see Repository's doc comment) rather
+// than hashing the response body: Version already changes exactly when
+// the row does, which is the property an ETag needs, and reusing it
+// costs nothing extra to compute. The id is included so the value
+// itself is never confused with another task's, even though HTTP
+// conditional requests are only ever compared within one URL's own
+// cache entry.
+func taskETag(t Task) string {
+	return fmt.Sprintf(`"%s:%d"`, t.ID, t.Version)
+}
+
+// pageETag is taskETag's counterpart for a whole page of GET /tasks:
+// there is no single row's Version to reuse, so this derives one from
+// every row actually returned, in order — id and Version, never the
+// full row — which changes exactly when either an existing row's
+// Version changes or the window's composition changes (a row entering,
+// leaving, or reordering within it), the two cases 15.D2 asks for.
+// Cheap to compute: these are the same rows already read to build the
+// response body, not an extra query.
+func pageETag(tasks []Task) string {
+	digest := sha256.New()
+	for _, t := range tasks {
+		fmt.Fprintf(digest, "%s:%d;", t.ID, t.Version)
+	}
+	return fmt.Sprintf(`"%x"`, digest.Sum(nil))
+}
+
+// ifNoneMatchHits reports whether r's If-None-Match header names etag —
+// exactly (a strong comparison; this handler never issues a weak "W/"
+// validator, so it never has to interpret one) or via the wildcard "*",
+// which matches any current representation. A request carrying neither
+// gets false, the same as one with no If-None-Match at all.
+func ifNoneMatchHits(r *http.Request, etag string) bool {
+	header := r.Header.Get("If-None-Match")
+	if header == "" {
+		return false
+	}
+	if header == "*" {
+		return true
+	}
+	for _, candidate := range strings.Split(header, ",") {
+		if strings.TrimSpace(candidate) == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // updateTask handles PUT /tasks/{id}.

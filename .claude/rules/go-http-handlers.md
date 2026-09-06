@@ -35,6 +35,12 @@ description: 'HTTP layer conventions: ServeMux only, /v1 mount, bounded bodies, 
   `{"error": "message"}` envelope, including from middleware
   (`user.writeAuthError`) so the shape never depends on where the request died.
 - A list endpoint serialises an empty result as `[]`, never `null`.
+- `GET /tasks` and `GET /tasks/{id}` set `ETag` and honor `If-None-Match`
+  with `304` (no body). The detail's validator is `"<id>:<version>"`,
+  reusing `Repository`'s own optimistic-concurrency counter. The list's
+  (`pageETag`) hashes `(id, version)` of every row actually returned, in
+  order — never the serialized body, and never a query beyond what
+  already built the response. See `docs/DECISIONS.md`.
 - Pagination (`limit`/`offset`) and ownership filtering are pushed into
   `Repository.FindAll` and into the SQL query. Never reintroduce "fetch
   everything, slice in Go" at `Service` or `Handler`.

@@ -152,6 +152,19 @@ func do(t *testing.T, handler http.HandlerFunc, method, target, body string) *ht
 	return w
 }
 
+// doWithIfNoneMatch mirrors do(), adding an If-None-Match header — do()
+// itself takes no headers parameter, and every other test's needs are
+// met by that simpler shape.
+func doWithIfNoneMatch(t *testing.T, handler http.HandlerFunc, method, target, ifNoneMatch string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, target, nil)
+	req.Header.Set("If-None-Match", ifNoneMatch)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), testUserID))
+	w := httptest.NewRecorder()
+	handler(w, req)
+	return w
+}
+
 // decodeBody is a helper that decodes the response body into dst.
 func decodeBody(t *testing.T, w *httptest.ResponseRecorder, dst any) {
 	t.Helper()
@@ -454,6 +467,58 @@ func TestGetTask_Handler_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("getTask not found status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+// 15.D2: ETag / If-None-Match.
+
+func TestGetTask_Handler_SetsETagFromIDAndVersion(t *testing.T) {
+	task := sampleTask()
+	task.Version = 3
+	svc := &fakeService{getTaskFn: func(_, _ string) (Task, error) { return task, nil }}
+	h := newHandlerWithFake(svc)
+
+	w := do(t, h.getTask, http.MethodGet, "/tasks/abc-123", "")
+
+	if want, got := `"abc-123:3"`, w.Header().Get("ETag"); got != want {
+		t.Errorf("ETag = %q, want %q", got, want)
+	}
+}
+
+func TestGetTask_Handler_IfNoneMatchHit_Returns304NoBody(t *testing.T) {
+	task := sampleTask()
+	task.Version = 3
+	svc := &fakeService{getTaskFn: func(_, _ string) (Task, error) { return task, nil }}
+	h := newHandlerWithFake(svc)
+
+	w := doWithIfNoneMatch(t, h.getTask, http.MethodGet, "/tasks/abc-123", `"abc-123:3"`)
+
+	if w.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotModified)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("304 body = %q, want empty", w.Body.String())
+	}
+}
+
+// TestGetTask_Handler_IfNoneMatchStale_Returns200WithBody is
+// IfNoneMatchHit's negative case: a client whose cached copy really is
+// out of date (its own ETag names an older Version) still gets the
+// current representation, not a 304 that would leave it displaying
+// stale data forever.
+func TestGetTask_Handler_IfNoneMatchStale_Returns200WithBody(t *testing.T) {
+	task := sampleTask()
+	task.Version = 3
+	svc := &fakeService{getTaskFn: func(_, _ string) (Task, error) { return task, nil }}
+	h := newHandlerWithFake(svc)
+
+	w := doWithIfNoneMatch(t, h.getTask, http.MethodGet, "/tasks/abc-123", `"abc-123:2"`)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Body.Len() == 0 {
+		t.Error("200 response has an empty body, want the task")
 	}
 }
 
@@ -920,6 +985,123 @@ func TestRegisterRoutes(t *testing.T) {
 			if w.Code != tc.want {
 				t.Errorf("RegisterRoutes %s %s status = %d, want %d",
 					tc.method, tc.path, w.Code, tc.want)
+			}
+		})
+	}
+}
+
+// --- 15.D2: pageETag / ifNoneMatchHits ---
+
+func TestPageETag_ChangesWhenARowVersionChanges(t *testing.T) {
+	a := sampleTask()
+	a.ID, a.Version = "1", 1
+	b := a
+	b.Version = 2
+
+	if pageETag([]Task{a}) == pageETag([]Task{b}) {
+		t.Error("pageETag() did not change when the only row's Version changed")
+	}
+}
+
+func TestPageETag_ChangesWhenWindowCompositionChanges(t *testing.T) {
+	a := sampleTask()
+	a.ID = "1"
+	c := sampleTask()
+	c.ID = "2"
+
+	if pageETag([]Task{a}) == pageETag([]Task{a, c}) {
+		t.Error("pageETag() did not change when a row entered the window")
+	}
+}
+
+func TestPageETag_StableForIdenticalInput(t *testing.T) {
+	a := sampleTask()
+	a.ID, a.Version = "1", 1
+
+	first := pageETag([]Task{a})
+	second := pageETag([]Task{a})
+	if first != second {
+		t.Error("pageETag() is not deterministic for identical input")
+	}
+}
+
+func TestPageETag_EmptyPage_IsStable(t *testing.T) {
+	if pageETag(nil) != pageETag([]Task{}) {
+		t.Error("pageETag() differs between a nil slice and an empty one")
+	}
+}
+
+func TestListTasks_Handler_SetsETagAndHonorsIfNoneMatch(t *testing.T) {
+	task := sampleTask()
+	task.ID, task.Version = "1", 5
+	svc := &fakeService{
+		listTasksFn: func(_ string, _, _ int, _, _ []string) ([]Task, error) {
+			return []Task{task}, nil
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	first := do(t, h.listTasks, http.MethodGet, "/tasks", "")
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("ETag is missing on GET /tasks")
+	}
+
+	second := doWithIfNoneMatch(t, h.listTasks, http.MethodGet, "/tasks", etag)
+	if second.Code != http.StatusNotModified {
+		t.Errorf("status with matching If-None-Match = %d, want %d", second.Code, http.StatusNotModified)
+	}
+	if second.Body.Len() != 0 {
+		t.Errorf("304 body = %q, want empty", second.Body.String())
+	}
+}
+
+// TestListTasks_Handler_IfNoneMatchStale_Returns200 is
+// TestListTasks_Handler_SetsETagAndHonorsIfNoneMatch's negative case: a
+// list that genuinely changed (a row's Version moved) must not be
+// served a 304 just because the client sent an If-None-Match at all —
+// only a match against the *current* ETag should short-circuit.
+func TestListTasks_Handler_IfNoneMatchStale_Returns200(t *testing.T) {
+	task := sampleTask()
+	task.ID, task.Version = "1", 5
+	svc := &fakeService{
+		listTasksFn: func(_ string, _, _ int, _, _ []string) ([]Task, error) {
+			return []Task{task}, nil
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	w := doWithIfNoneMatch(t, h.listTasks, http.MethodGet, "/tasks", `"1:4"`)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Body.Len() == 0 {
+		t.Error("200 response has an empty body, want the task list")
+	}
+}
+
+func TestIfNoneMatchHits(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		etag   string
+		want   bool
+	}{
+		{"no header", "", `"a"`, false},
+		{"wildcard", "*", `"a"`, true},
+		{"exact single value", `"a"`, `"a"`, true},
+		{"mismatch", `"b"`, `"a"`, false},
+		{"one of several, with spacing", `"x", "a"`, `"a"`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/tasks/1", nil)
+			if tc.header != "" {
+				req.Header.Set("If-None-Match", tc.header)
+			}
+			if got := ifNoneMatchHits(req, tc.etag); got != tc.want {
+				t.Errorf("ifNoneMatchHits() = %v, want %v", got, tc.want)
 			}
 		})
 	}
