@@ -17,6 +17,20 @@ import (
 // against clients sending unbounded payloads.
 const maxRequestBodyBytes = 1 << 20 // 1 MiB
 
+// maxTaskListLimit bounds an explicit "limit" query parameter on GET
+// /tasks. It does not change what an *absent* limit means (still "no
+// limit" — see parsePagination and docs/openapi.yaml, which documents
+// that omitting it returns every task the caller owns; changing that
+// promise would be an edit to what /v1 already means, which
+// docs/DECISIONS.md § "Versionamento" reserves for a new mount, not a
+// patch to this one). What this closes is the other half of the gap: a
+// caller that does pass a limit could ask for an arbitrarily large one
+// (?limit=1000000) and get the whole result set built in memory and
+// serialized in one response regardless. 100 mirrors the common
+// convention for a single page of a list endpoint; a caller that
+// genuinely wants more pages past it.
+const maxTaskListLimit = 100
+
 // taskService is the interface the Handler depends on.
 // It allows the Handler to be tested with a fake implementation.
 type taskService interface {
@@ -151,7 +165,9 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 // parsePagination reads the optional "limit" and "offset" query
 // parameters. A missing limit is reported as -1 (paginate's "no limit"
 // sentinel); a missing offset defaults to 0. Both, when present, must
-// parse as non-negative integers.
+// parse as non-negative integers, and limit must not exceed
+// maxTaskListLimit (see its own doc comment for why an absent limit is
+// not bounded the same way).
 func parsePagination(query url.Values) (limit, offset int, err error) {
 	limit = -1
 
@@ -159,6 +175,9 @@ func parsePagination(query url.Values) (limit, offset int, err error) {
 		limit, err = strconv.Atoi(raw)
 		if err != nil || limit < 0 {
 			return 0, 0, fmt.Errorf("%w: limit must be a non-negative integer", ErrInvalidInput)
+		}
+		if limit > maxTaskListLimit {
+			return 0, 0, fmt.Errorf("%w: limit must be at most %d", ErrInvalidInput, maxTaskListLimit)
 		}
 	}
 

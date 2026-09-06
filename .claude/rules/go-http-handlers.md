@@ -16,6 +16,11 @@ description: 'HTTP layer conventions: ServeMux only, /v1 mount, bounded bodies, 
 - Handlers register **unprefixed** patterns. `cmd/api/newServer` mounts them
   with `http.StripPrefix("/v1", v1)`, so a v2 is a second mount rather than an
   edit to every `RegisterRoutes`.
+- `middleware.CacheControl` wraps `v1` **inside** `StripPrefix`, not outside
+  it, so it sees the same unprefixed path (`/auth/login`, never `/v1/auth/login`)
+  a handler's own pattern does. Every `/v1` response carries `Cache-Control`;
+  `/health`, `/health/ready` and `/debug/vars` do not, the same exception the
+  versioning rule above already makes.
 - `/health`, `/health/ready` and `/debug/vars` stay **unversioned** — probes
   and scrapers are operations, not clients. Never add an unversioned alias or a
   redirect for a contract path.
@@ -33,6 +38,11 @@ description: 'HTTP layer conventions: ServeMux only, /v1 mount, bounded bodies, 
 - Pagination (`limit`/`offset`) and ownership filtering are pushed into
   `Repository.FindAll` and into the SQL query. Never reintroduce "fetch
   everything, slice in Go" at `Service` or `Handler`.
+- An explicit `limit` above `maxTaskListLimit` (100) is `400`, checked in
+  `parsePagination` before it ever reaches `Service`. An *absent* `limit`
+  still means "no limit" — `docs/openapi.yaml` documents that, and changing
+  it would be editing what `/v1` already promises rather than closing a gap
+  in it (see `docs/DECISIONS.md`).
 - `userID` comes from `middleware.UserIDFromContext` and nowhere else — never
   from a body field, a query parameter or a path segment.
 
@@ -63,3 +73,12 @@ Each position is load-bearing:
   `HSTS_MAX_AGE=0` is the opt-out and omits the header entirely.
 - Never key a rate limiter on `X-Forwarded-For`/`X-Real-IP` without
   `TRUSTED_PROXIES`; the client writes those headers.
+- `Cache-Control` on every `/v1` response: `private, no-store` for
+  `/auth/*` (a login response carries a session token), `private, no-cache`
+  for everything else. See `docs/DECISIONS.md` for why `private` is
+  unconditional on both.
+- CSRF's `403` uses this API's `{"error": "..."}` envelope
+  (`writeCSRFError`, wired via `csrf.WithErrorHandler` in `cmd/api`), not
+  `moat/csrf`'s own plain-text default. Do not remove that option — it would
+  silently reintroduce the one response in this API that doesn't match
+  `docs/openapi.yaml`'s `ErrorResponse` schema.

@@ -402,6 +402,43 @@ func TestSecurityHeaders_OnEveryResponseThroughTheChain(t *testing.T) {
 	}
 }
 
+// TestCacheControl_OnV1ResponsesOnly pins middleware.CacheControl's
+// scope and split: every response under /v1 carries one of the two
+// values, nothing outside /v1 is touched at all, and the split follows
+// the path alone — auth failure (401) or no route at all (404) still
+// get the header, because CacheControl wraps the whole /v1 mux, not a
+// per-handler concern.
+func TestCacheControl_OnV1ResponsesOnly(t *testing.T) {
+	handler := newTestHandler(t, testConfig())
+
+	tests := []struct {
+		name   string
+		path   string
+		want   string // "" means the header must be absent entirely
+		status int
+	}{
+		{"outside /v1 entirely", "/health", "", http.StatusOK},
+		{"auth route", apiPrefix + "/auth/csrf-token", "private, no-store", http.StatusOK},
+		{"non-auth route, unauthenticated", apiPrefix + "/tasks", "private, no-cache", http.StatusUnauthorized},
+		{"unrouted path under /v1", apiPrefix + "/no-such-route", "private, no-cache", http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != tt.status {
+				t.Fatalf("GET %s status = %d, want %d", tt.path, w.Code, tt.status)
+			}
+			if got := w.Header().Get("Cache-Control"); got != tt.want {
+				t.Errorf("GET %s: Cache-Control = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestSecurityHeaders_HSTSFollowsConfig pins the policy: the header is
 // sent by default and HSTS_MAX_AGE=0 is the explicit opt-out. The header
 // is inert over plaintext (RFC 6797 §7.2 requires browsers to ignore it

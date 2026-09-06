@@ -394,6 +394,67 @@ categoria de arquivo.
 
 ---
 
+## `GET /v1/tasks`'s `limit`: teto no valor explícito, não no ausente
+
+Um `limit` acima de 100 é rejeitado com `400`. Um `limit` **ausente**
+continua significando "sem limite", exatamente como
+`docs/openapi.yaml` já documentava antes desta mudança.
+
+**Por quê a assimetria.** `docs/DECISIONS.md` § "Versionamento" e
+`.claude/rules/api-contract.md` já registram a regra: uma mudança que
+quebra o contrato é um `/v2` novo, nunca uma edição do que `/v1` já
+promete. `limit` ausente devolver tudo é uma promessa publicada
+("omitting every one of them returns every task the caller owns");
+mudar isso agora seria editar `/v1`, não corrigi-lo. Um valor
+**explícito** acima do teto não tem essa mesma promessa — nada em
+`docs/openapi.yaml` jamais disse que `?limit=999999` funcionaria — então
+recusá-lo fecha a metade do problema que não contradiz nada já escrito.
+
+**O que fica em aberto, deliberadamente.** Um cliente que nunca manda
+`limit` continua podendo pedir a lista inteira de uma vez. Fechar isso
+por completo exigiria mudar o que `/v1` significa, o que este projeto
+reserva para um `/v2` — não para uma issue de endurecimento.
+
+**Por que 400 e não grampear ao teto.** `parsePagination` já rejeita
+`limit`/`offset` negativos com `400` em vez de arredondar para zero;
+grampear um valor grande demais introduziria uma segunda forma de lidar
+com "valor fora do aceitável" no mesmo par de parâmetros. `400` com uma
+mensagem que nomeia o teto é descobrível — um cliente que lê a resposta
+sabe exatamente o que pedir a seguir (paginar com `offset`, não repetir
+a mesma requisição esperando resultado diferente).
+
+---
+
+## Cache-Control em `/v1`: `no-store` no auth, `no-cache` no resto
+
+Toda resposta sob `/v1` carrega `Cache-Control`. `/v1/auth/*` recebe
+`private, no-store`; o resto recebe `private, no-cache`. Nenhuma
+resposta autenticada emitia esse header antes desta mudança.
+
+**Por quê dois valores, não um só.** Um `Set-Cookie` de login e uma
+resposta de logout carregam ou afetam diretamente a credencial de
+sessão — nada sobre essas trocas deveria sobreviver em disco ou memória
+além da própria resposta, o que é exatamente o que `no-store` promete.
+O resto das rotas (`/v1/tasks`, `/v1/tasks/{id}`, `/v1/auth/me`) não tem
+esse mesmo risco, e permitir revalidação condicional (`no-cache`, não
+`no-store`) é o que deixa uma futura resposta `304` com `ETag` ser
+possível sem reabrir esta decisão.
+
+**Por quê `private` nos dois casos, sempre.** Sem `private`, um cache
+compartilhado (CDN, proxy corporativo) na frente desta API poderia
+servir a resposta de um usuário para outro que passe pelo mesmo
+intermediário — a API não tem como saber se existe um na frente dela,
+então a garantia tem que valer incondicionalmente.
+
+**O que isto não cobre.** O middleware decide pelo prefixo do caminho
+(`/auth/`), não por o que o handler realmente faz — uma rota futura sob
+`/v1/auth/` que não carregue nada sensível ainda herda `no-store`, o
+lado mais conservador de errar. `/health`, `/health/ready` e
+`/debug/vars` ficam fora de `/v1` e fora desta regra, a mesma exceção
+que já vale para o versionamento.
+
+---
+
 ## Drain antes do shutdown: o processo espera, não o orquestrador
 
 O processo continua servindo por `HTTP_PRE_SHUTDOWN_DELAY` depois do

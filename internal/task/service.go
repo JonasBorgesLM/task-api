@@ -20,6 +20,17 @@ const (
 	maxDescriptionLen = 2000
 )
 
+// maxFilterValues bounds how many raw occurrences of "status" or
+// "priority" validateStatusFilters/validatePriorityFilters will walk
+// before rejecting the request outright, ahead of validation or
+// de-duplication. Both fields have a handful of legal values (four and
+// three respectively) and repeating one has no additional effect (see
+// docs/openapi.yaml), so a legitimate caller never approaches this; it
+// exists so a query string carrying thousands of repeated occurrences
+// of the parameter is rejected with a clear 400 instead of being walked
+// in full first.
+const maxFilterValues = 50
+
 // legalTransitions is the complete set of allowed Status transitions,
 // keyed by the task's current status. Requesting the task's current
 // status again is always allowed as a no-op, independently of this table
@@ -415,6 +426,9 @@ func validatePriority(priority string, fallback Priority) (Priority, error) {
 // empty filter stays empty, it does not default to some particular
 // status.
 func validateStatusFilters(statuses []string) ([]Status, error) {
+	if len(statuses) > maxFilterValues {
+		return nil, fmt.Errorf("%w: too many status values", ErrInvalidInput)
+	}
 	var out []Status
 	seen := make(map[Status]bool, len(statuses))
 	for _, raw := range statuses {
@@ -444,6 +458,9 @@ func validateStatusFilters(statuses []string) ([]Status, error) {
 // (medium on create, the existing value on update) — semantics that
 // don't apply to "no filter on this field".
 func validatePriorityFilters(priorities []string) ([]Priority, error) {
+	if len(priorities) > maxFilterValues {
+		return nil, fmt.Errorf("%w: too many priority values", ErrInvalidInput)
+	}
 	var out []Priority
 	seen := make(map[Priority]bool, len(priorities))
 	for _, raw := range priorities {

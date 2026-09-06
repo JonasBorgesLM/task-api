@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"expvar"
 	"fmt"
@@ -332,7 +333,19 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// comment) and before requireAuth/rate-limit wiring below because
 	// nothing there depends on it — construction order here follows use,
 	// not a required sequence.
+	// csrf.WithErrorHandler replaces the library's default rejection
+	// response — plain text "Forbidden" — with this API's own
+	// {"error": "..."} envelope, which every other response guarantees
+	// (see docs/ARCHITECTURE.md's Future Improvements, where this was
+	// tracked as a known gap: the plain-text response still carried the
+	// right status and X-Request-Id, which is why it was deferred rather
+	// than blocking Fase 12). writeCSRFError below mirrors
+	// user.writeAuthError's exact shape rather than importing it — the
+	// composition root wires cross-cutting concerns together, but
+	// internal/user has no reason to export a helper whose only other
+	// caller is here.
 	var csrfOpts []csrf.Option
+	csrfOpts = append(csrfOpts, csrf.WithErrorHandler(http.HandlerFunc(writeCSRFError)))
 	if cfg.CookieInsecure {
 		csrfOpts = append(csrfOpts, csrf.WithInsecureCookie())
 	}
@@ -535,7 +548,12 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// the readiness probe in particular is named in deployment manifests
 	// (see docs/DECISIONS.md), which should not have to be re-edited
 	// every time the API version moves.
-	mux.Handle("/v1/", http.StripPrefix("/v1", v1))
+	//
+	// middleware.CacheControl sits inside StripPrefix, not outside it, so
+	// it sees the same unprefixed path ("/auth/login", not
+	// "/v1/auth/login") the handlers themselves register against — see
+	// its own doc comment for why every /v1 response needs one.
+	mux.Handle("/v1/", http.StripPrefix("/v1", middleware.CacheControl("/auth/")(v1)))
 
 	root := http.NewServeMux()
 	registerHealthRoute(root, logger)
@@ -768,6 +786,21 @@ func buildBlobStore(ctx context.Context, cfg config.Config) (attachment.BlobStor
 		})
 	}
 	return attachment.NewFSBlobStore(cfg.AttachmentStorageDir)
+}
+
+// writeCSRFError is csrf.WithErrorHandler's replacement for the
+// library's default plain-text "Forbidden" — it writes the same
+// {"error": "..."} shape every other response in this API guarantees.
+// Deliberately not distinguishing *why* the check failed (missing
+// cookie, mismatched token, disallowed Origin): csrf.Protector.reject's
+// own doc comment already makes this call for its default response, and
+// a caller-visible reason here would be the same kind of information
+// leak — it would give a forger issuing forged requests a progress
+// indicator instead of an opaque rejection.
+func writeCSRFError(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "CSRF verification failed"})
 }
 
 // userIDKey keys the per-user rate limiter by the authenticated user's

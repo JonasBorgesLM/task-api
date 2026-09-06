@@ -786,6 +786,12 @@ func TestIntegration_CSRF_BearerWrite_NoCSRFTokenOrCookie_Succeeds(t *testing.T)
 // be a browser and must prove it holds the CSRF token, or it is rejected
 // — this is what actually closes the vulnerability the original
 // header-only decision (docs/DECISIONS.md) existed to avoid reopening.
+//
+// It also pins writeCSRFError's envelope: every other response in this
+// API guarantees {"error": "..."}, and until this was added moat/csrf's
+// own default handler answered here with plain text instead — a real
+// gap this test would not have caught, since it only checked the status
+// code before writeCSRFError existed.
 func TestIntegration_CSRF_CookieWrite_NoToken_Returns403(t *testing.T) {
 	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
 	defer srv.Close()
@@ -810,6 +816,16 @@ func TestIntegration_CSRF_CookieWrite_NoToken_Returns403(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("cookie-authenticated POST /tasks with no CSRF token: status = %d, body = %s, want %d", resp.StatusCode, body, http.StatusForbidden)
+	}
+	if got, want := resp.Header.Get("Content-Type"), "application/json"; got != want {
+		t.Errorf("Content-Type = %q, want %q", got, want)
+	}
+	var errBody map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&errBody); err != nil {
+		t.Fatalf("decode CSRF rejection body as {\"error\": \"...\"}: %v", err)
+	}
+	if errBody["error"] == "" {
+		t.Errorf("CSRF rejection body = %v, want a non-empty \"error\" field", errBody)
 	}
 }
 

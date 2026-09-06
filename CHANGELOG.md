@@ -8,7 +8,9 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
 
 ## [1.6.0] — a definir na tag
 
-**Minor, não major:** rota nova, aditiva — nenhum contrato existente muda.
+**Minor, não major:** a rota nova é aditiva, e os três itens abaixo em
+"Segurança" são endurecimento — nenhum cliente que já respeitava o que
+`docs/openapi.yaml` documentava é afetado.
 
 ### Adicionado
 - `POST /v1/auth/password` (issue #196) — troca a própria senha. Exige a
@@ -32,6 +34,25 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   mensagem; agora é um campo dedicado. Escopo deliberadamente restrito a
   esta rota — `PUT /tasks/{id}`'s `409` (só concorrência, sem
   ambiguidade de transição) não ganhou o campo.
+
+### Segurança
+- `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em
+  vez de aceitar qualquer inteiro e montar o resultado inteiro em
+  memória. `limit` ausente continua significando "sem limite" — essa
+  promessa já documentada de `/v1` não muda; só um valor explícito
+  grande demais passa a ser recusado.
+- Toda resposta sob `/v1` passa a carregar `Cache-Control`:
+  `private, no-store` em `/v1/auth/*`, `private, no-cache` no resto.
+  Nenhuma resposta autenticada emitia esse header antes — um `200` sem
+  ele é cacheável por heurística (RFC 9111 §4.2.2), e nada aqui deveria
+  ser servido por um cache compartilhado a um segundo usuário.
+- A resposta `403` de CSRF passa a usar o envelope `{"error": "..."}`
+  do resto da API, via `csrf.WithErrorHandler` — fecha a dívida técnica
+  registrada no release anterior (ver "Dívidas técnicas conhecidas" do
+  release que a introduziu). Um cliente que dependia especificamente do
+  corpo em texto puro `Forbidden` observa uma mudança; nenhum cliente
+  que já lia `{"error": "..."}`, como todo o resto da API sempre
+  garantiu, é afetado.
 
 ## [1.5.0] — a definir na tag
 
