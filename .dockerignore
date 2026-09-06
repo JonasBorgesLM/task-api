@@ -28,6 +28,14 @@ task-api
 go.work
 go.work.sum
 
+# web/'s own build inputs/outputs — web/Dockerfile's node-builder stage
+# runs `npm ci` and `npm run build` itself, from web/package*.json and
+# web/ source, so a local node_modules or a stale dist here is never an
+# input; sending either would only slow down the build context upload.
+web/node_modules
+web/dist
+web/test-results
+
 # Docker metadata itself.
 Dockerfile
 .dockerignore

@@ -1274,6 +1274,85 @@ Nenhum item de `docs/changes/web-frontend/plan.md` (`CI-1`–`CI-11`) nem as iss
 
 Consequência direta, não antecipação: `RequireAuth` (`web/src/features/auth/RequireAuth.tsx`) — um guard de rota que redireciona para `/login` quando `useAuth()` não está autenticado — não está na lista de arquivos de `CI-6` em `plan.md`, mas é o que torna a rota `/` protegida possível; sem ele, "URLs reais" e "sessão só sabida via `GET /auth/me`" não se sustentam juntas.
 
+### SPA deployment: um servidor Go próprio, não nginx/Caddy
+
+Issue #229: até esta mudança, `web/`'s build de produção (`npm run build`,
+`dist/`) não tinha nenhum caminho de deploy — só `npm run dev` existia. A
+consequência não era só operacional: a CSP estrita do backend
+(`default-src 'none'`) protege a origem da API, que serve só JSON e nunca
+carrega script — ela nunca poderia ser a origem de onde um XSS rodaria. A
+origem que serve o documento HTML da SPA é onde isso importa, e nada
+emitia CSP, `nosniff`, `Referrer-Policy` ou HSTS ali, porque não existia
+processo nenhum responsável por essa origem.
+
+**A escolha: `cmd/web`, um binário Go próprio, no mesmo módulo de
+`cmd/api`** — não nginx, não Caddy. Três alternativas reais foram
+pesadas:
+
+- **nginx/Caddy** é o padrão de mercado para servir uma SPA, mas
+  introduziria uma tecnologia nova neste repositório — um `nginx.conf`
+  ou `Caddyfile` sem cobertura de teste em Go possível, só smoke test via
+  `curl`. Todo o resto deste projeto é Go, incluindo cada decisão de
+  header de segurança já tomada (`internal/middleware`, `moat/
+  secureheaders`) — escrita, testada e explicada em código, nunca
+  configuração declarativa de terceiros.
+- **Servir a SPA a partir do próprio `cmd/api`** foi rejeitado sem
+  chegar a ser escrito: misturaria uma origem que serve HTML/JS/CSS com
+  uma que existe precisamente para nunca servir nada disso (a CSP
+  `default-src 'none'` do backend é essa promessa), e um processo servindo
+  duas coisas com modelos de ameaça opostos é dois processos escondidos
+  atrás de um.
+- **`cmd/web`, reaproveitando `moat/secureheaders` e
+  `internal/middleware`** — a escolha feita. Mesmo módulo Go de `cmd/api`
+  (não um segundo `go.mod`), mesma imagem `scratch`/`USER 65532:65532`,
+  mesmo padrão de graceful shutdown, e os mesmos pacotes de middleware
+  genéricos (`RequestID`, `Logging`, `Recovery`) — sem duplicar nada que
+  já existe, sem importar conhecimento de domínio (`internal/task`,
+  `internal/user`) que este servidor não precisa.
+
+**Custo aceito:** escrever e testar ~300 linhas de Go (`cmd/web/main.go`
++ testes) em vez de um arquivo de configuração pronto. Aceito porque o
+resultado é testável com a mesma ferramenta (`go test`, `gosec`,
+`govulncheck`) que já cobre o resto do projeto, e porque a CSP que ele
+gera não é uma string fixa — ver o próximo ponto.
+
+**A CSP é computada no startup, não escrita como constante.** `index.html`
+carrega um script inline (a detecção de tema antes do primeiro paint —
+ver o próprio comentário dele em `web/index.html`), e uma CSP restrita
+precisa admiti-lo explicitamente via hash (`script-src 'self'
+'sha256-...'`) — a alternativa, `'unsafe-inline'`, equivaleria a não ter
+política de script nenhuma. `cmd/web` lê o `index.html` que ele
+realmente está servindo e calcula o hash a partir dos bytes reais, uma
+vez, no startup (`buildCSP`/`cspScriptHashes`), em vez de um hash
+hardcoded como constante Go. Um hash fixo ficaria obsoleto em silêncio no
+instante em que o conteúdo do script mudasse — bloqueando a detecção de
+tema em produção sem nada no build ou no deploy para pegar isso. Calculado
+a partir do arquivo real, a política está sempre correta para o que este
+processo de fato está servindo.
+
+**Nonce (`moat/secureheaders.WithNonce`) foi considerado e rejeitado.** A
+biblioteca suporta isso nativamente — nonce por requisição, injetado nos
+`<script>` e lido via `secureheaders.Nonce(r)` — mas exigiria (a)
+re-renderizar `index.html` a cada requisição em vez de servi-lo como
+arquivo estático, injetando o nonce em **todo** `<script>`, inclusive o
+`<script type="module" src="...">` do bundle, e (b) nunca cachear a
+resposta (a própria doc do `WithNonce` avisa: "do not put a shared cache
+in front of nonced HTML"). Nonce existe para conteúdo inline cujo valor
+muda por requisição — não é este caso: `index.html` é um artefato de
+build inteiramente estático, sem nada influenciado por dados da
+requisição, então um hash fixo por conteúdo é estritamente mais simples
+e não abre mão de nenhuma garantia de segurança real.
+
+**`WEB_API_ORIGIN` (runtime) e `VITE_API_BASE_URL` (build-time) são duas
+variáveis, não uma, e têm que concordar.** A primeira é o que este
+servidor permite em `connect-src`; a segunda é o que o bundle já
+carrega embutido para suas próprias chamadas `fetch`. Uma divergência
+entre as duas não falha nem o build nem o startup — falha em silêncio no
+navegador, como violação de CSP no console. Documentado nos dois lugares
+(`web/README.md`, `cmd/web/main.go`'s `loadConfig`) exatamente porque não
+há uma checagem mecânica possível entre um valor embutido em JavaScript
+já compilado e a configuração de um processo Go separado.
+
 ---
 
 ## crier: ruído de health-check filtrado por severidade, não por amostragem

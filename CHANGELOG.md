@@ -34,6 +34,17 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   mensagem; agora é um campo dedicado. Escopo deliberadamente restrito a
   esta rota — `PUT /tasks/{id}`'s `409` (só concorrência, sem
   ambiguidade de transição) não ganhou o campo.
+- `cmd/web` (issue #229) — servidor Go próprio para o build de produção
+  da SPA (`web/dist`), imagem e binário separados de `cmd/api`
+  (`web/Dockerfile`, `docker-compose.yml`'s serviço `web`,
+  `k8s/50-web.yaml`). Antes desta mudança, `web/` não tinha nenhum
+  caminho de deploy — só `npm run dev`. Content-Security-Policy própria
+  para um documento HTML real (a de `cmd/api` é `default-src 'none'`,
+  correta para uma API que não serve documento nenhum), calculada a
+  partir do `index.html` real servido a cada startup, não uma string
+  fixa — ver `docs/DECISIONS.md` § "SPA deployment: um servidor Go
+  próprio" para o porquê da escolha e o porquê nonce foi considerado e
+  rejeitado.
 
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em
