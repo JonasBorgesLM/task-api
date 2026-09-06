@@ -343,6 +343,55 @@ func TestMemory_TotalBytesForUser_NoAttachments_IsZero(t *testing.T) {
 	}
 }
 
+func TestMemory_CountByTask_CountsOwnedAttachments(t *testing.T) {
+	repo := newTestRepo(t)
+	if err := repo.Create(context.Background(), testAttachment("a1", "key-1", ownedTaskID), ownerID); err != nil {
+		t.Fatalf("Create(a1) unexpected error: %v", err)
+	}
+	if err := repo.Create(context.Background(), testAttachment("a2", "key-2", ownedTaskID), ownerID); err != nil {
+		t.Fatalf("Create(a2) unexpected error: %v", err)
+	}
+
+	count, err := repo.CountByTask(context.Background(), ownedTaskID, ownerID)
+	if err != nil {
+		t.Fatalf("CountByTask() unexpected error: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("CountByTask() = %d, want 2", count)
+	}
+}
+
+func TestMemory_CountByTask_NoAttachments_IsZero(t *testing.T) {
+	repo := newTestRepo(t)
+
+	count, err := repo.CountByTask(context.Background(), ownedTaskID, ownerID)
+	if err != nil {
+		t.Fatalf("CountByTask() unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("CountByTask() = %d, want 0", count)
+	}
+}
+
+// TestMemory_CountByTask_NotOwner_IsZero verifies the interface's own
+// contract: a task the caller does not own answers 0, not
+// ErrTaskNotFound — the ownership error is Create's job, reached later
+// in Service.Upload, not this quota check's.
+func TestMemory_CountByTask_NotOwner_IsZero(t *testing.T) {
+	repo := newTestRepo(t)
+	if err := repo.Create(context.Background(), testAttachment("theirs", "key-1", otherTaskID), strangerID); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	count, err := repo.CountByTask(context.Background(), otherTaskID, ownerID)
+	if err != nil {
+		t.Fatalf("CountByTask() unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("CountByTask() for a task owned by someone else = %d, want 0", count)
+	}
+}
+
 // TestMemory_TotalBytesForUser_ExcludesOtherUsers guards the scoping
 // itself: another user's stored bytes must never count toward this
 // user's total.
