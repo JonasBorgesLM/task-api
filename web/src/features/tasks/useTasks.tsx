@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client'
 import type { ApiError } from '../../api/errors'
 import { classifyError } from '../../api/errors'
@@ -89,8 +89,24 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
   // 0-based internally, 1-based only where it is shown.
   const [pageIndex, setPageIndex] = useState(0)
 
+  // Tracks the one fetch this hook considers current. fetchPage is
+  // called from several places below (the load effect, reload,
+  // addTaskLocally, removeTaskLocally, updateTaskLocally's re-fetch
+  // path) — switching filters or paging quickly can leave more than one
+  // of those in flight at once, and without this the one that happens
+  // to resolve *last* wins regardless of which one was actually asked
+  // for last, silently showing a stale page under controls that already
+  // moved on. A ref, not state: aborting a superseded request is a side
+  // effect on the way into a new one, never something that should
+  // itself trigger a render.
+  const currentFetch = useRef<AbortController | null>(null)
+
   const fetchPage = useCallback(
     async (index: number) => {
+      currentFetch.current?.abort()
+      const controller = new AbortController()
+      currentFetch.current = controller
+
       const params = new URLSearchParams({
         limit: String(PAGE_SIZE + 1),
         offset: String(index * PAGE_SIZE),
@@ -99,13 +115,33 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
       for (const status of splitFilter(statusFilter)) params.append('status', status)
       for (const priority of splitFilter(priorityFilter)) params.append('priority', priority)
 
-      const response = await apiFetch(`/v1/tasks?${params.toString()}`)
+      let response: Response
+      try {
+        response = await apiFetch(`/v1/tasks?${params.toString()}`, { signal: controller.signal })
+      } catch (err) {
+        // A newer call to fetchPage already aborted this one — the
+        // request that superseded it owns updating state now. Anything
+        // else (offline, DNS failure, ...) is a real failure and
+        // propagates exactly as it did before this hook tracked aborts.
+        if (controller.signal.aborted) return
+        throw err
+      }
+      // Belt and suspenders alongside the catch above: fetch's own
+      // contract is to reject an aborted request, but checking the
+      // signal directly here doesn't depend on that holding in every
+      // browser/polyfill, and covers the (call to this same fetchPage,
+      // now superseded) response arriving to this point in the small
+      // window between the abort and the rejection.
+      if (controller.signal.aborted) return
+
       if (!response.ok) {
         setError(await classifyError(response))
         setPhase('error')
         return
       }
       const page = (await response.json()) as Task[]
+      if (controller.signal.aborted) return
+
       const more = page.length > PAGE_SIZE
 
       // Deleting the last row of the last page leaves you standing on a
@@ -150,6 +186,12 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
   useEffect(() => {
     setPhase('loading')
     void fetchPage(pageIndex)
+    // Unmount is the one case fetchPage's own abort-the-previous-call
+    // logic can't cover on its own — there is no "next" call to do the
+    // aborting. Harmless when this instead fires on a dependency change
+    // right before the effect reruns: fetchPage(pageIndex) below is
+    // about to open its own new AbortController regardless.
+    return () => currentFetch.current?.abort()
   }, [fetchPage, pageIndex])
 
   // A page is in flight exactly when the fetch effect above is loading
