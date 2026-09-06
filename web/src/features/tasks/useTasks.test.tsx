@@ -2,10 +2,10 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PAGE_SIZE, useTasks } from './useTasks'
 
-function jsonResponse(status: number, body: unknown): Response {
+function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...headers },
   })
 }
 
@@ -23,6 +23,18 @@ function makeTask(id: string) {
 
 function makeTasks(count: number, offset = 0) {
   return Array.from({ length: count }, (_, i) => makeTask(String(offset + i + 1)))
+}
+
+// A deferred Response the test controls the timing of, standing in for a
+// slow request that resolves only when resolve() below is called — as
+// opposed to mockResolvedValueOnce, which resolves on the next
+// microtask and can never be made to arrive *after* a later call.
+function deferredResponse() {
+  let resolve!: (response: Response) => void
+  const promise = new Promise<Response>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
 }
 
 describe('useTasks', () => {
@@ -98,18 +110,6 @@ describe('useTasks', () => {
     expect(result.current.tasks).toHaveLength(PAGE_SIZE)
     expect(result.current.hasNextPage).toBe(false)
   })
-
-  // A deferred Response the test controls the timing of, standing in for
-  // a slow request that resolves only when resolve() below is called —
-  // as opposed to mockResolvedValueOnce, which resolves on the next
-  // microtask and can never be made to arrive *after* a later call.
-  function deferredResponse() {
-    let resolve!: (response: Response) => void
-    const promise = new Promise<Response>((r) => {
-      resolve = r
-    })
-    return { promise, resolve }
-  }
 
   // #235: two fetchPage calls can be in flight together whenever a
   // filter or a page changes while the previous request hasn't answered
@@ -425,5 +425,176 @@ describe('useTasks', () => {
     const thirdUrl = String(fetchMock.mock.calls[2]![0])
     expect(thirdUrl).toContain('offset=0')
     expect(thirdUrl).toContain('status=done')
+  })
+})
+
+describe('page cache (15.D3)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('revisiting an already-fetched page shows it immediately, before revalidation resolves', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(PAGE_SIZE + 1, 0), { ETag: '"page-0"' }),
+    )
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE), { ETag: '"page-1"' }))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+    expect(result.current.tasks).toHaveLength(PAGE_SIZE)
+
+    await act(async () => {
+      result.current.nextPage()
+    })
+    await waitFor(() => expect(result.current.page).toBe(2))
+    await waitFor(() => expect(result.current.isPaging).toBe(false))
+
+    // Page 0's revalidation is made to hang forever — if the hook
+    // needed a network response to show anything, this would leave it
+    // stuck showing a loading skeleton instead.
+    const hang = deferredResponse()
+    fetchMock.mockImplementationOnce(() => hang.promise)
+
+    await act(async () => {
+      result.current.previousPage()
+    })
+
+    expect(result.current.page).toBe(1)
+    expect(result.current.status).toBe('success')
+    expect(result.current.isPaging).toBe(false)
+    expect(result.current.tasks).toHaveLength(PAGE_SIZE)
+  })
+
+  it('revalidates a cached page with If-None-Match, and a 304 keeps the cached data', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(3), { ETag: '"v1"' }))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    // No If-None-Match on the very first fetch of a page — nothing
+    // cached yet to send.
+    expect(fetchMock.mock.calls[0]![1]?.headers).not.toHaveProperty('If-None-Match')
+
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 304 }))
+    await act(async () => {
+      result.current.reload()
+    })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const revalidateHeaders = new Headers(fetchMock.mock.calls[1]![1]?.headers)
+    expect(revalidateHeaders.get('If-None-Match')).toBe('"v1"')
+
+    // 304 is not an error, and the tasks shown are still the ones the
+    // cache already had.
+    expect(result.current.status).toBe('success')
+    expect(result.current.error).toBeNull()
+    expect(result.current.tasks).toHaveLength(3)
+  })
+
+  it('a failed background revalidation keeps showing the cached page instead of erroring', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(3), { ETag: '"v1"' }))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(503, { error: 'service temporarily unavailable, please retry' }),
+    )
+    await act(async () => {
+      result.current.reload()
+    })
+    // Let the failed revalidation's promise chain settle.
+    await act(async () => {})
+
+    expect(result.current.status).toBe('success')
+    expect(result.current.error).toBeNull()
+    expect(result.current.tasks).toHaveLength(3)
+  })
+
+  // A revalidation fetch fires whether or not there was a cache hit —
+  // stale-while-revalidate always goes back to the network, it just
+  // doesn't *wait* on it when there's something cached to show first.
+  // So counting fetch calls cannot tell "cleared" from "not cleared";
+  // what distinguishes them is whether the page renders synchronously
+  // from cache (a hit) or sits in 'loading' until the network answers (a
+  // miss) — the same synchronous check
+  // "revisiting an already-fetched page" above uses, on a response held
+  // open with deferredResponse() so the test can inspect that in-between
+  // state at all.
+  it('addTaskLocally clears every cached page, not only the current one', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE + 1, 0)))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE)))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    await act(async () => {
+      result.current.nextPage()
+    })
+    await waitFor(() => expect(result.current.page).toBe(2)) // page 0 and page 1 both cached now
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE)))
+    await act(async () => {
+      result.current.addTaskLocally(makeTask('new'))
+    })
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    // Page 0's entry must be gone: hang its revalidation and confirm the
+    // hook has nothing to show synchronously, i.e. it is genuinely
+    // fetching rather than instantly redisplaying a stale cache hit.
+    const hang = deferredResponse()
+    fetchMock.mockImplementationOnce(() => hang.promise)
+    await act(async () => {
+      result.current.previousPage()
+    })
+
+    expect(result.current.page).toBe(1)
+    expect(result.current.status).toBe('loading')
+  })
+
+  it('updateTaskLocally patches the cached page, so a later revisit reflects the edit', async () => {
+    const fetchMock = vi.mocked(fetch)
+    // PAGE_SIZE + 1 so hasNextPage is true and nextPage() below actually
+    // moves — a single-row first page (no next page) would make
+    // nextPage() a no-op, and this test would pass without ever
+    // revisiting anything.
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE + 1, 0)))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    const original = result.current.tasks[0]!
+    const edited = { ...original, title: 'Edited title' }
+    act(() => {
+      result.current.updateTaskLocally(edited)
+    })
+    expect(result.current.tasks[0]!.title).toBe('Edited title')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE)))
+    await act(async () => {
+      result.current.nextPage()
+    })
+    await waitFor(() => expect(result.current.page).toBe(2))
+
+    // Page 0's revalidation is held open — if the edit had not reached
+    // cacheRef, this assertion would be checking the pre-edit title
+    // (or, with no third mock queued at all, the call would throw
+    // instead of resolving to anything).
+    const hang = deferredResponse()
+    fetchMock.mockImplementationOnce(() => hang.promise)
+    await act(async () => {
+      result.current.previousPage()
+    })
+
+    expect(result.current.page).toBe(1)
+    expect(result.current.tasks[0]!.title).toBe('Edited title')
   })
 })

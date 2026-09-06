@@ -51,6 +51,16 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   percebe diferença. O validador da listagem é derivado das linhas já
   lidas para montar a resposta, nunca uma consulta a mais; ver
   `docs/DECISIONS.md` § "ETag de GET /v1/tasks".
+- `web/`'s lista de tasks (`useTasks`) passa a guardar cada página já
+  buscada em memória e mostrá-la de imediato ao revisitar — "Anterior"
+  e trocar de filtro deixam de mostrar um skeleton para dados que o
+  hook já tinha (issue #234). Revalida em segundo plano usando o `ETag`
+  de #233; uma revalidação que falha mantém os dados já mostrados em
+  vez de virar tela de erro. Criar ou excluir uma task limpa o cache
+  inteiro (a composição de toda página seguinte pode ter mudado); uma
+  edição que continua batendo com o filtro atualiza só a própria
+  entrada. Só em memória — nunca `localStorage`. Ver `docs/DECISIONS.md`
+  § "Cache de páginas".
 
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em

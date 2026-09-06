@@ -81,6 +81,21 @@ function splitFilter(value: string): string[] {
  * prop is a new identity on every render, which would re-fetch forever.
  * Splitting is this hook's job precisely so no caller has to know that.
  */
+// pageCacheEntry is one (statusFilter, priorityFilter, pageIndex)'s last
+// known result — see pageCacheKey and useTasks' cacheRef for how it is
+// keyed and invalidated.
+interface pageCacheEntry {
+  tasks: Task[]
+  hasNextPage: boolean
+  // GET /v1/tasks's own ETag (15.D2), or null the first time a page is
+  // ever fetched — nothing to send as If-None-Match yet.
+  etag: string | null
+}
+
+function pageCacheKey(statusFilter: string, priorityFilter: string, index: number): string {
+  return `${statusFilter}|${priorityFilter}|${index}`
+}
+
 export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult {
   const [tasks, setTasks] = useState<Task[]>([])
   const [phase, setPhase] = useState<'loading' | 'loaded' | 'error'>('loading')
@@ -101,8 +116,38 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
   // itself trigger a render.
   const currentFetch = useRef<AbortController | null>(null)
 
+  // 15.D3: every (filter, page) this hook has ever fetched, in memory
+  // only — a ref, not state, because writing to it must never itself
+  // trigger a render; it changes on the way into a render fetchPage's
+  // own setTasks/setPhase calls already schedule. Cleared, never
+  // persisted: dies with the hook (a reload, a tab close), the same
+  // "session-lived, not localStorage" rule docs/DECISIONS.md's
+  // "Cookie httpOnly, nunca localStorage" states for the credential —
+  // extended here on the same instinct, even though a task list isn't
+  // itself sensitive the way a token is.
+  const cacheRef = useRef<Map<string, pageCacheEntry>>(new Map())
+
   const fetchPage = useCallback(
     async (index: number) => {
+      const cacheKey = pageCacheKey(statusFilter, priorityFilter, index)
+      const cached = cacheRef.current.get(cacheKey)
+
+      // Stale-while-revalidate: a page this hook has already fetched is
+      // shown immediately, synchronously, before the network round trip
+      // below even starts — this is what makes "Anterior" and revisiting
+      // an already-seen filter feel instant instead of re-showing a
+      // skeleton for data the hook already has. Only a genuinely new
+      // (filter, page) combination falls back to the loading state.
+      const hadCacheHit = Boolean(cached)
+      if (cached) {
+        setTasks(cached.tasks)
+        setHasNextPage(cached.hasNextPage)
+        setError(null)
+        setPhase('loaded')
+      } else {
+        setPhase('loading')
+      }
+
       currentFetch.current?.abort()
       const controller = new AbortController()
       currentFetch.current = controller
@@ -115,15 +160,34 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
       for (const status of splitFilter(statusFilter)) params.append('status', status)
       for (const priority of splitFilter(priorityFilter)) params.append('priority', priority)
 
+      // 15.D2 interaction: revalidating a page this hook already cached
+      // carries its ETag, so an unchanged page comes back as a bare
+      // `304` — the cheapest possible confirmation that what was already
+      // shown above is still correct. A page fetched for the first time
+      // has no ETag yet and skips this header entirely.
+      const headers: HeadersInit | undefined = cached?.etag
+        ? { 'If-None-Match': cached.etag }
+        : undefined
+
       let response: Response
       try {
-        response = await apiFetch(`/v1/tasks?${params.toString()}`, { signal: controller.signal })
+        response = await apiFetch(`/v1/tasks?${params.toString()}`, {
+          signal: controller.signal,
+          headers,
+        })
       } catch (err) {
         // A newer call to fetchPage already aborted this one — the
-        // request that superseded it owns updating state now. Anything
-        // else (offline, DNS failure, ...) is a real failure and
-        // propagates exactly as it did before this hook tracked aborts.
+        // request that superseded it owns updating state now.
         if (controller.signal.aborted) return
+        // A background revalidation of a page already shown from cache
+        // failing (offline, a blip) is not a reason to tear down a
+        // correct, still-displayed list — silently keep showing it
+        // rather than replacing good data with an error screen over a
+        // check the user never asked for. A first-time fetch with
+        // nothing cached to fall back on has no such option: it
+        // propagates exactly as it did before this hook tracked aborts
+        // or cached anything.
+        if (hadCacheHit) return
         throw err
       }
       // Belt and suspenders alongside the catch above: fetch's own
@@ -134,7 +198,17 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
       // window between the abort and the rejection.
       if (controller.signal.aborted) return
 
+      // The cached copy already shown above (or, on the very first
+      // fetch, about to be shown) is confirmed current — Response.ok is
+      // false for 304 (it is only true for 2xx), so this has to be
+      // checked before the failure branch below, not folded into it.
+      if (response.status === 304) return
+
       if (!response.ok) {
+        // Same reasoning as the catch block above: a page already shown
+        // from cache keeps showing it rather than being replaced by an
+        // error state over a revalidation the user never asked for.
+        if (hadCacheHit) return
         setError(await classifyError(response))
         setPhase('error')
         return
@@ -152,10 +226,17 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
         return
       }
 
-      setTasks(more ? page.slice(0, PAGE_SIZE) : page)
+      const shown = more ? page.slice(0, PAGE_SIZE) : page
+      setTasks(shown)
       setHasNextPage(more)
       setError(null)
       setPhase('loaded')
+
+      cacheRef.current.set(cacheKey, {
+        tasks: shown,
+        hasNextPage: more,
+        etag: response.headers.get('ETag'),
+      })
     },
     [statusFilter, priorityFilter],
   )
@@ -184,7 +265,9 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
   }
 
   useEffect(() => {
-    setPhase('loading')
+    // No setPhase('loading') here — fetchPage itself now decides that:
+    // a (filter, page) already in cacheRef is shown immediately instead
+    // of flashing a skeleton for data the hook already has (15.D3).
     void fetchPage(pageIndex)
     // Unmount is the one case fetchPage's own abort-the-previous-call
     // logic can't cover on its own — there is no "next" call to do the
@@ -210,8 +293,12 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
     setPageIndex((index) => Math.max(0, index - 1))
   }, [])
 
+  // No setPhase('loading') here either, same reasoning as the load
+  // effect above — and in practice this only ever has a cache entry to
+  // fall back on when there is nothing to reload for: the 'error' phase
+  // Retry is shown from is only reached when fetchPage found no cached
+  // page for this (filter, index) in the first place.
   const reload = useCallback(() => {
-    setPhase('loading')
     void fetchPage(pageIndex)
   }, [fetchPage, pageIndex])
 
@@ -222,7 +309,16 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
   // page is re-fetched instead. (The task argument stays in the
   // signature: the caller has it, and this hook owning the decision of
   // what to do with it is the point.)
+  // Every cached page — every filter, not only the current one — could
+  // now be wrong: a new row shifts what belongs on every page after the
+  // one it lands on, exactly the "which rows fall inside the window"
+  // problem this comment already names for the current page alone. A
+  // per-page invalidation would need to reason about *which* other
+  // pages that shift can reach; clearing everything is what stays
+  // correct without that bookkeeping — the cost is a handful of re-fetches
+  // for pages nobody may even revisit, paid only for the ones that are.
   const addTaskLocally = useCallback(() => {
+    cacheRef.current.clear()
     void fetchPage(pageIndex)
   }, [fetchPage, pageIndex])
 
@@ -243,10 +339,34 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
         (wantedPriorities.length === 0 || wantedPriorities.includes(task.priority))
 
       if (!stillMatches) {
+        // The row leaving this filter's result set shifts every later
+        // page the same way a delete does (see removeTaskLocally) — same
+        // fix, clear everything cached under every filter.
+        cacheRef.current.clear()
         void fetchPage(pageIndex)
         return
       }
       setTasks((previous) => previous.map((t) => (t.id === task.id ? task : t)))
+
+      // Patch the cache entry too, or a later revisit of this exact page
+      // would show the pre-edit version pulled straight from cacheRef —
+      // stale in a way a first-time fetch of this page never was. etag
+      // is deliberately cleared rather than kept: the field the caller
+      // just changed (title/description/priority) means Repository's
+      // Version moved server-side too, and this hook has no way to
+      // compute what the new value is — Task's own Version field never
+      // reaches the wire (see internal/task/task.go). Dropping the etag
+      // means the next revisit's If-None-Match is skipped and gets a
+      // real 200 instead of a 304 that would only be right by accident.
+      const cacheKey = pageCacheKey(statusFilter, priorityFilter, pageIndex)
+      const cached = cacheRef.current.get(cacheKey)
+      if (cached) {
+        cacheRef.current.set(cacheKey, {
+          tasks: cached.tasks.map((t) => (t.id === task.id ? task : t)),
+          hasNextPage: cached.hasNextPage,
+          etag: null,
+        })
+      }
     },
     [fetchPage, pageIndex, statusFilter, priorityFilter],
   )
@@ -254,8 +374,12 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
   // A delete pulls every later row one place forward, so the window
   // this page represents now holds a different set — re-fetch rather
   // than leave a nine-row page with a tenth row sitting on the next one
-  // that will never be seen.
+  // that will never be seen. The same shift reaches every later page
+  // under every filter, the same reasoning addTaskLocally's own comment
+  // gives for clearing the whole cache rather than just this page's
+  // entry.
   const removeTaskLocally = useCallback(() => {
+    cacheRef.current.clear()
     void fetchPage(pageIndex)
   }, [fetchPage, pageIndex])
 
