@@ -274,6 +274,8 @@ export interface paths {
          *
          *     The caller's total across every attachment they own — `ATTACHMENT_MAX_BYTES_PER_USER`, 500 MiB by default — is checked *before* the upload streams in, using the total the caller already had. A caller already at or over the quota is refused without a single byte being read; one accepted upload can push the total up to `ATTACHMENT_MAX_BYTES` past the quota (see `docs/DECISIONS.md` § "Quota de anexos" for why that overshoot is accepted).
          *
+         *     A single task may carry at most 50 attachments, checked the same way and before the same one — this is a fixed limit, not a per-deployment setting, since it exists to keep one task's attachment list practical to fetch and browse rather than to bound abuse (`ATTACHMENT_MAX_BYTES_PER_USER` already does that).
+         *
          *     These routes exist only when `ATTACHMENT_STORAGE_DIR` is configured; otherwise every one of them returns 404.
          */
         post: operations["uploadAttachment"];
@@ -644,9 +646,9 @@ export interface components {
             };
         };
         /**
-         * @description CSRF verification failed on a state-changing request that did not carry `Authorization: Bearer` (see the `cookieAuth` security scheme and docs/DECISIONS.md § "Autenticação: modo duplo"). Concretely, one of: the request has no `X-CSRF-Token` header; the token doesn't match the CSRF cookie; the CSRF cookie itself is missing, expired, or was never issued (call GET /v1/auth/csrf-token first); or the `Origin`/`Referer` header doesn't identify an allowed origin. The response is deliberately identical for all of these — distinguishing them would hand an attacker a progress indicator for a forged request.
+         * @description CSRF verification failed on a state-changing request that did not carry `Authorization: Bearer` (see the `cookieAuth` security scheme and docs/DECISIONS.md § "Autenticação: modo duplo"). Concretely, one of: the request has no `X-CSRF-Token` header; the token doesn't match the CSRF cookie; the CSRF cookie itself is missing, expired, or was never issued (call GET /v1/auth/csrf-token first); or the `Origin`/`Referer` header doesn't identify an allowed origin. The response is deliberately identical for all of these — distinguishing them would hand an attacker a progress indicator for a forged request, the same reasoning `ErrorResponse`'s own doc comment states for every other error body in this API.
          *
-         *     **Unlike every other error response in this API, the body here is NOT the `{"error": "..."}` envelope.** It is the plain text `Forbidden`, with `Content-Type: text/plain`, written by `moat/csrf`'s default rejection handler — a known, intentional-for-now inconsistency; see docs/ARCHITECTURE.md § Future Improvements.
+         *     Uses the same `{"error": "..."}` envelope as every other error response (`writeCSRFError`, wired via `csrf.WithErrorHandler` — `moat/csrf`'s own default here is plain text, which this API does not use for anything else).
          *
          *     A request carrying `Authorization: Bearer` never sees this response — it is exempt from CSRF entirely, whatever cookies it happens to also carry.
          */
@@ -656,8 +658,12 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                /** @example Forbidden */
-                "text/plain": string;
+                /**
+                 * @example {
+                 *       "error": "CSRF verification failed"
+                 *     }
+                 */
+                "application/json": components["schemas"]["ErrorResponse"];
             };
         };
         /**
@@ -1148,7 +1154,7 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description Maximum number of tasks to return. Sending the parameter with an empty value (`?limit=`) is treated as omitting it, not as an error.
+                 * @description Maximum number of tasks to return. Sending the parameter with an empty value (`?limit=`) is treated as omitting it, not as an error — omitting it entirely still returns every task the caller owns. An explicit value over 100 is rejected with 400 rather than accepted and silently capped; a caller wanting more than one page repeats the request with `offset` advanced instead of asking for everything in one response.
                  * @example 20
                  */
                 limit?: number;
@@ -1647,7 +1653,7 @@ export interface operations {
                     "application/json": components["schemas"]["Attachment"];
                 };
             };
-            /** @description The body was not multipart, carried no `file` part, exceeded the size limit, held a content type outside the allow-list, or the caller is already at their per-account storage quota (`ATTACHMENT_MAX_BYTES_PER_USER`) — the message never reveals another account's usage, only the caller's own. */
+            /** @description The body was not multipart, carried no `file` part, exceeded the size limit, held a content type outside the allow-list, the caller is already at their per-account storage quota (`ATTACHMENT_MAX_BYTES_PER_USER`) — the message never reveals another account's usage, only the caller's own — or the target task already carries 50 attachments. */
             400: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
