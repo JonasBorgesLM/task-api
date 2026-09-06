@@ -99,6 +99,68 @@ describe('useTasks', () => {
     expect(result.current.hasNextPage).toBe(false)
   })
 
+  // A deferred Response the test controls the timing of, standing in for
+  // a slow request that resolves only when resolve() below is called —
+  // as opposed to mockResolvedValueOnce, which resolves on the next
+  // microtask and can never be made to arrive *after* a later call.
+  function deferredResponse() {
+    let resolve!: (response: Response) => void
+    const promise = new Promise<Response>((r) => {
+      resolve = r
+    })
+    return { promise, resolve }
+  }
+
+  // #235: two fetchPage calls can be in flight together whenever a
+  // filter or a page changes while the previous request hasn't answered
+  // yet. Before AbortController tracking, whichever one resolved *last*
+  // won regardless of which one was asked for last.
+  //
+  // Negative control run during development, in the same spirit as
+  // cmd/web's TestPathEscapesDir: temporarily removing the
+  // `if (controller.signal.aborted) return` checks from useTasks.tsx's
+  // fetchPage (simulating the pre-#235 behavior) made this test fail
+  // with tasks equal to the stale ids (['1', '2', '3']) instead of
+  // ['101', '102'] — confirming it actually catches the regression it
+  // exists for, not just the current passing behavior. Restored
+  // immediately after.
+  it('a stale request resolving after a newer one does not overwrite its result', async () => {
+    const fetchMock = vi.mocked(fetch)
+    const stale = deferredResponse()
+    fetchMock.mockImplementationOnce(() => stale.promise)
+
+    const { result, rerender } = renderHook(({ status }) => useTasks(status), {
+      initialProps: { status: 'pending' },
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const staleSignal = fetchMock.mock.calls[0]![1]?.signal
+    expect(staleSignal).toBeInstanceOf(AbortSignal)
+
+    // Changing the filter resets to page 0 and fires a second request
+    // while the first is still pending — the exact shape the issue
+    // describes ("trocar dois filtros em sequência rápida").
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(2, 100)))
+    rerender({ status: 'done' })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    // fetchPage aborts whatever it superseded before issuing its own
+    // request — this is what the newer request is supposed to do to the
+    // older one.
+    expect(staleSignal?.aborted).toBe(true)
+
+    // The stale request now answers, late, with data for the filter
+    // that is no longer selected.
+    stale.resolve(jsonResponse(200, makeTasks(3, 0)))
+
+    await waitFor(() => expect(result.current.status).toBe('success'))
+    // Give the resolved-but-superseded promise's continuation a turn to
+    // run before asserting nothing changed because of it.
+    await act(async () => {})
+
+    expect(result.current.tasks.map((t) => t.id)).toEqual(['101', '102'])
+  })
+
   it('nextPage replaces the page at the next offset — it does not accumulate', async () => {
     const fetchMock = vi.mocked(fetch)
     fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE + 1, 0)))

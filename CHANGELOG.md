@@ -71,6 +71,15 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   lista de anexos de uma task navegável, não para fechar um vetor de
   abuso novo. Ver `docs/DECISIONS.md` § "Teto de anexos por task".
 
+### Corrigido
+- `web/`'s lista de tasks (`useTasks`) podia mostrar dados de um filtro
+  ou página que o usuário já tinha trocado — trocar dois filtros em
+  sequência rápida deixava duas requisições em voo, e a que respondesse
+  **por último** vencia, independente de qual tinha sido pedida por
+  último. Sem erro, sem indicador — a tela simplesmente mentia até um
+  recarregamento manual. `fetchPage` agora aborta a requisição anterior
+  (`AbortController`) antes de iniciar uma nova, issue #235.
+
 ## [1.5.0] — a definir na tag
 
 Passe de revisão de design sobre a SPA (identidade visual, paginação,
