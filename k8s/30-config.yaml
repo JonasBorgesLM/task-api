@@ -69,6 +69,17 @@ data:
   # mistake this comment exists to interrupt.
   COOKIE_INSECURE: "true"
 
+  # Allows the web Deployment's SPA (k8s/50-web.yaml) to call this API
+  # from a browser. localhost:8081, not an in-cluster address, because
+  # this disposable cluster has no Ingress — a browser reaches both
+  # Services through `kubectl port-forward` (task-api on 8080, web on
+  # 8081), the same convenience k8s/rollout-test.sh's own comment names
+  # for a human rather than for its own load test. web's own
+  # WEB_API_ORIGIN (k8s/50-web.yaml) must name the matching
+  # localhost:8080 half of this pair — see cmd/web/main.go's loadConfig
+  # doc comment for what happens when the two disagree.
+  CORS_ALLOWED_ORIGINS: "http://localhost:8081"
+
   # Mirrors every log record to SigNoz, alongside stdout — see
   # docs/DECISIONS.md's Fase 11 sections for the full validation this
   # was verified against (real ClickHouse query, not just "the exporter

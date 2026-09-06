@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: task-api
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: task-api
+spec:
+  replicas: 1
+
+  # Same pair as task-api's own Deployment, and the same reason: with
+  # replicas: 1, maxUnavailable: 0 forbids removing the old pod before a
+  # new one is Ready, and maxSurge: 1 is what makes that possible at all.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      # WEB_PRE_SHUTDOWN_DELAY (5s) + the shutdown timeout cmd/web
+      # defaults to (10s) = 15s < 20s. Smaller margin than task-api's own
+      # 30s is deliberate, not an oversight: there is no crier drain
+      # stage here, and every request this process serves completes in
+      # microseconds (a file read, or a few hundred fixed bytes) rather
+      # than task-api's DB round trips — the same reasoning
+      # k8s-deploy.md states for task-api's own budget applies here with
+      # a shorter worst case. If WEB_PRE_SHUTDOWN_DELAY or cmd/web's
+      # shutdown timeout ever change, this number and this comment
+      # change with them (see .claude/rules/k8s-deploy.md).
+      terminationGracePeriodSeconds: 20
+
+      containers:
+        - name: web
+          image: task-api-web:dev
+          # Never for a real registry — see task-api's own Deployment
+          # for why (kind + `kind load docker-image`, no registry to
+          # pull from here).
+          imagePullPolicy: Never
+
+          ports:
+            - containerPort: 8080
+
+          env:
+            # See k8s/30-config.yaml's CORS_ALLOWED_ORIGINS for the
+            # matching half of this pair — this disposable cluster has
+            # no Ingress, so a browser reaches both services through
+            # `kubectl port-forward`, not a real hostname. A real
+            # deployment replaces both with the actual public origins.
+            - name: WEB_API_ORIGIN
+              value: "http://localhost:8080"
+            - name: WEB_PRE_SHUTDOWN_DELAY
+              value: "5s"
+
+          # No startupProbe: unlike task-api, this process runs no
+          # migration and has no slow dependency to wait on — it reads
+          # one file (index.html) and starts listening immediately.
+          #
+          # Readiness and liveness share the same path and the same
+          # shape, unlike task-api's split: there is no database or
+          # other dependency for readiness to check that liveness
+          # shouldn't, so the distinction task-api's two probes exist to
+          # draw does not apply here.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # Lighter than task-api's own budget: no database connection
+          # pool, no request handling beyond reading a fixed file from
+          # disk or memory.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+
+          securityContext:
+            # Same reasoning as task-api's own: the image is a static
+            # binary on scratch with a nonroot user, made explicit here
+            # rather than left implied by how the image happens to be
+            # built. readOnlyRootFilesystem holds even more trivially
+            # here than for task-api — this process never writes
+            # anything, anywhere, ever.
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

@@ -62,9 +62,11 @@ task-api/
 │   │   └── *_test.go                 # Server lifecycle + full-stack HTTP tests
 │   ├── migrate/
 │   │   └── main.go                   # Standalone CLI: applies/reverts PostgreSQL migrations
-│   └── seed/
-│       ├── main.go                   # Standalone CLI: populates demo users + tasks via the real Services
-│       └── data.go                   # Word lists + randomTask()/randomStatus()/randomPriority() generators
+│   ├── seed/
+│   │   ├── main.go                   # Standalone CLI: populates demo users + tasks via the real Services
+│   │   └── data.go                   # Word lists + randomTask()/randomStatus()/randomPriority() generators
+│   └── web/
+│       └── main.go                   # Separate binary/image: serves web/dist behind moat/secureheaders — see docs/DECISIONS.md § "SPA deployment"
 ├── internal/
 │   ├── attachment/
 │   │   ├── attachment.go             # Domain model: Attachment (metadata only — the bytes live outside the database)
