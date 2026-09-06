@@ -86,6 +86,18 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   continua sendo o controle de abuso por bytes. Existe para manter a
   lista de anexos de uma task navegável, não para fechar um vetor de
   abuso novo. Ver `docs/DECISIONS.md` § "Teto de anexos por task".
+- `user.Service.ValidateToken` — chamada em toda requisição autenticada
+  — passa a checar um cache em memória, por processo, antes de ler o
+  banco (`tokenCacheTTL = 2s`, issue #232). `Logout`, `LogoutAll`,
+  `ChangePassword` e `DeleteAccount` invalidam a entrada correspondente
+  no mesmo processo assim que a revogação é persistida — a única
+  janela de atraso que o TTL ainda permite é uma sessão revogada
+  continuar validando por até 2s num processo *diferente* daquele que
+  processou a revogação (relevante só durante a sobreposição breve de
+  um rolling update, não em regime estável — ver "Topologia de
+  deploy"). Nenhuma rota muda de comportamento; ver
+  `docs/DECISIONS.md` § "Cache de ValidateToken" para o porquê do TTL
+  e as duas alternativas rejeitadas.
 
 ### Corrigido
 - `web/`'s lista de tasks (`useTasks`) podia mostrar dados de um filtro

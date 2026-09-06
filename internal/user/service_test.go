@@ -38,8 +38,9 @@ type fakeRepository struct {
 	savedSession            Session
 	createSessionCalledWith int // maxSessions passed to CreateSession
 
-	findSessionByHashSession Session
-	findSessionByHashErr     error
+	findSessionByHashSession   Session
+	findSessionByHashErr       error
+	findSessionByHashCallCount int
 
 	deleteSessionErr error
 	deletedTokenHash string
@@ -100,6 +101,7 @@ func (f *fakeRepository) DeleteSessionsForUserExcept(_ context.Context, userID, 
 }
 
 func (f *fakeRepository) FindSessionByTokenHash(_ context.Context, _ string) (Session, error) {
+	f.findSessionByHashCallCount++
 	return f.findSessionByHashSession, f.findSessionByHashErr
 }
 
@@ -410,6 +412,43 @@ func TestChangePassword_RevokeRepositoryError(t *testing.T) {
 	}
 }
 
+// TestChangePassword_InvalidatesCacheForOtherSessions_ButKeepsCallers is
+// ChangePassword's shaped version of the same guarantee: the cache
+// entry for the calling session must survive (Repository's own
+// DeleteSessionsForUserExcept leaves it alive for the identical reason
+// — see ChangePassword's doc comment), while every other cached session
+// for the user must be invalidated immediately.
+func TestChangePassword_InvalidatesCacheForOtherSessions_ButKeepsCallers(t *testing.T) {
+	stored := User{ID: "u1", PasswordHash: mustHash(t, "old-password123")}
+	repo := &fakeRepository{
+		findUserByIDUser:         stored,
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	if _, err := svc.ValidateToken(context.Background(), "current-token"); err != nil {
+		t.Fatalf("ValidateToken(current-token) unexpected error: %v", err)
+	}
+	if _, err := svc.ValidateToken(context.Background(), "other-token"); err != nil {
+		t.Fatalf("ValidateToken(other-token) unexpected error: %v", err)
+	}
+
+	if err := svc.ChangePassword(context.Background(), "u1", "old-password123", "new-password456", "current-token"); err != nil {
+		t.Fatalf("ChangePassword() unexpected error: %v", err)
+	}
+
+	// Simulate what DeleteSessionsForUserExcept would really have done:
+	// every session except the caller's own is gone from the repository.
+	repo.findSessionByHashErr = ErrNotFound
+
+	if _, err := svc.ValidateToken(context.Background(), "current-token"); err != nil {
+		t.Errorf("ValidateToken(current-token) after ChangePassword() = %v, want nil -- the calling session's cache entry must survive", err)
+	}
+	if _, err := svc.ValidateToken(context.Background(), "other-token"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ValidateToken(other-token) after ChangePassword() = %v, want ErrNotFound -- every other session's cache entry must be invalidated", err)
+	}
+}
+
 // --- VerifyPassword ---
 
 func TestVerifyPassword_Valid(t *testing.T) {
@@ -482,6 +521,30 @@ func TestDeleteAccount_UserRepositoryError(t *testing.T) {
 	err := svc.DeleteAccount(context.Background(), "u1")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("DeleteAccount() DeleteUser error = %v, want %v", err, repoErr)
+	}
+}
+
+// TestDeleteAccount_InvalidatesCacheForUser is DeleteAccount's half of
+// the same same-process revocation guarantee TestLogout_InvalidatesCache_*
+// pins.
+func TestDeleteAccount_InvalidatesCacheForUser(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("ValidateToken() unexpected error: %v", err)
+	}
+
+	if err := svc.DeleteAccount(context.Background(), "u1"); err != nil {
+		t.Fatalf("DeleteAccount() unexpected error: %v", err)
+	}
+
+	repo.findSessionByHashErr = ErrNotFound
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ValidateToken() after DeleteAccount() = %v, want ErrNotFound -- tokenCache entry should have been invalidated", err)
 	}
 }
 
@@ -568,6 +631,35 @@ func TestValidateToken_Unknown(t *testing.T) {
 	}
 }
 
+// TestValidateToken_CachesResult_SecondCallSkipsRepository is the whole
+// point of tokenCache (see token_cache.go and docs/DECISIONS.md § "Cache
+// de ValidateToken"): a second call for the same token must not touch
+// Repository again.
+func TestValidateToken_CachesResult_SecondCallSkipsRepository(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("first ValidateToken() unexpected error: %v", err)
+	}
+	if repo.findSessionByHashCallCount != 1 {
+		t.Fatalf("findSessionByHashCallCount after first call = %d, want 1", repo.findSessionByHashCallCount)
+	}
+
+	userID, err := svc.ValidateToken(context.Background(), "sometoken")
+	if err != nil {
+		t.Fatalf("second ValidateToken() unexpected error: %v", err)
+	}
+	if userID != "u1" {
+		t.Errorf("second ValidateToken() userID = %q, want %q", userID, "u1")
+	}
+	if repo.findSessionByHashCallCount != 1 {
+		t.Errorf("findSessionByHashCallCount after second call = %d, want still 1 (should have hit tokenCache instead of Repository)", repo.findSessionByHashCallCount)
+	}
+}
+
 // --- Logout ---
 
 func TestLogout_DeletesSessionByHash(t *testing.T) {
@@ -593,6 +685,36 @@ func TestLogout_RepositoryError(t *testing.T) {
 	}
 }
 
+// TestLogout_InvalidatesCache_SoARevokedTokenStopsValidatingImmediately
+// pins the same-process half of tokenCache's revocation guarantee (see
+// token_cache.go's doc comment): the *only* staleness this cache is
+// meant to ever tolerate is cross-process, never "the process that just
+// revoked a token still accepts it."
+func TestLogout_InvalidatesCache_SoARevokedTokenStopsValidatingImmediately(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("ValidateToken() unexpected error: %v", err)
+	}
+
+	if err := svc.Logout(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("Logout() unexpected error: %v", err)
+	}
+
+	// Simulate what Logout's own DeleteSession call would really have
+	// caused: the repository no longer has this session. If ValidateToken
+	// answered from a stale cache entry instead of consulting the
+	// repository again, this would still succeed.
+	repo.findSessionByHashErr = ErrNotFound
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ValidateToken() after Logout() = %v, want ErrNotFound -- tokenCache entry should have been invalidated", err)
+	}
+}
+
 // --- LogoutAll ---
 
 func TestLogoutAll_DeletesEverySessionForUser(t *testing.T) {
@@ -615,6 +737,29 @@ func TestLogoutAll_RepositoryError(t *testing.T) {
 	err := svc.LogoutAll(context.Background(), "u1")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("LogoutAll() repository error = %v, want %v", err, repoErr)
+	}
+}
+
+// TestLogoutAll_InvalidatesCacheForUser is LogoutAll's half of the same
+// same-process revocation guarantee TestLogout_InvalidatesCache_* pins.
+func TestLogoutAll_InvalidatesCacheForUser(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("ValidateToken() unexpected error: %v", err)
+	}
+
+	if err := svc.LogoutAll(context.Background(), "u1"); err != nil {
+		t.Fatalf("LogoutAll() unexpected error: %v", err)
+	}
+
+	repo.findSessionByHashErr = ErrNotFound
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ValidateToken() after LogoutAll() = %v, want ErrNotFound -- tokenCache entry should have been invalidated", err)
 	}
 }
 

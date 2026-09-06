@@ -60,6 +60,7 @@ type Service struct {
 	repo               Repository
 	sessionTTL         time.Duration
 	maxSessionsPerUser int
+	tokenCache         *tokenCache
 }
 
 // NewService returns a new Service with the given Repository. sessionTTL
@@ -69,7 +70,12 @@ type Service struct {
 // keeps alive at once — see config.Config.AuthMaxSessionsPerUser and
 // Repository.CreateSession's doc comment for what happens past it.
 func NewService(repo Repository, sessionTTL time.Duration, maxSessionsPerUser int) *Service {
-	return &Service{repo: repo, sessionTTL: sessionTTL, maxSessionsPerUser: maxSessionsPerUser}
+	return &Service{
+		repo:               repo,
+		sessionTTL:         sessionTTL,
+		maxSessionsPerUser: maxSessionsPerUser,
+		tokenCache:         newTokenCache(tokenCacheTTL),
+	}
 }
 
 // newID generates a random UUID v4. Duplicated from task.Service's
@@ -196,6 +202,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, n
 	if err := s.repo.DeleteSessionsForUserExcept(ctx, userID, hashToken(currentSessionToken)); err != nil {
 		return fmt.Errorf("change password: revoke other sessions: %w", err)
 	}
+	s.tokenCache.deleteAllForUserExcept(userID, hashToken(currentSessionToken))
 
 	return nil
 }
@@ -252,6 +259,7 @@ func (s *Service) DeleteAccount(ctx context.Context, userID string) error {
 	if err := s.repo.DeleteSessionsForUser(ctx, userID); err != nil {
 		return fmt.Errorf("delete account: revoke sessions: %w", err)
 	}
+	s.tokenCache.deleteAllForUser(userID)
 	if err := s.repo.DeleteUser(ctx, userID); err != nil {
 		return fmt.Errorf("delete account: %w", err)
 	}
@@ -298,6 +306,7 @@ func (s *Service) LogoutAll(ctx context.Context, userID string) error {
 	if err := s.repo.DeleteSessionsForUser(ctx, userID); err != nil {
 		return fmt.Errorf("logout all: %w", err)
 	}
+	s.tokenCache.deleteAllForUser(userID)
 	return nil
 }
 
@@ -305,8 +314,24 @@ func (s *Service) LogoutAll(ctx context.Context, userID string) error {
 // user's ID. Returns ErrNotFound if the token is unknown or has expired —
 // an expired session is lazily deleted here rather than by a scheduled
 // job (see 0003_create_sessions_table.up.sql's doc comment).
+//
+// Checks tokenCache before Repository: on every request this is the
+// hottest call in the codebase (RequireAuth runs it for every
+// authenticated route), and a cache hit skips the database read
+// entirely. Only a genuinely successful lookup is cached — an unknown
+// or expired token is never memoized as valid, so this cannot turn a
+// briefly-invalid token into a validated one. See tokenCache's own doc
+// comment and docs/DECISIONS.md § "Cache de ValidateToken" for what
+// this trades away (a bounded revocation-delay window) and why that
+// bound is where it is.
 func (s *Service) ValidateToken(ctx context.Context, token string) (userID string, err error) {
-	session, err := s.repo.FindSessionByTokenHash(ctx, hashToken(token))
+	hash := hashToken(token)
+
+	if cachedUserID, ok := s.tokenCache.get(hash); ok {
+		return cachedUserID, nil
+	}
+
+	session, err := s.repo.FindSessionByTokenHash(ctx, hash)
 	if err != nil {
 		return "", fmt.Errorf("validate token: %w", err)
 	}
@@ -316,6 +341,7 @@ func (s *Service) ValidateToken(ctx context.Context, token string) (userID strin
 		return "", ErrNotFound
 	}
 
+	s.tokenCache.set(hash, session.UserID)
 	return session.UserID, nil
 }
 
@@ -323,9 +349,16 @@ func (s *Service) ValidateToken(ctx context.Context, token string) (userID strin
 // is not an error — logging out is idempotent, same as
 // task.Service.CompleteTask's idempotency for an already-done task.
 func (s *Service) Logout(ctx context.Context, token string) error {
-	if err := s.repo.DeleteSession(ctx, hashToken(token)); err != nil {
+	hash := hashToken(token)
+	if err := s.repo.DeleteSession(ctx, hash); err != nil {
 		return fmt.Errorf("logout: %w", err)
 	}
+	// After the repository call succeeds, not before: this process's own
+	// cache should only forget a token once it is actually gone from
+	// storage — see tokenCache's doc comment for why this same-process
+	// invalidation is what keeps a revoked token from validating again
+	// here even within tokenCacheTTL.
+	s.tokenCache.delete(hash)
 	return nil
 }
 
@@ -336,7 +369,16 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 // (a closed browser tab, a token nobody ever sends back). Intended to be
 // called periodically, not from any request path — see
 // cmd/api/main.go's runPeriodicCleanup.
+//
+// Also sweeps tokenCache, the same bound-abandoned-growth reasoning
+// applied to the in-process cache rather than the sessions table: a
+// token validated once and never again would otherwise sit in that map
+// harmlessly forever. Bundled into this same call rather than a second
+// exported method — cmd/api's runPeriodicCleanup already treats this as
+// "the session-housekeeping pass," and the cache is session housekeeping
+// too.
 func (s *Service) PruneExpiredSessions(ctx context.Context) error {
+	s.tokenCache.sweep()
 	if err := s.repo.DeleteExpiredSessions(ctx, time.Now()); err != nil {
 		return fmt.Errorf("prune expired sessions: %w", err)
 	}

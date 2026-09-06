@@ -1554,3 +1554,81 @@ mesmo cenário de falha.
 para este caso. Levado ao usuário antes de implementar, por ser
 exatamente o caso que `CLAUDE.md` descreve: "se uma issue parecer
 contradizer uma decisão registrada, pare e pergunte antes de prosseguir."
+
+---
+
+## Cache de ValidateToken (issue #232, 15.D1): TTL curto e fixo, invalidação imediata no mesmo processo
+
+`user.Service.ValidateToken` é a chamada mais quente do código: `RequireAuth`
+a executa em toda rota autenticada, e até aqui isso significava uma leitura ao
+banco (`FindSessionByTokenHash`) por requisição, mesmo sabendo que a mesma
+sessão é validada repetidamente em rajadas curtas. `internal/user/token_cache.go`
+guarda o resultado de uma validação bem-sucedida por `tokenCacheTTL = 2 *
+time.Second`, em memória, por processo.
+
+**Por que 2 segundos, e não "sem cache" ou um TTL generoso — as duas
+alternativas rejeitadas:**
+- **Não implementar** eliminaria qualquer risco, mas deixaria a leitura ao
+  banco em praticamente toda requisição autenticada, sem necessidade — a
+  sessão não muda entre uma requisição e a seguinte na esmagadora maioria dos
+  casos.
+- **Um TTL generoso** (dezenas de segundos a minutos) maximizaria o ganho de
+  performance, mas alargaria proporcionalmente a janela em que uma revogação
+  – logout, logout de todas as sessões, troca de senha — pode continuar
+  validando em outro processo. Isso ameaça diretamente a garantia que
+  `POST /v1/auth/password` foi construído para dar (ver issue #196 e a seção
+  "Limite de sessões" acima): trocar a senha porque um token vazou só resolve
+  o problema se sessões antigas pararem de funcionar *logo*.
+- **TTL curto (1–5s)** foi a faixa escolhida pelo usuário (`JonasBorgesLM`)
+  como o ponto de equilíbrio, levada explicitamente porque a issue marcava o
+  trade-off como decisão de produto, não técnica. `2s`, o valor concreto
+  escolhido dentro dessa faixa, elimina a leitura ao banco em qualquer rajada
+  de requisições mais frequente que isso — o caso comum — mantendo o pior
+  cenário de staleness na casa de segundos, não minutos.
+
+**Por que o TTL é fixo (não-deslizante), e não uma janela renovada a cada
+leitura:** uma janela deslizante deixaria uma sessão revogada em outro
+processo continuar validando indefinidamente, desde que as requisições
+chegassem mais rápido que o próprio TTL — exatamente o cenário que este cache
+existe para limitar. Cada entrada expira `tokenCacheTTL` após a última
+confirmação real no `Repository`, ponto final; ler a entrada nunca empurra
+esse prazo pra frente (ver `tokenCache`'s doc comment e
+`TestTokenCache_FixedWindow_NotSlidingOnRead`).
+
+**Por que o risco residual é limitado a um rolling update, não a réplicas em
+regime permanente:** o deploy documentado em "Topologia de deploy" acima roda
+uma única réplica em estado estável — não há dois processos concorrentes
+servindo tráfego ao mesmo tempo fora de uma transição. A única janela real em
+que dois processos existem simultaneamente é a sobreposição breve que o
+próprio Kubernetes cria durante um rolling update (pod novo sobe antes do
+antigo cair, mesmo com `replicas: 1` — já documentado naquela mesma seção). É
+exatamente esse cenário, e não um regime de múltiplas réplicas hipotético,
+que o TTL de 2s foi dimensionado para tolerar.
+
+**Invalidação é imediata no mesmo processo — o TTL nunca é o único
+mecanismo.** `Logout`, `LogoutAll`, `ChangePassword` e `DeleteAccount` cada um
+chama o método correspondente do cache (`delete`/`deleteAllForUser`/
+`deleteAllForUserExcept`) logo após a chamada ao `Repository` ter sucesso, e
+antes de retornar. Isso significa que a única forma de uma sessão revogada
+continuar validando por até `tokenCacheTTL` é ela ter sido cacheada por um
+*processo diferente* daquele que processou a revogação — nunca o mesmo
+processo aceitando de volta algo que ele mesmo acabou de invalidar. Os quatro
+pontos de invalidação têm controle negativo cobrindo justamente essa fiação
+(`TestLogout_InvalidatesCache_*`, `TestLogoutAll_InvalidatesCacheForUser`,
+`TestChangePassword_InvalidatesCacheForOtherSessions_ButKeepsCallers`,
+`TestDeleteAccount_InvalidatesCacheForUser`), e não só a lógica pura de
+`tokenCache` isoladamente.
+
+**Por que só uma validação bem-sucedida é cacheada.** Um token desconhecido ou
+expirado nunca é memoizado como válido — `ValidateToken` só chama
+`tokenCache.set` depois de `Repository` confirmar a sessão e checar a
+expiração. Isso significa que este cache não pode transformar um token
+momentaneamente inválido em validado; o único viés possível é na direção
+oposta (aceitar por mais `tokenCacheTTL` algo que já foi válido e acabou de
+ser revogado em outro processo), que é exatamente o trade-off descrito acima.
+
+**Por que `tokenCacheTTL` é uma constante, não uma variável de ambiente.**
+Expor isso como configuração deixaria um operador alargar silenciosamente a
+janela de atraso de revogação sem que o raciocínio acima fosse revisitado — o
+número embute uma decisão de segurança, não um parâmetro de tuning
+operacional.
