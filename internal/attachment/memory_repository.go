@@ -214,6 +214,36 @@ func (r *memoryRepository) TotalBytesForUser(ctx context.Context, userID string)
 	return total, nil
 }
 
+func (r *memoryRepository) CountByTask(ctx context.Context, taskID, userID string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	// One ownership check, not per-attachment: unlike TotalBytesForUser
+	// (which sums across every task userID owns), this counts a single
+	// named task — if userID doesn't own it, the count is 0 regardless
+	// of what taskID's row actually holds (see the interface doc
+	// comment for why that's correct here, not a shortcut).
+	owns, err := r.ownsTask(ctx, taskID, userID)
+	if err != nil {
+		return 0, err
+	}
+	if !owns {
+		return 0, nil
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var count int
+	for _, att := range r.store {
+		if att.TaskID == taskID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (r *memoryRepository) UnreferencedKeys(ctx context.Context, keys []string) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

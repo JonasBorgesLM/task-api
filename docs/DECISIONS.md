@@ -947,6 +947,36 @@ chamada; nunca há outro usuário para vazar.
 
 ---
 
+## Teto de anexos por task: 50, fixo — não substitui a quota por usuário acima
+
+`Service.Upload` também recusa a 51ª tentativa de anexo numa mesma task
+(`maxAttachmentsPerTask = 50`), independente de quantos bytes ela usa.
+
+**Isto não contradiz a seção acima**, que rejeitou contagem como métrica
+de *abuso de storage* — "poucos arquivos grandes" continua sem solução
+por contagem, e continua sendo `ATTACHMENT_MAX_BYTES_PER_USER`'s
+trabalho. O teto por task resolve um problema diferente: uma task com
+centenas de anexos é impraticável de listar e navegar, mesmo que cada um
+seja pequeno o bastante para nunca acionar a quota de bytes. Uma é
+segurança/custo operacional; a outra é usabilidade da própria lista.
+
+**Por que é uma constante fixa, não uma variável de ambiente como
+`ATTACHMENT_MAX_BYTES_PER_USER`:** não há decisão de operador aqui — o
+número não muda por ambiente, por cliente, ou por tamanho de deploy.
+Virar configurável adicionaria uma variável nova a manter em quatro
+lugares (`.claude/rules/config-env.md` § "Keep four places in sync")
+para um valor que ninguém tem razão para escolher diferente.
+
+**Checado antes de `Create`, não depois:** `Repository.CountByTask` roda
+na mesma posição que `TotalBytesForUser` já ocupa — antes do corpo ser
+lido, e antes da checagem de posse que `Create` faz por conta própria.
+Um `taskID` que não pertence ao chamador conta 0 aqui (ver o próprio
+doc comment de `CountByTask`), não porque a posse não importa, mas
+porque `Create` já é quem reporta isso — checar duas vezes seria
+duplicar uma regra, não reforçá-la.
+
+---
+
 ## Limite de sessões: teto com evicção da mais antiga
 
 `AUTH_MAX_SESSIONS_PER_USER` (default 10) bounds quantas sessões de um

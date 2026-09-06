@@ -1176,6 +1176,13 @@ paths:
         accepted).
 
 
+        A single task may carry at most 50 attachments, checked the same
+        way and before the same one — this is a fixed limit, not a
+        per-deployment setting, since it exists to keep one task's
+        attachment list practical to fetch and browse rather than to
+        bound abuse (`ATTACHMENT_MAX_BYTES_PER_USER` already does that).
+
+
         These routes exist only when `ATTACHMENT_STORAGE_DIR` is
         configured; otherwise every one of them returns 404.
       requestBody:
@@ -1203,9 +1210,10 @@ paths:
           description: >
             The body was not multipart, carried no `file` part, exceeded
             the size limit, held a content type outside the allow-list,
-            or the caller is already at their per-account storage quota
+            the caller is already at their per-account storage quota
             (`ATTACHMENT_MAX_BYTES_PER_USER`) — the message never
-            reveals another account's usage, only the caller's own.
+            reveals another account's usage, only the caller's own — or
+            the target task already carries 50 attachments.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestID'
@@ -1222,6 +1230,10 @@ paths:
                   summary: Caller already at their per-account quota
                   value:
                     error: 'invalid input: attachment quota exceeded (524288000/524288000 bytes used)'
+                taskAttachmentCapReached:
+                  summary: The task already carries the maximum number of attachments
+                  value:
+                    error: 'invalid input: task already has 50 attachments (max 50)'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':

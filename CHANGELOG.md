@@ -53,6 +53,12 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   corpo em texto puro `Forbidden` observa uma mudança; nenhum cliente
   que já lia `{"error": "..."}`, como todo o resto da API sempre
   garantiu, é afetado.
+- `POST /v1/tasks/{id}/attachments` rejeita com `400` a partir do 51º
+  anexo de uma mesma task — teto fixo (`maxAttachmentsPerTask`, não
+  configurável), independente de `ATTACHMENT_MAX_BYTES_PER_USER`, que
+  continua sendo o controle de abuso por bytes. Existe para manter a
+  lista de anexos de uma task navegável, não para fechar um vetor de
+  abuso novo. Ver `docs/DECISIONS.md` § "Teto de anexos por task".
 
 ## [1.5.0] — a definir na tag
 

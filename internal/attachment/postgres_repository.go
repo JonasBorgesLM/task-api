@@ -181,6 +181,27 @@ func (r *postgresRepository) TotalBytesForUser(ctx context.Context, userID strin
 	return total, nil
 }
 
+// CountByTask answers 0 for a task userID does not own, the same as an
+// empty one — the join filters both cases identically, and Service.Upload
+// (the only caller) does not need to tell them apart here; Create's own
+// ownership check, later in the same request, is what reports
+// ErrTaskNotFound.
+func (r *postgresRepository) CountByTask(ctx context.Context, taskID, userID string) (int, error) {
+	const query = `
+		SELECT COUNT(*)
+		FROM attachments a
+		JOIN tasks t ON t.id = a.task_id
+		WHERE t.user_id = $1::uuid AND a.task_id = $2::uuid
+	`
+
+	var count int
+	if err := r.db.QueryRowContext(ctx, query, userID, taskID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("postgres: count by task: %w", err)
+	}
+
+	return count, nil
+}
+
 func (r *postgresRepository) FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error) {
 	// The ownership check is its own statement here, unlike in the two
 	// methods above, because this one has to tell "your task, no
