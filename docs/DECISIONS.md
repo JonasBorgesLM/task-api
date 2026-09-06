@@ -355,6 +355,45 @@ concreto na mão do que construir o mecanismo antes de existir o problema.
 
 ---
 
+## gosec no CI: G104 excluído por inteiro, sem `-tests`
+
+O `gosec` roda no gate com `-exclude=G104` e sem `-tests`. Os achados
+específicos que restam em código de produção são suprimidos um a um com
+`#nosec` e o motivo ao lado — nunca em bloco.
+
+**Por quê:** medido neste repositório antes de decidir, não presumido.
+Rodando `-tests` sobre o código inteiro: 101 achados. 68 eram G104 (erro
+não checado) — quase todos `.Close()` de melhor esforço, o idioma que
+este código já usa de propósito para uma limpeza cuja falha não tem para
+onde ir. Os ~12 que só apareciam com `-tests` estavam em fixtures de
+teste (senha falsa numa string de conexão, um `http.Cookie`/`http.Server`
+bare construído para testar uma coisa estreita) — nenhum era defeito
+real. Os 7 que restaram em código de produção foram lidos um a um antes
+de decidir: SQL parametrizada que o `gosec` lê como concatenação por
+causa dos números de placeholder (`internal/task/postgres_repository.go`),
+um path de `.env` que vem de configuração do operador e nunca de
+requisição (`internal/config/dotenv.go`), um `os.Remove` que já passou
+pelo `pathguard.Guard` (`internal/attachment/storage.go`), e os dois
+`SetCookie` que já setam `HttpOnly`/`Secure`/`SameSite` corretamente
+(`internal/user/handler.go`).
+
+**Trade-off aceito:** excluir uma regra inteira é mais largo que suprimir
+linha a linha, e um `.Close()` genuinamente perigoso — um cujo erro
+devesse propagar — passa despercebido pelo `gosec` daqui em diante.
+Aceito porque o padrão já é resultado de decisão deste projeto, não
+descuido: tratar cleanup de melhor esforço como não-crítico já é como
+este código é escrito em toda parte, e sinalizar 68 ocorrências do mesmo
+padrão não muda esse fato — só produz ruído que treina quem revisa a
+ignorar o achado seguinte.
+
+**O que continua ativo:** G701/G202 (SQL injection, string concatenada),
+G304/G703 (travessia de caminho), G401 (MD5/SHA1), G402 (TLS mal
+configurado) e o resto do conjunto de regras do `gosec` — em código de
+produção e de teste igualmente, já que só `-tests` foi omitido, não uma
+categoria de arquivo.
+
+---
+
 ## Drain antes do shutdown: o processo espera, não o orquestrador
 
 O processo continua servindo por `HTTP_PRE_SHUTDOWN_DELAY` depois do

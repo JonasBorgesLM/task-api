@@ -238,6 +238,11 @@ func (s *fsBlobStore) remove(key string) error {
 		// neither of which leaves anything to delete.
 		return nil
 	}
+	// #nosec G703 -- path came back from s.guard.Resolve above, which is
+	// the pathguard.Guard containment check itself (see CLAUDE.md "Never
+	// reach the filesystem except through the pathguard.Guard"); this is
+	// not the raw key, and there is nothing left here for gosec's taint
+	// analysis to be right about.
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}

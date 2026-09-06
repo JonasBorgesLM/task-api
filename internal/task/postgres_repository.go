@@ -170,8 +170,14 @@ func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, 
 	appendInClause("priority", priorityValues)
 
 	args = append(args, limitArg, offset)
+	// #nosec G202 -- every %d here is a placeholder *number* ($3, $4, ...),
+	// never a value; the values themselves travel through args, bound below.
 	query += fmt.Sprintf(" ORDER BY created_at, id LIMIT $%d::bigint OFFSET $%d::bigint", len(args)-1, len(args))
 
+	// #nosec G701 -- query is built from fixed clause text and generated
+	// placeholder numbers only (see appendInClause and the Sprintf above);
+	// every value reaching Postgres travels through args as a bound
+	// parameter, never interpolated into the query string.
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find all tasks: %w", err)

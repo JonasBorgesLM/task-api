@@ -206,6 +206,10 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 // separately-configured duration: the cookie must never outlive, or
 // undercut, the credential it carries.
 func setSessionCookie(w http.ResponseWriter, token string, expiresAt time.Time, insecure bool) {
+	// #nosec G124 -- HttpOnly, Secure and SameSite are all set below; gosec
+	// flags this because Secure is `!insecure` rather than a literal `true`
+	// (insecure is CookieInsecure, dev-only — see config.Config), not
+	// because any attribute is actually missing.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
@@ -227,6 +231,8 @@ func setSessionCookie(w http.ResponseWriter, token string, expiresAt time.Time, 
 // must match what setSessionCookie wrote, or the browser treats this as
 // a different cookie and leaves the real one untouched.
 func clearSessionCookie(w http.ResponseWriter, insecure bool) {
+	// #nosec G124 -- same false positive as setSessionCookie above: every
+	// attribute is set, gosec just doesn't credit `!insecure` as "Secure".
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
