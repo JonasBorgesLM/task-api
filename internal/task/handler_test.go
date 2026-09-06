@@ -336,6 +336,7 @@ func TestListTasks_Handler_PassesUserIDLimitOffsetFiltersToService(t *testing.T)
 		{"offset only", "?offset=3", -1, 3, "", ""},
 		{"limit and offset", "?limit=2&offset=1", 2, 1, "", ""},
 		{"limit zero", "?limit=0", 0, 0, "", ""},
+		{"limit at the cap is accepted", "?limit=100", 100, 0, "", ""},
 		{"status only", "?status=pending", -1, 0, "pending", ""},
 		{"priority only", "?priority=high", -1, 0, "", "high"},
 		{"status and priority combined", "?status=done&priority=low", -1, 0, "done", "low"},
@@ -385,6 +386,7 @@ func TestListTasks_Handler_InvalidPaginationParams(t *testing.T) {
 		"?limit=-1",
 		"?offset=not-a-number",
 		"?offset=-1",
+		"?limit=101", // one past maxTaskListLimit
 	}
 
 	for _, query := range cases {

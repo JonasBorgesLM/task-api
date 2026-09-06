@@ -408,6 +408,49 @@ func TestListTasks_UnknownPriorityFilterIsInvalidInput(t *testing.T) {
 	}
 }
 
+// TestListTasks_TooManyStatusValuesIsInvalidInput verifies that a status
+// filter carrying more than maxFilterValues raw occurrences is rejected
+// before Repository is ever reached, regardless of whether the values
+// themselves are valid or repeated — the check exists to bound how much
+// of the query string gets walked at all, ahead of validation.
+func TestListTasks_TooManyStatusValuesIsInvalidInput(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	statuses := make([]string, maxFilterValues+1)
+	for i := range statuses {
+		statuses[i] = "pending"
+	}
+
+	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, statuses, nil)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("ListTasks() with too many status values error = %v, want ErrInvalidInput", err)
+	}
+	if repo.findAllCalledWith != ([5]any{}) {
+		t.Errorf("ListTasks() must not call Repository.FindAll with too many status values, called with %v", repo.findAllCalledWith)
+	}
+}
+
+// TestListTasks_TooManyPriorityValuesIsInvalidInput mirrors
+// TestListTasks_TooManyStatusValuesIsInvalidInput for priority.
+func TestListTasks_TooManyPriorityValuesIsInvalidInput(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	priorities := make([]string, maxFilterValues+1)
+	for i := range priorities {
+		priorities[i] = "high"
+	}
+
+	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, priorities)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("ListTasks() with too many priority values error = %v, want ErrInvalidInput", err)
+	}
+	if repo.findAllCalledWith != ([5]any{}) {
+		t.Errorf("ListTasks() must not call Repository.FindAll with too many priority values, called with %v", repo.findAllCalledWith)
+	}
+}
+
 // TestListTasks_MultipleFiltersReachRepository verifies the whole point
 // of the repeated parameter: several statuses (and several priorities)
 // arrive at Repository.FindAll together, in the order given, so the

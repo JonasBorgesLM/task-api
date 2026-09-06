@@ -59,6 +59,18 @@ info:
     would disable it behind the TLS-terminating proxy it exists for.
     `HSTS_MAX_AGE=0` is the opt-out. See docs/ARCHITECTURE.md's
     "Operational Behavior".
+
+
+    Every response under `/v1` also carries `Cache-Control`, on the same
+    unconditional basis as the security headers above — a bare `200`
+    with none is heuristically cacheable (RFC 9111 §4.2.2), and every
+    response here belongs to one authenticated caller. `/v1/auth/*`
+    (a login response carries a session token) gets
+    `private, no-store`; everything else under `/v1` gets
+    `private, no-cache` — still revalidatable, never served from a
+    shared cache to a second caller. `/health`, `/health/ready` and
+    `/debug/vars` are outside `/v1` and outside this rule, the same way
+    they are outside the versioning rule below.
   # Tracks the product's own release tag (see CHANGELOG.md), not a
   # separate OpenAPI-document version — this project's actual contract
   # versioning is the /v1 path mount (see the "Versioning" section
@@ -666,10 +678,15 @@ paths:
           description: >
             Maximum number of tasks to return. Sending the parameter with
             an empty value (`?limit=`) is treated as omitting it, not as
-            an error.
+            an error — omitting it entirely still returns every task the
+            caller owns. An explicit value over 100 is rejected with 400
+            rather than accepted and silently capped; a caller wanting
+            more than one page repeats the request with `offset` advanced
+            instead of asking for everything in one response.
           schema:
             type: integer
             minimum: 0
+            maximum: 100
           example: 20
         - name: offset
           in: query
@@ -2037,15 +2054,15 @@ components:
         GET /v1/auth/csrf-token first); or the `Origin`/`Referer` header
         doesn't identify an allowed origin. The response is deliberately
         identical for all of these — distinguishing them would hand an
-        attacker a progress indicator for a forged request.
+        attacker a progress indicator for a forged request, the same
+        reasoning `ErrorResponse`'s own doc comment states for every
+        other error body in this API.
 
 
-        **Unlike every other error response in this API, the body here
-        is NOT the `{"error": "..."}` envelope.** It is the plain text
-        `Forbidden`, with `Content-Type: text/plain`, written by
-        `moat/csrf`'s default rejection handler — a known,
-        intentional-for-now inconsistency; see docs/ARCHITECTURE.md §
-        Future Improvements.
+        Uses the same `{"error": "..."}` envelope as every other error
+        response (`writeCSRFError`, wired via `csrf.WithErrorHandler` —
+        `moat/csrf`'s own default here is plain text, which this API
+        does not use for anything else).
 
 
         A request carrying `Authorization: Bearer` never sees this
@@ -2055,10 +2072,11 @@ components:
         X-Request-Id:
           $ref: '#/components/headers/XRequestID'
       content:
-        text/plain:
+        application/json:
           schema:
-            type: string
-          example: "Forbidden\n"
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: CSRF verification failed
 
     TooManyRequests:
       description: >
