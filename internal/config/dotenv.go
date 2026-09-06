@@ -21,6 +21,9 @@ import (
 // If path does not exist, loadDotEnv returns nil — a missing .env file is
 // not an error. Any other I/O error is returned as-is.
 func loadDotEnv(path string) error {
+	// #nosec G304 G703 -- path is DOTENV_PATH, operator-supplied startup
+	// configuration (see config.Load), never attacker input; there is no
+	// request in flight yet for anything to be tainted from.
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {

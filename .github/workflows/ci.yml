@@ -14,6 +14,15 @@ on:
     branches: [main, develop]
     paths-ignore: ['web/**']
   workflow_dispatch:
+  schedule:
+    # Weekly, independent of any push: a vulnerability published in a
+    # dependency already merged is otherwise found only by whoever opens
+    # the next PR, which can be months away for a stable package. This
+    # runs only the `scheduled-vulncheck` job below (see its own `if`) —
+    # not the full quality-gate with Postgres/MinIO/the integration
+    # suite, which exists to catch a *code* regression and has none to
+    # find on an unchanged tree.
+    - cron: "23 6 * * 1"
 
 permissions:
   contents: read
@@ -31,6 +40,11 @@ concurrency:
 jobs:
   quality-gate:
     name: Quality Gate
+    # The weekly schedule trigger exists only to run scheduled-vulncheck
+    # below against an unchanged tree — there is no code change here for
+    # the rest of this job (Postgres, MinIO, the full test matrix) to
+    # find anything in.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
 
     # O gate leva ~1m30 com o cache quente. 15 minutos dão folga de uma ordem
@@ -185,6 +199,21 @@ jobs:
       - name: Vulnerabilities (govulncheck)
         run: make vulncheck
 
+      # Static security scan — a different question than govulncheck's
+      # (known CVEs in dependencies) and staticcheck's (correctness bugs):
+      # this looks for insecure patterns in code we wrote ourselves —
+      # SQL built by concatenation, a path opened from a variable, a
+      # cookie missing an attribute, math/rand where crypto/rand belongs.
+      #
+      # See `make gosec`'s own comment for why G104 (unhandled errors) is
+      # excluded wholesale and `-tests` is not passed, and search
+      # `#nosec` in internal/ and cmd/ for the small number of remaining
+      # findings silenced individually, each with the reasoning next to
+      # it — the same discipline the step above already applies to the
+      # one govulncheck advisory it accepts.
+      - name: Security scan (gosec)
+        run: make gosec
+
       # Unit tests: memoryRepository, Service, Handler, config, middleware,
       # server lifecycle — everything that needs no external service.
       # postgresRepository's tests are excluded entirely (the "integration"
@@ -248,6 +277,9 @@ jobs:
   # ambiguidade.
   docker-image:
     name: Docker Image
+    # Same reasoning as quality-gate's `if` above: nothing changed for a
+    # scheduled run to rebuild.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -316,3 +348,45 @@ jobs:
       - name: Stop container
         if: always()
         run: docker rm -f task-api-ci || true
+
+  # A new dependency in this repository is a design decision — CLAUDE.md's
+  # "Things not to do without being asked" spells out exactly why each of
+  # the current ones is here and what it costs to keep pure-Go/no-cgo.
+  # This is the mechanical half of that discipline: a PR adding one with
+  # a known vulnerability, at any severity, or under a copyleft license
+  # the project's own MIT terms cannot absorb, fails here instead of
+  # waiting for someone to notice in review.
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: low
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0, LGPL-2.1, LGPL-3.0
+          comment-summary-in-pr: on-failure
+
+  # Runs only on the weekly schedule declared in `on:` above — never on
+  # push or pull_request, where "Vulnerabilities (govulncheck)" inside
+  # quality-gate already covers the exact same command against the exact
+  # same code. What this catches that a push-triggered run structurally
+  # cannot: an advisory published *after* the last merge, against a
+  # dependency nobody touched, sitting unnoticed until the next PR
+  # happens to open.
+  scheduled-vulncheck:
+    name: Vulnerabilities (weekly)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vulnerabilities (govulncheck)
+        run: make vulncheck

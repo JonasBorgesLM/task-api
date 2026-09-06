@@ -50,8 +50,10 @@ var descriptions = []string{
 // this produces ever approaches task.Service's length limits (200/2000
 // characters), so seeding never fails validation.
 func randomTask() (title, description string) {
-	title = verbs[rand.IntN(len(verbs))] + " " + subjects[rand.IntN(len(subjects))]
-	description = descriptions[rand.IntN(len(descriptions))]
+	// #nosec G404 -- fixture selection for a dev-only seed tool, not a
+	// security boundary; math/rand/v2 is the right tool here, not crypto/rand.
+	title = verbs[rand.IntN(len(verbs))] + " " + subjects[rand.IntN(len(subjects))] // #nosec G404
+	description = descriptions[rand.IntN(len(descriptions))]                        // #nosec G404
 	return title, description
 }
 
@@ -76,7 +78,7 @@ var statusWeights = []struct {
 // reachable in a single hop from pending (see Service's legalTransitions
 // table), so no multi-step transition sequence is ever needed.
 func randomStatus() task.Status {
-	roll := rand.Float64()
+	roll := rand.Float64() // #nosec G404 -- seed fixture weighting, not a security boundary
 	var cumulative float64
 	for _, sw := range statusWeights {
 		cumulative += sw.weight
@@ -91,5 +93,5 @@ func randomStatus() task.Status {
 // status, there's no realistic skew to model here.
 func randomPriority() task.Priority {
 	priorities := []task.Priority{task.PriorityLow, task.PriorityMedium, task.PriorityHigh}
-	return priorities[rand.IntN(len(priorities))]
+	return priorities[rand.IntN(len(priorities))] // #nosec G404 -- seed fixture, not a security boundary
 }
