@@ -1387,6 +1387,52 @@ navegador, como violação de CSP no console. Documentado nos dois lugares
 há uma checagem mecânica possível entre um valor embutido em JavaScript
 já compilado e a configuração de um processo Go separado.
 
+### Cache de páginas: revalidação em segundo plano, e o que fazer quando ela falha
+
+`useTasks` (15.D3) guarda em memória cada página já buscada — chave
+`(statusFilter, priorityFilter, pageIndex)` — e a mostra de imediato ao
+revisitar, antes mesmo da requisição de revalidação começar
+(stale-while-revalidate). A revalidação usa `If-None-Match` com o
+`ETag` guardado (15.D2): sem mudança, a resposta é um `304` e nada
+precisa ser atualizado.
+
+**O que acontece quando a revalidação falha — decisão, não obviedade.**
+Se a página já veio do cache e a requisição de revalidação falha (rede
+fora, `503`, o que for), o hook **mantém mostrando os dados do cache**
+em vez de substituí-los por uma tela de erro. Só uma busca sem nada em
+cache ainda transiciona para o estado de erro, exatamente como
+funcionava antes deste cache existir. O raciocínio: os dados que já
+estão na tela continuavam corretos um instante atrás, e a revalidação é
+uma verificação em segundo plano que o usuário nunca pediu
+explicitamente — substituir uma lista boa por uma tela de erro por
+causa dela seria pior do que simplesmente tentar de novo na próxima
+navegação.
+
+**O que isto não cobre:** não há indicação visual de "isto pode estar
+desatualizado" quando uma revalidação falha silenciosamente — o usuário
+não tem como saber que uma tentativa de atualização não funcionou. Aceito
+por ora porque a única forma de disparar isso é já estar navegando entre
+páginas já vistas com a rede instável nesse exato momento; um indicador
+dedicado é trabalho futuro, não algo esta issue pedia.
+
+**Invalidação é por evento, não por tempo — sem TTL.** Criar ou excluir
+uma task limpa o cache inteiro (todas as páginas, todos os filtros),
+não só a página atual: uma linha nova ou removida desloca a composição
+de toda página seguinte à sua, e raciocinar sobre *quais* páginas
+especificamente foram afetadas custaria mais do que só invalidar tudo e
+pagar o preço de algumas buscas refeitas. Uma edição que continua
+batendo com o filtro ativo, ao contrário, só atualiza a própria entrada
+da página atual — inclusive derrubando o `ETag` guardado para `null`,
+porque o hook não tem como calcular qual seria o novo (`Version` nunca
+chega no corpo JSON — ver `internal/task/task.go`), e um `ETag` errado
+que por acaso ainda bate seria pior que nenhum.
+
+**Nunca `localStorage`.** O cache vive só em memória, dentro da mesma
+instância do hook — fecha a aba, perde o cache. A mesma razão da seção
+"Cookie httpOnly, nunca localStorage" acima, estendida por instinto e
+não por o dado em si ser sensível: uma lista de tasks de um usuário não
+tem por que sobreviver ao fechamento da aba só porque é conveniente.
+
 ---
 
 ## crier: ruído de health-check filtrado por severidade, não por amostragem
