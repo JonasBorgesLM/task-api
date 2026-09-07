@@ -116,6 +116,19 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   "Validação de senha forte". Um cliente cuja senha já satisfazia os
   limites de tamanho documentados mas cai numa dessas duas categorias
   passa a receber `400` onde antes recebia `201`/`200`.
+- `POST /v1/auth/login` passa a aplicar um atraso crescente por conta
+  após falhas repetidas — nenhum dos três tiers de rate limit já
+  existentes protegia uma conta especificamente contra um atacante
+  distribuído (issue #220). Sem exigência a partir dos 8/72 caracteres
+  já existentes até a 2ª falha; da 3ª em diante, `250ms × 2^(falhas-3)`
+  até um teto de 4s, zerado no login bem-sucedido ou após 15min de
+  inatividade contra aquela conta. O atraso se aplica igual a e-mail
+  desconhecido, senha errada ou senha correta — nunca só às falhas,
+  para não virar ele mesmo um jeito de saber se uma conta está sob
+  contenção — e nunca bloqueia uma senha correta, só a atrasa. Nenhuma
+  mudança de contrato (`401` continua `401`); latência a mais numa
+  conta sob ataque é o efeito observável. Ver `docs/DECISIONS.md` §
+  "Atraso progressivo por conta" para a curva e o que ela não cobre.
 
 ### Corrigido
 - `web/`'s lista de tasks (`useTasks`) podia mostrar dados de um filtro

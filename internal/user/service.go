@@ -62,6 +62,13 @@ type Service struct {
 	sessionTTL         time.Duration
 	maxSessionsPerUser int
 	tokenCache         *tokenCache
+	loginBackoff       *loginBackoff
+	// sleep exists so tests can observe/skip the login-backoff delay
+	// without a real wait — see login_backoff_test.go and
+	// service_test.go's Authenticate backoff cases. Always
+	// sleepUnlessDone in production; NewService sets it and nothing
+	// outside this file ever overrides it again.
+	sleep func(context.Context, time.Duration)
 }
 
 // NewService returns a new Service with the given Repository. sessionTTL
@@ -76,6 +83,8 @@ func NewService(repo Repository, sessionTTL time.Duration, maxSessionsPerUser in
 		sessionTTL:         sessionTTL,
 		maxSessionsPerUser: maxSessionsPerUser,
 		tokenCache:         newTokenCache(tokenCacheTTL),
+		loginBackoff:       newLoginBackoff(),
+		sleep:              sleepUnlessDone,
 	}
 }
 
@@ -144,20 +153,47 @@ func (s *Service) Register(ctx context.Context, email, password string) (User, e
 // could use that gap to enumerate registered emails despite the identical
 // error message and status code. Running the same comparison either way
 // closes that timing side channel.
+//
+// A second, distinct timing concern this same function closes (issue
+// #220): none of the three tiers of address/user-keyed rate limiting in
+// cmd/api/main.go bound the number of attempts against one specific
+// account, since a distributed attacker trying passwords against a
+// known email presents as many addresses each making few attempts —
+// exactly the profile every address-keyed limiter treats as normal.
+// loginBackoff tracks consecutive failures per normalized email and
+// Authenticate applies the resulting delay to *every* outcome below
+// (unknown email, wrong password, or success) rather than only to
+// failures — an outcome-dependent delay would itself be a timing oracle
+// for "is this account currently being throttled", undermining the same
+// indistinguishability ErrInvalidCredentials already protects. The delay
+// only ever slows an account down, capped at loginBackoffCap, and a
+// correct password still succeeds after paying it — a hard lock would be
+// denial-of-service against the legitimate owner, the middle ground the
+// issue explicitly asks for. See docs/DECISIONS.md § "Atraso progressivo
+// por conta" for the curve's numbers and what this does not cover.
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
-	u, err := s.repo.FindUserByEmail(ctx, normalizeEmail(email))
+	normalized := normalizeEmail(email)
+	delay := s.loginBackoff.delay(normalized)
+
+	u, err := s.repo.FindUserByEmail(ctx, normalized)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(password))
+			s.loginBackoff.recordFailure(normalized)
+			s.sleep(ctx, delay)
 			return User{}, ErrInvalidCredentials
 		}
 		return User{}, fmt.Errorf("authenticate: %w", err)
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
+		s.loginBackoff.recordFailure(normalized)
+		s.sleep(ctx, delay)
 		return User{}, ErrInvalidCredentials
 	}
 
+	s.loginBackoff.recordSuccess(normalized)
+	s.sleep(ctx, delay)
 	return u, nil
 }
 
@@ -371,15 +407,17 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 // called periodically, not from any request path — see
 // cmd/api/main.go's runPeriodicCleanup.
 //
-// Also sweeps tokenCache, the same bound-abandoned-growth reasoning
-// applied to the in-process cache rather than the sessions table: a
-// token validated once and never again would otherwise sit in that map
-// harmlessly forever. Bundled into this same call rather than a second
-// exported method — cmd/api's runPeriodicCleanup already treats this as
-// "the session-housekeeping pass," and the cache is session housekeeping
-// too.
+// Also sweeps tokenCache and loginBackoff, the same bound-abandoned-
+// growth reasoning applied to both in-process maps rather than the
+// sessions table: a token validated once and never again, or an account
+// that failed a few logins and was never attempted again, would
+// otherwise sit in those maps harmlessly forever. Bundled into this same
+// call rather than separate exported methods — cmd/api's
+// runPeriodicCleanup already treats this as "the session-housekeeping
+// pass," and both caches are session/account housekeeping too.
 func (s *Service) PruneExpiredSessions(ctx context.Context) error {
 	s.tokenCache.sweep()
+	s.loginBackoff.sweep()
 	if err := s.repo.DeleteExpiredSessions(ctx, time.Now()); err != nil {
 		return fmt.Errorf("prune expired sessions: %w", err)
 	}

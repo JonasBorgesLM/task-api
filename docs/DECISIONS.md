@@ -1796,3 +1796,81 @@ schema do formulário) duplicaria a decisão de política em dois lugares
 que já são mantidos à mão — e um deles ficaria, mais cedo ou mais tarde,
 desatualizado em relação ao outro sem que ninguém notasse até um usuário
 real esbarrar na divergência.
+
+---
+
+## Atraso progressivo por conta (issue #220, 15.B3): curva, não bloqueio
+
+Os três tiers de rate limit (`cmd/api/main.go`) protegem por endereço
+(`globalLimiter`, `authLimiter`) e por usuário já autenticado
+(`userLimiter`). Nenhum protege uma **conta** ainda não autenticada: um
+atacante distribuído tentando senhas contra um e-mail conhecido, uma
+origem por tentativa, apresenta a cada endereço poucas tentativas —
+exatamente o perfil que `authLimiter` considera normal. O orçamento
+contra uma conta específica era, na prática, ilimitado.
+
+**A curva concreta era uma decisão em aberto que a própria issue não
+fechava** ("contador por identificador de conta, com atraso crescente",
+sem números). Três perfis foram levados ao usuário (`JonasBorgesLM`) —
+moderado, agressivo, ou números especificados por ele — e o **moderado**
+foi escolhido: sem atraso nas 2 primeiras falhas (tolera erro de
+digitação), a partir da 3ª falha `250ms × 2^(falhas-3)` até um teto de
+4s, contador zerado no login bem-sucedido ou após 15 minutos sem
+tentativas contra aquela conta. Números em
+`internal/user/login_backoff.go`'s `loginBackoffThreshold`/
+`loginBackoffBase`/`loginBackoffCap`/`loginBackoffIdleReset`.
+
+**As duas armadilhas que a issue nomeava, e como cada uma foi fechada:**
+
+1. **A resposta precisa continuar indistinguível de "credencial
+   inválida".** Um "conta bloqueada" distinto seria exatamente o oráculo
+   de enumeração que `dummyPasswordHash` já existe para fechar (ver
+   `Authenticate`'s doc comment). `Service.Authenticate` calcula o atraso
+   **antes** de saber o resultado da tentativa atual (com base só no
+   histórico anterior daquela conta) e aplica esse mesmo atraso aos três
+   desfechos possíveis — e-mail desconhecido, senha errada, ou sucesso —
+   nunca só às falhas. Um atraso que só aparecesse em caso de falha seria
+   ele mesmo o vazamento: um observador saberia que a conta está sob
+   contenção só de ver a resposta demorar mais. `TestAuthenticate_
+   DelayAppliesEvenOnSuccess` prova especificamente isso: uma senha
+   *correta* ainda paga o atraso antes de suceder.
+2. **Bloqueio duro é negação de serviço contra o dono legítimo.** Nada
+   aqui jamais recusa uma senha correta — o atraso só cresce até o teto
+   de 4s e depois pára de crescer; quem sabe a senha sempre entra, só
+   espera um pouco mais. `TestAuthenticate_SuccessClearsBackoff` prova
+   que um login bem-sucedido zera o contador — a conta não fica "sob
+   suspeita" indefinidamente por falhas antigas já resolvidas.
+
+**Onde mora o estado: em processo, por réplica — mesma forma de
+`tokenCache` e dos três tiers de `moat/ratelimit` já existentes.** A
+issue já sinalizava que fazer o contador valer o deploy inteiro seria
+"uma mudança arquitetural com discussão própria" — não aberta aqui. Isso
+é consistente com a topologia já documentada (réplica única em regime
+estável — ver "Topologia de deploy"); o único cenário de múltiplos
+processos é a sobreposição breve de um rolling update, e nesse cenário
+o pior caso é um atacante conseguir uma janela de tentativas ligeiramente
+maior que o perfil moderado prevê, não a ausência total de proteção.
+
+**O que isto não cobre, por design:** o mutex de `loginBackoff` protege
+a consistência do mapa, não serializa tentativas concorrentes contra a
+mesma conta ponta-a-ponta. Um atacante enviando várias tentativas em
+paralelo contra o mesmo e-mail pode ver todas lerem o mesmo `delay()`
+(baseado no mesmo estado anterior) antes de qualquer uma delas chamar
+`recordFailure` — na prática, um pequeno lote de tentativas "grátis" a
+cada rajada paralela, em vez de estritamente uma por vez. Fechar isso
+por completo exigiria serializar `Authenticate` inteiro por conta (um
+lock por e-mail mantido durante toda a chamada, não só durante a
+atualização do contador) — mudança real, mas que teria custo de
+concorrência (dispositivos legítimos entrando ao mesmo tempo na mesma
+conta esperariam um pelo outro) desproporcional ao que o perfil moderado
+já pedia resolver. Aceito como lacuna conhecida, não como omissão
+silenciosa.
+
+**Escopo: só `POST /v1/auth/login` (`Service.Authenticate`), não
+`ChangePassword`/`DeleteAccount`'s verificação de senha atual
+(`verifyPassword`).** A issue nomeava especificamente o login como o
+gap — `verifyPassword` já roda atrás de `RequireAuth`, coberto por
+`userLimiter` (por usuário autenticado) de um jeito que `Authenticate`,
+antes de saber quem é o usuário, não pode ser. Estender a mesma curva a
+`verifyPassword` é um escopo maior que esta issue pedia, não uma
+inconsistência desta decisão.

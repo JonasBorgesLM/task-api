@@ -319,7 +319,140 @@ func TestAuthenticate_NormalizesEmailCase(t *testing.T) {
 	}
 }
 
-// --- CreateSession ---
+// --- Authenticate: login backoff (issue #220) ---
+
+// captureSleep replaces svc's injectable sleep with one that records the
+// delay it was asked for instead of actually waiting — the tests below
+// assert on that recorded value, not on wall-clock time.
+func captureSleep(svc *Service) *time.Duration {
+	var captured time.Duration
+	svc.sleep = func(_ context.Context, d time.Duration) { captured = d }
+	return &captured
+}
+
+func TestAuthenticate_NoDelayBelowFailureThreshold(t *testing.T) {
+	repo := &fakeRepository{findUserByEmailErr: ErrNotFound}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	for i := 0; i < loginBackoffThreshold-1; i++ {
+		_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong")
+	}
+
+	if *captured != 0 {
+		t.Errorf("sleep delay after %d failures (threshold %d) = %v, want 0", loginBackoffThreshold-1, loginBackoffThreshold, *captured)
+	}
+}
+
+func TestAuthenticate_DelaysAfterRepeatedFailures_UnknownEmail(t *testing.T) {
+	repo := &fakeRepository{findUserByEmailErr: ErrNotFound}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	// delay() reflects failures *before* the in-flight attempt (see
+	// Authenticate's doc comment), so it takes one extra call beyond the
+	// threshold for the delay to actually show up on the captured sleep.
+	for i := 0; i < loginBackoffThreshold+1; i++ {
+		_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong")
+	}
+
+	if *captured != loginBackoffBase {
+		t.Errorf("sleep delay on attempt %d = %v, want %v", loginBackoffThreshold+1, *captured, loginBackoffBase)
+	}
+}
+
+func TestAuthenticate_DelaysAfterRepeatedFailures_WrongPassword(t *testing.T) {
+	stored := User{ID: "u1", Email: "victim@example.com", PasswordHash: mustHash(t, "correct-password123")}
+	repo := &fakeRepository{findUserByEmailUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	for i := 0; i < loginBackoffThreshold+1; i++ {
+		_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	}
+
+	if *captured != loginBackoffBase {
+		t.Errorf("sleep delay on attempt %d = %v, want %v", loginBackoffThreshold+1, *captured, loginBackoffBase)
+	}
+}
+
+// TestAuthenticate_UnknownEmailAndWrongPassword_ShareOneCounter pins the
+// indistinguishability the issue's first pitfall demands: an attacker
+// alternating between "is this email registered" and "is this the
+// password" against the same address must not get two separate, half-
+// sized budgets — both outcomes count against the same per-email state.
+func TestAuthenticate_UnknownEmailAndWrongPassword_ShareOneCounter(t *testing.T) {
+	stored := User{ID: "u1", Email: "victim@example.com", PasswordHash: mustHash(t, "correct-password123")}
+	repo := &fakeRepository{findUserByEmailUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	// Three failures split across both outcome kinds, then a fourth
+	// attempt to observe the effect: delay() reflects failures *before*
+	// the in-flight attempt (see Authenticate's doc comment).
+	_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	repo.findUserByEmailErr = ErrNotFound // simulate the same email now reported as unknown
+	_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	repo.findUserByEmailErr = nil
+	_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+
+	if *captured != loginBackoffBase {
+		t.Errorf("sleep delay on the attempt after %d mixed-outcome failures = %v, want %v (one shared counter)", loginBackoffThreshold, *captured, loginBackoffBase)
+	}
+}
+
+// TestAuthenticate_DelayAppliesEvenOnSuccess pins the same
+// indistinguishability guarantee from the other direction: once an
+// account is under backoff, a *correct* password must still pay the
+// delay before succeeding — an outcome-dependent delay (skipped on
+// success) would itself leak "this account is currently throttled".
+func TestAuthenticate_DelayAppliesEvenOnSuccess(t *testing.T) {
+	stored := User{ID: "u1", Email: "victim@example.com", PasswordHash: mustHash(t, "correct-password123")}
+	repo := &fakeRepository{findUserByEmailUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	for i := 0; i < loginBackoffThreshold; i++ {
+		_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	}
+
+	u, err := svc.Authenticate(context.Background(), "victim@example.com", "correct-password123")
+	if err != nil {
+		t.Fatalf("Authenticate() with the correct password unexpected error: %v", err)
+	}
+	if u.ID != "u1" {
+		t.Errorf("Authenticate() ID = %q, want %q", u.ID, "u1")
+	}
+	if *captured != loginBackoffBase {
+		t.Errorf("sleep delay on the successful attempt = %v, want %v (same as a failure would have paid)", *captured, loginBackoffBase)
+	}
+}
+
+// TestAuthenticate_SuccessClearsBackoff is the middle-ground half of the
+// issue's second pitfall: once a correct password gets in, the account
+// is no longer under suspicion — a hard lock never existed here, and a
+// resolved account shouldn't keep paying for failures before it.
+func TestAuthenticate_SuccessClearsBackoff(t *testing.T) {
+	stored := User{ID: "u1", Email: "victim@example.com", PasswordHash: mustHash(t, "correct-password123")}
+	repo := &fakeRepository{findUserByEmailUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	for i := 0; i < loginBackoffThreshold; i++ {
+		_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	}
+	if _, err := svc.Authenticate(context.Background(), "victim@example.com", "correct-password123"); err != nil {
+		t.Fatalf("Authenticate() with the correct password unexpected error: %v", err)
+	}
+
+	*captured = -1 // sentinel: prove the next call actually overwrites this
+	_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+
+	if *captured != 0 {
+		t.Errorf("sleep delay on the first failure after a successful login = %v, want 0 (backoff should have been cleared)", *captured)
+	}
+}
 
 // --- ChangePassword ---
 
