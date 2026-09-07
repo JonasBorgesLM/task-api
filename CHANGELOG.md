@@ -61,6 +61,13 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   edição que continua batendo com o filtro atualiza só a própria
   entrada. Só em memória — nunca `localStorage`. Ver `docs/DECISIONS.md`
   § "Cache de páginas".
+- `web/`'s tela de cadastro ganha confirmação de senha e um checklist
+  ao vivo dos requisitos que o servidor de fato aplica (comprimento,
+  não estar numa lista de senhas comuns, não ser um padrão repetido ou
+  sequencial — issue #219). O checklist é só informativo: uma senha que
+  falha nele ainda é enviada ao servidor, que continua sendo quem
+  decide aceitar ou devolver `400`. Ver `docs/DECISIONS.md` § "Frontend
+  (issue #219, 15.B2)".
 
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em

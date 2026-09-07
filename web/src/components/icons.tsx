@@ -191,3 +191,21 @@ export function FilterIcon() {
     </svg>
   )
 }
+
+/** Check mark — a satisfied requirement. */
+export function CheckIcon() {
+  return (
+    <svg {...SHARED_PROPS}>
+      <path d="M3.25 8.5l3 3 6.5-7" />
+    </svg>
+  )
+}
+
+/** Open circle — an unmet requirement, not yet a mistake. */
+export function CircleIcon() {
+  return (
+    <svg {...SHARED_PROPS}>
+      <circle cx="8" cy="8" r="5.25" />
+    </svg>
+  )
+}

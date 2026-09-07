@@ -1757,3 +1757,42 @@ para fechar não se aplica a um valor que nada real deveria autenticar.
 próprio limite do `bcrypt`, e a assimetria proposital com o e-mail (medido em
 runes via `validate.MaxLen`) continua documentada em `validatePassword`'s doc
 comment.
+
+### Frontend (issue #219, 15.B2): checklist ao vivo, não pontuação — e nunca um portão
+
+`web/src/features/auth/RegisterPage.tsx` tinha um único campo de senha e a
+dica estática "At least 8 characters" — um erro de digitação criava uma
+conta cuja senha ninguém sabia, sem forma de recuperar (15.B4 ainda não
+existe). Duas mudanças, ambas exigidas pela issue: confirmação de senha, e
+"medidor de força que espelha a regra do servidor e nunca inventa uma mais
+frouxa".
+
+**Checklist contra os predicados reais do servidor, não uma pontuação
+fraca/média/forte.** Uma pontuação (tipo zxcvbn) é exatamente o tipo de
+coisa que poderia dizer "forte" para uma senha que o servidor ainda
+rejeitaria — o oposto do que a issue pedia. `PasswordRequirements.tsx`
+mostra os três mesmos predicados de `internal/user/password_strength.go`
+(comprimento, não-comum, não-previsível) como itens vivos de uma lista,
+cada um com seu próprio estado atendido/não atendido — nunca um número
+inventado que não corresponde a nenhuma regra real do lado do servidor.
+
+**`web/src/features/auth/passwordStrength.ts` espelha o Go à mão — mesma
+lista, mesmos três checks, mesma exclusão deliberada de `"password123"`
+(ver acima).** Este projeto não tem geração de código entre Go e
+TypeScript para uma regra como esta; manter os dois arquivos sincronizados
+manualmente foi a escolha proporcional ao tamanho do problema (uma lista
+de ~150 strings e três funções puras), não algo que justifique construir
+ferramenta de codegen. Se a lista ou os checks mudarem de um lado, mudam
+do outro na mesma alteração — comentário de topo em ambos os arquivos
+aponta um para o outro.
+
+**Puramente informativo, nunca um portão client-side.** `registerSchema`
+(Zod) só bloqueia envio por comprimento (8–72, espelhando o servidor) e
+por confirmação não bater — nunca por um resultado de
+`isCommonWeakPassword`/`isSingleRepeatedRune`/`isSequentialRun`. Uma senha
+que passa no comprimento mas falha o checklist ainda chega ao servidor e
+recebe o `400` real dele: a alternativa (replicar a rejeição também no
+schema do formulário) duplicaria a decisão de política em dois lugares
+que já são mantidos à mão — e um deles ficaria, mais cedo ou mais tarde,
+desatualizado em relação ao outro sem que ninguém notasse até um usuário
+real esbarrar na divergência.
