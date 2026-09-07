@@ -36,6 +36,34 @@ function renderPage() {
   )
 }
 
+// Fills email/password/confirm-password and submits. Password and
+// confirmPassword default to the same value — most tests care about
+// something other than the confirmation match, so this keeps them from
+// having to spell out an identical second value every time. Tests that
+// specifically exercise the mismatch path pass distinct values.
+interface FillAndSubmitOptions {
+  email?: string
+  password?: string
+  confirmPassword?: string
+}
+
+async function fillAndSubmit(
+  user: ReturnType<typeof userEvent.setup>,
+  { email = 'alice@example.com', password = 'correct horse battery staple', confirmPassword }: FillAndSubmitOptions,
+) {
+  confirmPassword ??= password
+  await user.type(screen.getByLabelText(/^Email/), email)
+  // { selector: 'input' } restricts the match to form controls: without
+  // it, /^Password/ also matches the live requirements checklist's own
+  // aria-label="Password requirements" (a <ul>, not an input).
+  await user.type(screen.getByLabelText(/^Password/, { selector: 'input' }), password)
+  await user.type(
+    screen.getByLabelText(/^Confirm password/, { selector: 'input' }),
+    confirmPassword,
+  )
+  await user.click(screen.getByRole('button', { name: 'Create account' }))
+}
+
 describe('RegisterPage', () => {
   afterEach(() => {
     vi.clearAllMocks()
@@ -60,12 +88,59 @@ describe('RegisterPage', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await user.type(screen.getByLabelText(/Email/), 'not-an-email')
-    await user.type(screen.getByLabelText(/Password/), 'correct horse battery staple')
-    await user.click(screen.getByRole('button', { name: 'Create account' }))
+    await fillAndSubmit(user, { email: 'not-an-email' })
 
     expect(await screen.findByText('Enter a valid email address')).toBeInTheDocument()
     expect(register).not.toHaveBeenCalled()
+  })
+
+  it('rejects a confirmation that does not match the password, without calling register', async () => {
+    const register = vi.fn<(email: string, password: string) => Promise<void>>()
+    mockRegister(register)
+    const user = userEvent.setup()
+    renderPage()
+
+    await fillAndSubmit(user, {
+      password: 'correct horse battery staple',
+      confirmPassword: 'a different phrase entirely',
+    })
+
+    expect(await screen.findByText('Passwords do not match')).toBeInTheDocument()
+    expect(register).not.toHaveBeenCalled()
+  })
+
+  it('shows a live checklist that mirrors the server rule as the password is typed', async () => {
+    const register = vi.fn<(email: string, password: string) => Promise<void>>()
+    mockRegister(register)
+    const user = userEvent.setup()
+    renderPage()
+
+    const list = screen.getByRole('list', { name: 'Password requirements' })
+    expect(list).toBeInTheDocument()
+
+    // A weak, commonly-used password that still satisfies plain length
+    // (the client-side gate) does NOT flip the checklist's "not a
+    // commonly used password" item to met — the checklist is not fooled
+    // by a submission that would still get a 400 from the server.
+    await user.type(screen.getByLabelText(/^Password/, { selector: 'input' }), 'welcome1')
+    expect(list).toHaveTextContent('Not a commonly used password')
+  })
+
+  it('does not gate submission on the not-common/not-predictable checklist — the server decides', async () => {
+    // A password satisfying the client-side schema (length 8-72) but
+    // failing the checklist (a common password) must still reach
+    // register(): PasswordRequirements is documented as informational
+    // only, never a client-side gate.
+    const register = vi
+      .fn<(email: string, password: string) => Promise<void>>()
+      .mockResolvedValue(undefined)
+    mockRegister(register)
+    const user = userEvent.setup()
+    renderPage()
+
+    await fillAndSubmit(user, { password: 'welcome1' })
+
+    expect(register).toHaveBeenCalledWith('alice@example.com', 'welcome1')
   })
 
   it('registers, then navigates to /login without authenticating', async () => {
@@ -76,15 +151,13 @@ describe('RegisterPage', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await user.type(screen.getByLabelText(/Email/), 'alice@example.com')
-    await user.type(screen.getByLabelText(/Password/), 'correct horse battery staple')
-    await user.click(screen.getByRole('button', { name: 'Create account' }))
+    await fillAndSubmit(user, {})
 
     expect(register).toHaveBeenCalledWith('alice@example.com', 'correct horse battery staple')
     expect(await screen.findByText('Login page')).toBeInTheDocument()
   })
 
-  it('shows the server message verbatim on a 409 (email already registered)', async () => {
+  it("shows the server message verbatim on a 409 (email already registered)", async () => {
     const register = vi
       .fn<(email: string, password: string) => Promise<void>>()
       .mockRejectedValue(jsonResponse(409, { error: 'email already registered' }))
@@ -92,9 +165,7 @@ describe('RegisterPage', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await user.type(screen.getByLabelText(/Email/), 'alice@example.com')
-    await user.type(screen.getByLabelText(/Password/), 'correct horse battery staple')
-    await user.click(screen.getByRole('button', { name: 'Create account' }))
+    await fillAndSubmit(user, {})
 
     expect(await screen.findByRole('alert')).toHaveTextContent('email already registered')
     // Must NOT have navigated away on failure.
@@ -109,9 +180,7 @@ describe('RegisterPage', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await user.type(screen.getByLabelText(/Email/), 'alice@example.com')
-    await user.type(screen.getByLabelText(/Password/), 'correct horse battery staple')
-    await user.click(screen.getByRole('button', { name: 'Create account' }))
+    await fillAndSubmit(user, {})
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/too many attempts/i)
   })

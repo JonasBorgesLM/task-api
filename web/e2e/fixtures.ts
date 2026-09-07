@@ -42,7 +42,12 @@ export async function registerAndLogin(page: Page): Promise<{ email: string; pas
 
   await page.goto('/register')
   await page.getByLabel(/^Email/).fill(email)
-  await page.getByLabel(/^Password/).fill(password)
+  // Exact label, not a /^Password/ prefix match: issue #219's live
+  // requirements checklist carries aria-label="Password requirements"
+  // on its own <ul>, which a prefix regex would also match, making this
+  // locator ambiguous.
+  await page.getByLabel('Password', { exact: true }).fill(password)
+  await page.getByLabel('Confirm password', { exact: true }).fill(password)
   await page.getByRole('button', { name: 'Create account' }).click()
   await page.waitForURL(/\/login$/)
 

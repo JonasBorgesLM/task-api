@@ -422,7 +422,7 @@ export interface components {
              */
             email: string;
             /**
-             * @description Required, 8–72 characters. The 72-character ceiling is bcrypt's own input limit (golang.org/x/crypto/bcrypt rejects longer input outright), not an arbitrary policy choice.
+             * @description Required, 8–72 characters. The 72-character ceiling is bcrypt's own input limit (golang.org/x/crypto/bcrypt rejects longer input outright), not an arbitrary policy choice. Also rejected: a password on a list of frequently used passwords, and a password that is a single repeated character or a sequential run (e.g. "12345678", "abcdefgh") — see `docs/DECISIONS.md` § "Validação de senha forte". There is no mandatory character-class rule (no forced digit/symbol).
              * @example correct horse battery staple
              */
             password: string;
@@ -445,7 +445,7 @@ export interface components {
              */
             current_password: string;
             /**
-             * @description Required, 8–72 characters — the same bounds RegisterRequest's password enforces, for the same bcrypt-input-limit reason.
+             * @description Required, 8–72 characters — the same bounds, and the same common/predictable-password rejection, that RegisterRequest's password enforces.
              * @example another correct horse battery staple
              */
             new_password: string;
@@ -811,7 +811,7 @@ export interface operations {
                     "application/json": components["schemas"]["User"];
                 };
             };
-            /** @description Malformed JSON body; an empty/malformed `email` (must contain "@", at most 320 characters); or a `password` shorter than 8 or longer than 72 characters (bcrypt's own input limit). */
+            /** @description Malformed JSON body; an empty/malformed `email` (must contain "@", at most 320 characters); a `password` shorter than 8 or longer than 72 characters (bcrypt's own input limit); or a `password` that is too common (on a list of frequently used passwords) or too predictable (a repeated or sequential character run, e.g. "aaaaaaaa" or "12345678") — see `docs/DECISIONS.md` § "Validação de senha forte". */
             400: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
@@ -982,7 +982,7 @@ export interface operations {
                     "application/json": Record<string, never>;
                 };
             };
-            /** @description Malformed JSON body, or a `new_password` shorter than 8 or longer than 72 characters (bcrypt's own input limit). */
+            /** @description Malformed JSON body; a `new_password` shorter than 8 or longer than 72 characters (bcrypt's own input limit); or a `new_password` that is too common or too predictable — the same rule `POST /v1/auth/register`'s `password` enforces, see `docs/DECISIONS.md` § "Validação de senha forte". */
             400: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];

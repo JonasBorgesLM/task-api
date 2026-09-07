@@ -3,7 +3,11 @@ import { expect, test } from './fixtures'
 async function register(page: import('@playwright/test').Page, email: string, password: string) {
   await page.goto('/register')
   await page.getByLabel(/^Email/).fill(email)
-  await page.getByLabel(/^Password/).fill(password)
+  // Exact label: issue #219's live requirements checklist carries
+  // aria-label="Password requirements" on its own <ul>, which a
+  // /^Password/ prefix regex would also match.
+  await page.getByLabel('Password', { exact: true }).fill(password)
+  await page.getByLabel('Confirm password', { exact: true }).fill(password)
   await page.getByRole('button', { name: 'Create account' }).click()
   await page.waitForURL(/\/login$/)
 }

@@ -86,7 +86,17 @@ describe('App routing', () => {
       }),
     )
     await user.type(screen.getByLabelText(/Email/), 'alice@example.com')
-    await user.type(screen.getByLabelText(/Password/), 'correct horse battery staple')
+    // { selector: 'input' } excludes the live requirements checklist's
+    // own aria-label="Password requirements" <ul> (issue #219), which
+    // /Password/ would otherwise also match.
+    await user.type(
+      screen.getByLabelText(/^Password/, { selector: 'input' }),
+      'correct horse battery staple',
+    )
+    await user.type(
+      screen.getByLabelText(/^Confirm password/, { selector: 'input' }),
+      'correct horse battery staple',
+    )
     await user.click(screen.getByRole('button', { name: 'Create account' }))
 
     await screen.findByRole('heading', { name: 'Log in' })
