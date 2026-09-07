@@ -3,17 +3,22 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { Skeleton } from './components/Skeleton'
 import { RequireAuth } from './features/auth/RequireAuth'
 
-// Two chunks past the eagerly-loaded shell (App, RequireAuth, useAuth,
-// the design primitives): the unauthenticated area and the authenticated
+// Chunks past the eagerly-loaded shell (App, RequireAuth, useAuth, the
+// design primitives): the unauthenticated area and the authenticated
 // one, split at the natural boundary the app already has (issue #203).
 // Before this, a first-time visitor to /login downloaded TaskList, its
 // attachments UI, and every modal that only makes sense once a session
-// exists — none of which /login itself has any use for.
+// exists — none of which /login itself has any use for. SessionsPage
+// (issue #224) is its own chunk for the same reason: a visitor who never
+// opens "Manage sessions" never downloads it.
 const AuthPages = lazy(() =>
   import('./features/auth/AuthPages').then((module) => ({ default: module.AuthPages })),
 )
 const AuthenticatedHome = lazy(() =>
   import('./AuthenticatedHome').then((module) => ({ default: module.AuthenticatedHome })),
+)
+const SessionsPage = lazy(() =>
+  import('./features/auth/SessionsPage').then((module) => ({ default: module.SessionsPage })),
 )
 
 /**
@@ -51,6 +56,14 @@ function App() {
           element={
             <Suspense fallback={<RouteFallback />}>
               <AuthenticatedHome />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/sessions"
+          element={
+            <Suspense fallback={<RouteFallback />}>
+              <SessionsPage />
             </Suspense>
           }
         />

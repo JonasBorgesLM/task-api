@@ -58,11 +58,21 @@ type fakeService struct {
 	logoutAllFn      func(userID string) error
 	getUserFn        func(id string) (User, error)
 	validateTokenFn  func(token string) (string, error)
+	listSessionsFn   func(userID, currentToken string) ([]SessionInfo, error)
+	revokeSessionFn  func(userID, sessionID string) error
 
-	logoutCalledWith         string
-	logoutAllCalledWith      string
-	getUserCalledWith        string
-	deleteAccountCalledWith  string
+	logoutCalledWith        string
+	logoutAllCalledWith     string
+	getUserCalledWith       string
+	deleteAccountCalledWith string
+	listSessionsCalledWith  struct {
+		userID       string
+		currentToken string
+	}
+	revokeSessionCalledWith struct {
+		userID    string
+		sessionID string
+	}
 	changePasswordCalledWith struct {
 		userID              string
 		currentPassword     string
@@ -153,6 +163,24 @@ func (f *fakeService) ValidateToken(_ context.Context, token string) (string, er
 		return f.validateTokenFn(token)
 	}
 	return "", ErrNotFound
+}
+
+func (f *fakeService) ListSessions(_ context.Context, userID, currentToken string) ([]SessionInfo, error) {
+	f.listSessionsCalledWith.userID = userID
+	f.listSessionsCalledWith.currentToken = currentToken
+	if f.listSessionsFn != nil {
+		return f.listSessionsFn(userID, currentToken)
+	}
+	return nil, nil
+}
+
+func (f *fakeService) RevokeSession(_ context.Context, userID, sessionID string) error {
+	f.revokeSessionCalledWith.userID = userID
+	f.revokeSessionCalledWith.sessionID = sessionID
+	if f.revokeSessionFn != nil {
+		return f.revokeSessionFn(userID, sessionID)
+	}
+	return nil
 }
 
 func newHandlerWithFake(svc *fakeService) *Handler {
@@ -747,6 +775,121 @@ func TestDeleteAccount_Handler_RepositoryError(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("delete account with a repository error: status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+}
+
+// --- GET /auth/sessions, DELETE /auth/sessions/{id} ---
+
+func TestListSessions_Handler_Success(t *testing.T) {
+	fixedTime := time.Now()
+	svc := &fakeService{
+		listSessionsFn: func(userID, currentToken string) ([]SessionInfo, error) {
+			return []SessionInfo{
+				{ID: "session-1", CreatedAt: fixedTime, ExpiresAt: fixedTime.Add(time.Hour), IsCurrent: true},
+				{ID: "session-2", CreatedAt: fixedTime, ExpiresAt: fixedTime.Add(time.Hour), IsCurrent: false},
+			}, nil
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/sessions", nil)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	req = req.WithContext(middleware.ContextWithSessionToken(req.Context(), "the-token"))
+	w := httptest.NewRecorder()
+	h.listSessions(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("listSessions status = %d, want %d", w.Code, http.StatusOK)
+	}
+	var got []sessionResponse
+	decodeBody(t, w, &got)
+	if len(got) != 2 {
+		t.Fatalf("listSessions body length = %d, want 2", len(got))
+	}
+	if got[0].ID != "session-1" || !got[0].IsCurrent {
+		t.Errorf("listSessions body[0] = %+v, want ID session-1 and IsCurrent true", got[0])
+	}
+	if got[1].ID != "session-2" || got[1].IsCurrent {
+		t.Errorf("listSessions body[1] = %+v, want ID session-2 and IsCurrent false", got[1])
+	}
+	if svc.listSessionsCalledWith.userID != "u1" {
+		t.Errorf("ListSessions() called with userID = %q, want %q", svc.listSessionsCalledWith.userID, "u1")
+	}
+	if svc.listSessionsCalledWith.currentToken != "the-token" {
+		t.Errorf("ListSessions() called with currentToken = %q, want %q", svc.listSessionsCalledWith.currentToken, "the-token")
+	}
+}
+
+// TestListSessions_Handler_EmptyList_ReturnsEmptyArrayNotNull guards the
+// same "[] not null" contract go-http-handlers.md states for every list
+// endpoint.
+func TestListSessions_Handler_EmptyList_ReturnsEmptyArrayNotNull(t *testing.T) {
+	svc := &fakeService{
+		listSessionsFn: func(_, _ string) ([]SessionInfo, error) { return nil, nil },
+	}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/sessions", nil)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.listSessions(w, req)
+
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("listSessions body = %q, want %q", body, "[]")
+	}
+}
+
+func TestListSessions_Handler_RepositoryError(t *testing.T) {
+	svc := &fakeService{
+		listSessionsFn: func(_, _ string) ([]SessionInfo, error) { return nil, errors.New("db down") },
+	}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/sessions", nil)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	w := httptest.NewRecorder()
+	h.listSessions(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("listSessions with a repository error: status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestRevokeSession_Handler_Success(t *testing.T) {
+	svc := &fakeService{}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodDelete, "/auth/sessions/abc123", nil)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	req.SetPathValue("id", "abc123")
+	w := httptest.NewRecorder()
+	h.revokeSession(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("revokeSession status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	if svc.revokeSessionCalledWith.userID != "u1" {
+		t.Errorf("RevokeSession() called with userID = %q, want %q", svc.revokeSessionCalledWith.userID, "u1")
+	}
+	if svc.revokeSessionCalledWith.sessionID != "abc123" {
+		t.Errorf("RevokeSession() called with sessionID = %q, want %q", svc.revokeSessionCalledWith.sessionID, "abc123")
+	}
+}
+
+func TestRevokeSession_Handler_NotFound(t *testing.T) {
+	svc := &fakeService{
+		revokeSessionFn: func(_, _ string) error { return ErrNotFound },
+	}
+	h := newHandlerWithFake(svc)
+
+	req := httptest.NewRequest(http.MethodDelete, "/auth/sessions/unknown", nil)
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), "u1"))
+	req.SetPathValue("id", "unknown")
+	w := httptest.NewRecorder()
+	h.revokeSession(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("revokeSession for an unknown id: status = %d, want %d", w.Code, http.StatusNotFound)
 	}
 }
 

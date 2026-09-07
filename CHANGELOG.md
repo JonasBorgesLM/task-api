@@ -77,6 +77,17 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   pelo mesmo `realip`/`TRUSTED_PROXIES` que os tiers de rate limit já
   usam, via o novo `middleware.RealIP`. Ver `docs/DECISIONS.md` §
   "Trilha de auditoria".
+- `GET /v1/auth/sessions` e `DELETE /v1/auth/sessions/{id}` (issue
+  #224) — a lacuna entre "esta sessão" (`POST /auth/logout`) e "todas"
+  (`POST /auth/logout-all`): lista as sessões ativas da conta (mais
+  recente primeiro, marcando qual é a atual) e revoga uma específica.
+  Nunca expõe o token nem seu hash — cada sessão é endereçada por um id
+  opaco derivado do hash sob demanda, não uma coluna nova. Um `id` que
+  não pertence ao chamador — incluindo um que existe de verdade mas é
+  de outra conta — devolve `404`, igual a qualquer outro recurso que
+  não pertence a quem pergunta. `web/` ganha a tela correspondente
+  ("Manage sessions" no menu de conta). Ver `docs/DECISIONS.md` § "Tela
+  de sessões ativas".
 
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em

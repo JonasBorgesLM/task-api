@@ -40,6 +40,8 @@ type userService interface {
 	Logout(ctx context.Context, token string) error
 	LogoutAll(ctx context.Context, userID string) error
 	GetUser(ctx context.Context, id string) (User, error)
+	ListSessions(ctx context.Context, userID, currentToken string) ([]SessionInfo, error)
+	RevokeSession(ctx context.Context, userID, sessionID string) error
 }
 
 // AccountCascadeFunc deletes everything belonging to userID that this
@@ -112,6 +114,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth, rateLimit midd
 	mux.Handle("POST /auth/logout-all", requireAuth(http.HandlerFunc(h.logoutAll)))
 	mux.Handle("GET /auth/me", requireAuth(http.HandlerFunc(h.me)))
 	mux.Handle("DELETE /auth/me", requireAuth(http.HandlerFunc(h.deleteAccount)))
+	mux.Handle("GET /auth/sessions", requireAuth(http.HandlerFunc(h.listSessions)))
+	mux.Handle("DELETE /auth/sessions/{id}", requireAuth(http.HandlerFunc(h.revokeSession)))
 }
 
 type registerRequest struct {
@@ -459,6 +463,60 @@ func (h *Handler) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	h.logAuditEvent(r, auditEventAccountDeleted, userID)
 
 	clearSessionCookie(w, h.cookieInsecure)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// sessionResponse is one entry in GET /auth/sessions' array — never
+// TokenHash, never the raw token; ID is the opaque value
+// Service.deriveSessionID computes (see its own doc comment).
+type sessionResponse struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	IsCurrent bool      `json:"is_current"`
+}
+
+// listSessions handles GET /auth/sessions (issue #224) — every session
+// belonging to the caller, newest first, with IsCurrent marking the one
+// that authenticated this very request.
+func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
+	userID, _ := middleware.UserIDFromContext(r.Context())
+	token, _ := middleware.SessionTokenFromContext(r.Context())
+
+	sessions, err := h.svc.ListSessions(r.Context(), userID, token)
+	if err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
+	// []sessionResponse{}, not a nil slice: an empty result must still
+	// serialize as JSON [], never null — see go-http-handlers.md.
+	resp := make([]sessionResponse, len(sessions))
+	for i, s := range sessions {
+		// sessionResponse's fields deliberately mirror SessionInfo's
+		// exactly (same names, same order, same types) so this
+		// conversion stays valid — if the two ever need to diverge,
+		// switch back to an explicit field-by-field literal then.
+		resp[i] = sessionResponse(s)
+	}
+	h.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// revokeSession handles DELETE /auth/sessions/{id} (issue #224) — the
+// gap between POST /auth/logout (this session only) and
+// POST /auth/logout-all (every session): revoke exactly one other
+// session by the opaque id GET /auth/sessions listed it under.
+// Revoking the caller's own current session this way is not special-
+// cased — see Service.RevokeSession's doc comment for why.
+func (h *Handler) revokeSession(w http.ResponseWriter, r *http.Request) {
+	userID, _ := middleware.UserIDFromContext(r.Context())
+	sessionID := r.PathValue("id")
+
+	if err := h.svc.RevokeSession(r.Context(), userID, sessionID); err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

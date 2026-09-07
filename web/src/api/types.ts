@@ -129,6 +129,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List every active session belonging to the caller
+         * @description Fills the gap between "this session" (`POST /auth/logout`) and "every session" (`POST /auth/logout-all`): shows how many sessions exist and when each was created, so a caller can decide whether one specific session looks suspicious before revoking it — see `DELETE /v1/auth/sessions/{id}`.
+         *
+         *     Never exposes the raw token or its stored hash. Each session's `id` is an opaque value derived from its hash (see `docs/DECISIONS.md` § "Tela de sessões ativas"), meaningful only for addressing `DELETE /v1/auth/sessions/{id}` — it carries no other information and cannot be reversed back to a usable credential.
+         *
+         *     Ordered newest first. `is_current` marks the one session that authenticated this very request.
+         */
+        get: operations["listSessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke one specific session
+         * @description Addressed by the opaque `id` `GET /v1/auth/sessions` lists each session under — never the token or its hash. Revoking the session that authenticated this very call is allowed: nothing here special-cases it, since that is exactly what `POST /auth/logout` already does under a different address (see `docs/DECISIONS.md` § "Tela de sessões ativas").
+         *
+         *     An `id` that does not address any session of the caller's own — including one that names a real session belonging to a *different* account — returns `404`, the same never-confirm- existence treatment every other single-resource lookup in this API gives a row it does not own.
+         */
+        delete: operations["revokeSession"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/me": {
         parameters: {
             query?: never;
@@ -412,6 +458,29 @@ export interface components {
         MeResponse: components["schemas"]["User"] & {
             /** @example true */
             readonly attachments_enabled: boolean;
+        };
+        /** @description One entry in GET /v1/auth/sessions' array. Never the raw token or its stored hash — id is an opaque value derived from the hash, meaningful only for addressing DELETE /v1/auth/sessions/{id} (see docs/DECISIONS.md § "Tela de sessões ativas"). */
+        SessionResponse: {
+            /**
+             * @description Opaque identifier for this session. Not the session token, not its hash, and not reversible back to either.
+             * @example 7f9e1c2a8b3d4560f1e2d3c4b5a69788
+             */
+            readonly id: string;
+            /**
+             * Format: date-time
+             * @example 2026-08-08T12:00:00Z
+             */
+            readonly created_at: string;
+            /**
+             * Format: date-time
+             * @example 2026-08-15T12:00:00Z
+             */
+            readonly expires_at: string;
+            /**
+             * @description True for the one session that authenticated the request asking for this list.
+             * @example true
+             */
+            readonly is_current: boolean;
         };
         /** @description Accepted body for POST /auth/register. */
         RegisterRequest: {
@@ -1061,6 +1130,72 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listSessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The account's active sessions, newest first. An account with no other sessions still returns an array of exactly one (the caller's own). */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionResponse"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    revokeSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description A session's opaque identifier, from `GET /v1/auth/sessions`. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session revoked. No response body. */
+            204: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description No session of the caller's own matches `id` — including an unrecognized value and one addressing another account's session. */
+            404: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "user not found"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalServerError"];
             503: components["responses"]["ServiceUnavailable"];

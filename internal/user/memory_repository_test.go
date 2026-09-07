@@ -304,3 +304,74 @@ func TestMemory_DeleteSessionsForUser_NoSessions_IsNotAnError(t *testing.T) {
 		t.Errorf("DeleteSessionsForUser() for a user with no sessions error = %v, want nil", err)
 	}
 }
+
+// TestMemory_FindSessionsForUser_OrdersNewestFirst pins the ordering
+// contract FindSessionsForUser's doc comment states, matching
+// postgresRepository's ORDER BY created_at DESC.
+func TestMemory_FindSessionsForUser_OrdersNewestFirst(t *testing.T) {
+	repo := NewMemoryRepository()
+	now := time.Now()
+
+	sessions := []Session{
+		{TokenHash: "oldest", UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now},
+		{TokenHash: "middle", UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(time.Second)},
+		{TokenHash: "newest", UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(2 * time.Second)},
+	}
+	for _, s := range sessions {
+		if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
+			t.Fatalf("CreateSession(%s) unexpected error: %v", s.TokenHash, err)
+		}
+	}
+
+	got, err := repo.FindSessionsForUser(context.Background(), "1")
+	if err != nil {
+		t.Fatalf("FindSessionsForUser() unexpected error: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("FindSessionsForUser() returned %d sessions, want 3", len(got))
+	}
+	wantOrder := []string{"newest", "middle", "oldest"}
+	for i, want := range wantOrder {
+		if got[i].TokenHash != want {
+			t.Errorf("FindSessionsForUser()[%d].TokenHash = %q, want %q", i, got[i].TokenHash, want)
+		}
+	}
+}
+
+// TestMemory_FindSessionsForUser_ScopedToUser guards the same
+// cross-user isolation TestMemory_CreateSession_EvictionIsPerUser
+// guards for eviction.
+func TestMemory_FindSessionsForUser_ScopedToUser(t *testing.T) {
+	repo := NewMemoryRepository()
+	now := time.Now()
+
+	if err := repo.CreateSession(context.Background(), Session{TokenHash: "u1-session", UserID: "1", ExpiresAt: now.Add(time.Hour), CreatedAt: now}, unlimitedSessions); err != nil {
+		t.Fatalf("CreateSession(u1) unexpected error: %v", err)
+	}
+	if err := repo.CreateSession(context.Background(), Session{TokenHash: "u2-session", UserID: "2", ExpiresAt: now.Add(time.Hour), CreatedAt: now}, unlimitedSessions); err != nil {
+		t.Fatalf("CreateSession(u2) unexpected error: %v", err)
+	}
+
+	got, err := repo.FindSessionsForUser(context.Background(), "1")
+	if err != nil {
+		t.Fatalf("FindSessionsForUser() unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0].TokenHash != "u1-session" {
+		t.Errorf("FindSessionsForUser(1) = %+v, want exactly [u1-session]", got)
+	}
+}
+
+func TestMemory_FindSessionsForUser_NoSessions_ReturnsEmptyNotNil(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	got, err := repo.FindSessionsForUser(context.Background(), "no-such-user")
+	if err != nil {
+		t.Fatalf("FindSessionsForUser() unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Error("FindSessionsForUser() with no sessions = nil, want an empty (non-nil) slice — matches the JSON [] a client should see, not null")
+	}
+	if len(got) != 0 {
+		t.Errorf("FindSessionsForUser() with no sessions = %+v, want empty", got)
+	}
+}

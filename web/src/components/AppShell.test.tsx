@@ -18,7 +18,7 @@ describe('AppShell.module.css', () => {
 describe('AppShell', () => {
   it('renders the app name and the current user email', () => {
     render(
-      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={vi.fn()}>
+      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={vi.fn()} onManageSessions={vi.fn()}>
         <p>content</p>
       </AppShell>,
     )
@@ -29,7 +29,7 @@ describe('AppShell', () => {
 
   it('renders header and navigation landmarks', () => {
     render(
-      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={vi.fn()}>
+      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={vi.fn()} onManageSessions={vi.fn()}>
         <p>content</p>
       </AppShell>,
     )
@@ -43,7 +43,7 @@ describe('AppShell', () => {
     const onLogoutAll = vi.fn()
     const user = userEvent.setup()
     render(
-      <AppShell userEmail="alice@example.com" onLogout={onLogout} onLogoutAll={onLogoutAll}>
+      <AppShell userEmail="alice@example.com" onLogout={onLogout} onLogoutAll={onLogoutAll} onManageSessions={vi.fn()}>
         <p>content</p>
       </AppShell>,
     )
@@ -63,7 +63,7 @@ describe('AppShell', () => {
     const onLogoutAll = vi.fn()
     const user = userEvent.setup()
     render(
-      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={onLogoutAll}>
+      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={onLogoutAll} onManageSessions={vi.fn()}>
         <p>content</p>
       </AppShell>,
     )
@@ -82,7 +82,7 @@ describe('AppShell', () => {
     const onLogoutAll = vi.fn()
     const user = userEvent.setup()
     render(
-      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={onLogoutAll}>
+      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={onLogoutAll} onManageSessions={vi.fn()}>
         <p>content</p>
       </AppShell>,
     )
@@ -99,7 +99,7 @@ describe('AppShell', () => {
     const onLogoutAll = vi.fn()
     const user = userEvent.setup()
     render(
-      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={onLogoutAll}>
+      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={onLogoutAll} onManageSessions={vi.fn()}>
         <p>content</p>
       </AppShell>,
     )
@@ -114,7 +114,7 @@ describe('AppShell', () => {
 
   it('no longer renders a static "Tasks" section label beside the product name', () => {
     render(
-      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={vi.fn()}>
+      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={vi.fn()} onManageSessions={vi.fn()}>
         <p>content</p>
       </AppShell>,
     )
@@ -125,11 +125,32 @@ describe('AppShell', () => {
 
   it('renders its children inside the main landmark', () => {
     render(
-      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={vi.fn()}>
+      <AppShell userEmail="alice@example.com" onLogout={vi.fn()} onLogoutAll={vi.fn()} onManageSessions={vi.fn()}>
         <p>task list goes here</p>
       </AppShell>,
     )
 
     expect(screen.getByRole('main')).toHaveTextContent('task list goes here')
+  })
+
+  it('"Manage sessions" is behind the account menu and calls onManageSessions directly, no confirmation', async () => {
+    const onManageSessions = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <AppShell
+        userEmail="alice@example.com"
+        onLogout={vi.fn()}
+        onLogoutAll={vi.fn()}
+        onManageSessions={onManageSessions}
+      >
+        <p>content</p>
+      </AppShell>,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Account: alice@example.com' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Manage sessions' }))
+
+    expect(onManageSessions).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })
