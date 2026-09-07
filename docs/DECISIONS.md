@@ -1632,3 +1632,58 @@ Expor isso como configuração deixaria um operador alargar silenciosamente a
 janela de atraso de revogação sem que o raciocínio acima fosse revisitado — o
 número embute uma decisão de segurança, não um parâmetro de tuning
 operacional.
+
+---
+
+## Índices para `status`/`priority` em `tasks` (issue #236, 15.D5): medido, não criado
+
+`idx_tasks_user_id_created_at_id (user_id, created_at, id)` é o único índice
+sobre `tasks` além da chave primária. Nenhum cobre `status` ou `priority`
+isoladamente — a issue pedia explicitamente para **medir antes de criar**
+("índice só onde o plano mostrar problema"), não para adicionar um por
+precaução.
+
+**Medição feita:** volume sintético gerado direto via SQL (não por
+`cmd/seed`, cujo único contexto de 30s cobre seu uso normal de demonstração,
+não uma carga de centenas de milhares de linhas) e descartado depois —
+nenhuma linha desta medição ficou no banco. Dois cenários:
+
+1. **50 usuários × 5.000 tasks cada** (~250k linhas) — escala já pesada para
+   um gerenciador de tasks pessoal. `EXPLAIN ANALYZE` em toda combinação
+   relevante de filtro (sem filtro, `status` único, `status`+`priority`
+   combinados) e posição de página (primeira, e uma bem funda —
+   `OFFSET 2000` sobre ~1.280 linhas que casam o filtro) ficou entre
+   **0,15ms e 2,7ms** de tempo de execução real. Nos casos de offset raso o
+   planner caminha direto por `idx_tasks_user_id_created_at_id` (Index Scan);
+   no de offset fundo com filtro seletivo, ele troca para Bitmap Heap Scan +
+   Sort — mais caro que um Index Scan puro, mas ainda irrelevante em termos
+   absolutos.
+2. **Um único usuário com 100.000 tasks** — cenário deliberadamente extremo,
+   bem além do que este produto tem qualquer indício de precisar hoje. O pior
+   caso testado (`status`+`priority` combinados, raros, `OFFSET 5000`) caiu
+   para Parallel Seq Scan + Sort, **~26ms** de execução. Criar um índice
+   candidato `(user_id, status, priority, created_at, id)` e repetir a mesma
+   consulta reduziu para **~11ms** (Bitmap Heap Scan pelo índice novo + Sort
+   — mesmo com o índice, o `OFFSET` ainda força materializar e ordenar as
+   linhas que casam antes de descartar as primeiras `5000`, então não vira um
+   Index Scan puro). Índice e linhas sintéticas foram removidos depois da
+   medição — nada disso ficou no schema ou nos dados.
+
+**Decisão: não criar o índice agora.** Mesmo no cenário 1 (que já representa
+um uso pesado real) o índice existente resolve tudo em menos de 3ms. O
+cenário 2 só aparece com um único usuário acumulando cem vezes mais tasks do
+que o cenário pesado — nada neste produto sugere que isso é uma forma de uso
+esperada — e mesmo ali o resultado (~26ms) está longe de ser um problema
+real: nenhum timeout, nenhuma degradação perceptível numa única requisição.
+Pagar escrita mais lenta em toda mutação de `tasks` (a issue já nomeia esse
+custo) por um ganho que só aparece numa escala hoje hipotética não se
+justifica.
+
+**Quando revisitar — os mesmos gatilhos que a issue já nomeava:** a busca por
+título (15.G2, issue #248) e a ordenação por outro campo (15.G3, issue #249)
+introduzem formas de consulta que esta medição não cobriu (`LIKE`/`ILIKE` ou
+busca textual, e um `ORDER BY` diferente de `created_at, id`) e que mudam o
+plano de consulta de verdade — ao contrário de `status`/`priority`, que só
+adicionam um `Filter` sobre o mesmo índice já existente. Se um desses
+entrar, repetir esta mesma medição (não assumir que o resultado daqui ainda
+vale) contra o índice que aquela consulta específica pedir.
