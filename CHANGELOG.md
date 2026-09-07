@@ -8,7 +8,7 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
 
 ## [1.6.0] — a definir na tag
 
-**Minor, não major:** a rota nova é aditiva, e os três itens abaixo em
+**Minor, não major:** a rota nova é aditiva, e os itens abaixo em
 "Segurança" são endurecimento — nenhum cliente que já respeitava o que
 `docs/openapi.yaml` documentava é afetado.
 
@@ -98,6 +98,17 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   deploy"). Nenhuma rota muda de comportamento; ver
   `docs/DECISIONS.md` § "Cache de ValidateToken" para o porquê do TTL
   e as duas alternativas rejeitadas.
+- `POST /v1/auth/register`'s `password` e `POST /v1/auth/password`'s
+  `new_password` passam a rejeitar, além dos limites de 8–72
+  caracteres já existentes, uma senha que está numa lista de senhas
+  frequentemente usadas (`"password"`, `"12345678"`, `"Password1!"`,
+  ...) ou que é um padrão previsível (caractere único repetido, ou uma
+  sequência ascendente/descendente como `"12345678"`/`"abcdefgh"`,
+  issue #218). Sem exigência de composição de caracteres (nunca "precisa
+  ter maiúscula e símbolo") — deliberado, ver `docs/DECISIONS.md` §
+  "Validação de senha forte". Um cliente cuja senha já satisfazia os
+  limites de tamanho documentados mas cai numa dessas duas categorias
+  passa a receber `400` onde antes recebia `201`/`200`.
 
 ### Corrigido
 - `web/`'s lista de tasks (`useTasks`) podia mostrar dados de um filtro

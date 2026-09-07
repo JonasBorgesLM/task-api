@@ -1687,3 +1687,73 @@ plano de consulta de verdade — ao contrário de `status`/`priority`, que só
 adicionam um `Filter` sobre o mesmo índice já existente. Se um desses
 entrar, repetir esta mesma medição (não assumir que o resultado daqui ainda
 vale) contra o índice que aquela consulta específica pedir.
+
+---
+
+## Validação de senha forte (issue #218, 15.B1): regra local, não HIBP
+
+Antes desta issue, `user.validatePassword` checava só `8 <= len(password) <=
+72` bytes — o próprio comentário do `minPasswordLen` já admitia isso como "a
+baseline strength floor, not a full policy". `"12345678"` e `"password"`
+passavam.
+
+**As duas rotas que a issue nomeava, e a escolhida:** uma regra local de
+composição/entropia, sem dependência nova e sem chamada de rede; ou
+verificação de vazamento via HIBP com k-anonimato, que pega exatamente a
+senha que a regra local aprova mas o mundo já conhece, ao custo de uma
+chamada externa síncrona em todo cadastro/troca de senha e de decidir o que
+fazer quando esse serviço está fora do ar (falhar aberto ou fechado).
+**Escolha do usuário (`JonasBorgesLM`)**, levada explicitamente porque a
+issue marcava a escolha como a própria tarefa: regra local — alinhada com a
+preferência já estabelecida deste projeto por checks autocontidos, sem
+serviço externo (a mesma razão, por exemplo, por trás de `dummyPasswordHash`
+nunca depender de nada fora do processo).
+
+**O que a regra local faz — três checks, nenhum é uma exigência de
+composição de caracteres:**
+1. **Lista de senhas conhecidas** (`commonWeakPasswords`,
+   `internal/user/password_strength.go`) — comparação case-insensitive
+   contra ~150 entradas vindas de rankings públicos de senha mais comum
+   (SplashData/NordPass) e suas decorações mais previsíveis. `"Password1!"`
+   está na lista explicitamente: é o exemplo canônico de senha que satisfaz
+   qualquer regra de composição de caracteres e ainda assim é um dos
+   primeiros palpites de qualquer ataque real.
+2. **Rune única repetida** (`isSingleRepeatedRune`) — `"aaaaaaaa"`,
+   `"11111111"`. Cobre qualquer rune, não só ASCII, então não depende de
+   estar numa lista.
+3. **Sequência ascendente/descendente de code points**
+   (`isSequentialRun`) — `"12345678"`, `"abcdefgh"`, `"87654321"`. Genérico
+   por design (compara deltas entre runes adjacentes) em vez de uma tabela
+   de layout de teclado — mais barato e cobre a família inteira de "só
+   digitei os próximos N caracteres" sem enumerar cada caso.
+
+**Deliberadamente sem regra de composição obrigatória** (nunca "precisa ter
+maiúscula E dígito E símbolo"). NIST SP 800-63B recomenda contra isso
+especificamente: empurra o usuário para decorações previsíveis —
+`"Password1!"` é o exemplo padrão citado pelo próprio NIST — sem elevar a
+entropia real. Os três checks acima miram o que de fato torna uma senha
+adivinhável primeiro, não o que só parece complexo.
+
+**O que isto não cobre, por design:** a lista local é de algumas centenas de
+entradas, não as centenas de milhares que um corpus de vazamento real (tipo
+HIBP) teria — pega as senhas que todo mundo já sabe que são fracas, não toda
+senha que já vazou algum dia. Um padrão intercalado como `"12121212"` também
+passa: não está na lista, não é rune única repetida, não é sequência por
+delta constante. Cobrir isso exigiria um estimador de entropia de verdade
+(tipo zxcvbn) — fora do escopo desta issue, que pedia composição/entropia
+local simples, não um motor de análise de senha.
+
+**`"password123"` está deliberadamente fora da lista**, apesar de
+genuinamente pertencer a ela: é a senha de demonstração/teste já
+estabelecida deste projeto — default de `cmd/seed -password`, e usada como
+fixture em dezenas de testes que passam pelo caminho real de
+Register/Login em `internal/user`, `internal/task` e `cmd/api`. Bloqueá-la
+aqui quebraria a ferramenta de seed e boa parte da suíte por uma string que
+já está documentada como "demo only — never reuse" no seu único ponto de
+uso próximo de produção (`cmd/seed/main.go`) — o risco que esta lista existe
+para fechar não se aplica a um valor que nada real deveria autenticar.
+
+**O teto de 72 bytes (não runes) para `maxPasswordLen` não mudou** — é o
+próprio limite do `bcrypt`, e a assimetria proposital com o e-mail (medido em
+runes via `validate.MaxLen`) continua documentada em `validatePassword`'s doc
+comment.

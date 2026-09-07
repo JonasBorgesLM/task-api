@@ -210,6 +210,11 @@ func TestRegister_InvalidPassword(t *testing.T) {
 	}{
 		{"too short", "short1"},
 		{"too long", strings.Repeat("a", maxPasswordLen+1)},
+		{"common password", "welcome1"},
+		{"common password, different case", "WELCOME1"},
+		{"single repeated rune", "aaaaaaaa"},
+		{"sequential ascending", "12345678"},
+		{"sequential descending", "87654321"},
 	}
 
 	for _, tc := range cases {
