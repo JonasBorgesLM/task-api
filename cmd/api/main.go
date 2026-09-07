@@ -574,6 +574,18 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// chain). It is a no-op end to end unless CORS_ALLOWED_ORIGINS is set;
 	// see middleware.CORS.
 	//
+	// RealIP sits right after RequestID, before anything that could
+	// answer a request early: it reuses addressKey — the exact same
+	// function the two address-keyed rate-limit tiers below key on —
+	// purely to make that already-resolved address available in context
+	// (RealIPFromContext) for anything downstream that wants it, most
+	// concretely user.Handler's audit-event logging (issue #223). It
+	// never changes request handling itself, so its position relative to
+	// secureheaders/CORS/Recovery carries none of their ordering
+	// constraints — only "after RequestID" matters, and even that is a
+	// convenience (matching where request-scoped context values
+	// conventionally get set), not a hard requirement.
+	//
 	// secureheaders sits outside CORS, and therefore outside everything
 	// that can answer a request without reaching the mux: it has to run
 	// before the preflight CORS short-circuits, before the 429 the rate
@@ -591,6 +603,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// on.
 	rootHandler := middleware.Chain(
 		middleware.RequestID,
+		middleware.RealIP(middleware.AddressKeyFunc(addressKey)),
 		middleware.Logging(logger),
 		secureheaders.Middleware(
 			// This API only ever returns JSON, so nothing it serves
