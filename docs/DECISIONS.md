@@ -1941,3 +1941,68 @@ HTTP" — precisa do endereço de origem e do request ID, nenhum dos dois
 algo que `Service` deveria conhecer (ver `CLAUDE.md`'s regra de
 camadas). `Service` continua retornando só o que já retornava;
 `Handler` decide, a partir do resultado, se e como logar.
+
+---
+
+## Tela de sessões ativas (issue #224, 15.B7): id derivado, sem coluna nova
+
+`POST /v1/auth/logout-all` derruba tudo, inclusive a sessão que está
+chamando — é a operação de "suspeito que vazou, mata tudo", e continua
+correta assim. Mas não havia nada entre "esta sessão" e "todas": o
+usuário não via quantas sessões existiam, de quando, nem conseguia
+derrubar só a suspeita sem derrubar as outras também.
+`AuthMaxSessionsPerUser` (padrão 10) já limitava o total, e
+`idx_sessions_user_id_created_at` já indexava exatamente a consulta que
+faltava expor — só faltavam as duas rotas e a tela.
+
+**"Identificador opaco derivado", não uma coluna nova — decisão levada
+ao usuário (`JonasBorgesLM`) entre as duas formas de fazer isso.**
+`GET /v1/auth/sessions` e `DELETE /v1/auth/sessions/{id}` nunca podem
+expor o token nem seu hash (`sessions.token_hash`, a chave primária da
+tabela) — precisavam de um identificador próprio para endereçar cada
+sessão. Duas rotas possíveis: uma coluna `id` nova (gerada em
+`CreateSession`, lookup `O(1)` por `WHERE id = $1`, mas exige migration
+nova tocando `migrate_test.go` e o schema) ou um id computado sob
+demanda a partir do `token_hash` já existente (sem migration nenhuma,
+ao custo de `ListSessions`/`RevokeSession` recalcularem o id para cada
+linha que `FindSessionsForUser` devolve — no máximo
+`AuthMaxSessionsPerUser`, hoje 10). **Escolhida a segunda** — o ganho de
+performance da primeira é irrelevante nessa escala, e "derivado" era
+literalmente a palavra que a issue já usava.
+
+**`deriveSessionID`** (`internal/user/service.go`) aplica um segundo
+SHA-256 sobre `sessionIDPrefix + tokenHash` — domain-separado do próprio
+`hashToken` (que hashea o token cru, nunca visto aqui) por um prefixo
+fixo, para que as duas finalidades nunca colidam por acidente mesmo
+operando sobre dados relacionados. Não é reversível de volta a
+`tokenHash` — defesa em profundidade, não o requisito real: `tokenHash`
+já é um valor que nada legítimo precisa reconstruir, já que o único
+dado realmente sensível (o token cru) nunca entrou nessa cadeia de
+derivação.
+
+**`RevokeSession` varre as sessões do usuário e compara o id derivado de
+cada uma** com o `id` recebido, em vez de um lookup direto — o custo
+aceito pela escolha acima. Revogar a própria sessão atual por esta rota
+não tem tratamento especial: é exatamente o que `POST /auth/logout` já
+faz por outro endereço, e recusar seria uma inconsistência arbitrária,
+não uma proteção real. Um `id` que não bate com nenhuma sessão do
+usuário — inclusive um que endereça de verdade uma sessão de **outra**
+conta — devolve `ErrNotFound`, a mesma disciplina de nunca confirmar a
+existência de uma linha que não pertence a quem pergunta que todo outro
+lookup de recurso único nesta API já segue.
+
+**`is_current` existe porque o chamador não tem outro jeito de saber
+qual das suas sessões é "esta".** `ListSessions` recebe o token cru que
+autenticou a própria chamada (via
+`middleware.SessionTokenFromContext`), hashea, e compara contra cada
+sessão devolvida — o único lugar onde o token cru e o hash persistido se
+encontram nesta função, e só para comparação, nunca para retorno.
+
+**Frontend: "Manage sessions" no menu de conta, não navegação
+primária** — é a segunda página autenticada, mas continua sendo um
+desvio de configurações alcançado pelo menu, não algo que justifique
+uma segunda aba/link no cabeçalho (ver o próprio comentário de
+`AppShell.tsx`). Revogar a sessão marcada "This device" também não tem
+tratamento especial no frontend, pelo mesmo motivo do backend: a
+próxima chamada à API depois disso recebe `401` e cai no mesmo fluxo de
+`useAuth` que já trata uma sessão invalidada por qualquer outro motivo.

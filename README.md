@@ -235,6 +235,8 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `POST` | `/v1/auth/logout-all` | required | Invalidate every session for the account, including the one making the call |
 | `GET` | `/v1/auth/me` | required | Get the authenticated user |
 | `DELETE` | `/v1/auth/me` | required | Permanently delete the account — sessions, tasks, attachments, immediately, no grace period |
+| `GET` | `/v1/auth/sessions` | required | List every active session for the account, newest first |
+| `DELETE` | `/v1/auth/sessions/{id}` | required | Revoke one session by its opaque id from `GET /v1/auth/sessions` |
 | `POST` | `/v1/tasks` | required | Create a task |
 | `GET` | `/v1/tasks` | required | List the caller's tasks, oldest first (`?limit=`, `?offset=`, `?status=`, `?priority=`; `status`/`priority` may repeat, e.g. `?status=pending&status=done`, matching any of the given values) |
 | `GET` | `/v1/tasks/{id}` | required | Get a task by ID |

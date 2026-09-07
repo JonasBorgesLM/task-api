@@ -245,6 +245,91 @@ func TestPostgres_DeleteSession_Unknown_IsNotAnError(t *testing.T) {
 	}
 }
 
+// TestPostgres_FindSessionsForUser_OrdersNewestFirst is the SQL half of
+// memory_repository_test.go's equivalent test — verified against
+// idx_sessions_user_id_created_at and a real query plan, not the
+// in-memory map's own sort.
+func TestPostgres_FindSessionsForUser_OrdersNewestFirst(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "sessions-order@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	sessions := []Session{
+		{TokenHash: "oldest", UserID: u.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now},
+		{TokenHash: "middle", UserID: u.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(time.Second)},
+		{TokenHash: "newest", UserID: u.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(2 * time.Second)},
+	}
+	for _, s := range sessions {
+		if err := repo.CreateSession(context.Background(), s, unlimitedSessions); err != nil {
+			t.Fatalf("CreateSession(%s) unexpected error: %v", s.TokenHash, err)
+		}
+	}
+
+	got, err := repo.FindSessionsForUser(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("FindSessionsForUser() unexpected error: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("FindSessionsForUser() returned %d sessions, want 3", len(got))
+	}
+	wantOrder := []string{"newest", "middle", "oldest"}
+	for i, want := range wantOrder {
+		if got[i].TokenHash != want {
+			t.Errorf("FindSessionsForUser()[%d].TokenHash = %q, want %q", i, got[i].TokenHash, want)
+		}
+	}
+}
+
+func TestPostgres_FindSessionsForUser_ScopedToUser(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u1 := newPostgresTestUser(t, "sessions-scope-1@example.com")
+	u2 := newPostgresTestUser(t, "sessions-scope-2@example.com")
+	if err := repo.CreateUser(context.Background(), u1); err != nil {
+		t.Fatalf("CreateUser(u1) unexpected error: %v", err)
+	}
+	if err := repo.CreateUser(context.Background(), u2); err != nil {
+		t.Fatalf("CreateUser(u2) unexpected error: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if err := repo.CreateSession(context.Background(), Session{TokenHash: "u1-session", UserID: u1.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now}, unlimitedSessions); err != nil {
+		t.Fatalf("CreateSession(u1) unexpected error: %v", err)
+	}
+	if err := repo.CreateSession(context.Background(), Session{TokenHash: "u2-session", UserID: u2.ID, ExpiresAt: now.Add(time.Hour), CreatedAt: now}, unlimitedSessions); err != nil {
+		t.Fatalf("CreateSession(u2) unexpected error: %v", err)
+	}
+
+	got, err := repo.FindSessionsForUser(context.Background(), u1.ID)
+	if err != nil {
+		t.Fatalf("FindSessionsForUser() unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0].TokenHash != "u1-session" {
+		t.Errorf("FindSessionsForUser(u1) = %+v, want exactly [u1-session]", got)
+	}
+}
+
+func TestPostgres_FindSessionsForUser_NoSessions_ReturnsEmptyNotNil(t *testing.T) {
+	repo := newPostgresTestRepo(t)
+	u := newPostgresTestUser(t, "sessions-none@example.com")
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser() unexpected error: %v", err)
+	}
+
+	got, err := repo.FindSessionsForUser(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("FindSessionsForUser() unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Error("FindSessionsForUser() with no sessions = nil, want an empty (non-nil) slice")
+	}
+	if len(got) != 0 {
+		t.Errorf("FindSessionsForUser() with no sessions = %+v, want empty", got)
+	}
+}
+
 // TestPostgres_DeleteExpiredSessions mirrors
 // memory_repository_test.go's equivalent test: only a session whose
 // expires_at is before the given time is removed.

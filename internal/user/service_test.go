@@ -56,6 +56,10 @@ type fakeRepository struct {
 
 	deleteExpiredSessionsErr        error
 	deleteExpiredSessionsCalledWith time.Time
+
+	findSessionsForUserSessions   []Session
+	findSessionsForUserErr        error
+	findSessionsForUserCalledWith string
 }
 
 func (f *fakeRepository) CreateUser(_ context.Context, u User) error {
@@ -113,6 +117,11 @@ func (f *fakeRepository) DeleteSession(_ context.Context, tokenHash string) erro
 func (f *fakeRepository) DeleteExpiredSessions(_ context.Context, now time.Time) error {
 	f.deleteExpiredSessionsCalledWith = now
 	return f.deleteExpiredSessionsErr
+}
+
+func (f *fakeRepository) FindSessionsForUser(_ context.Context, userID string) ([]Session, error) {
+	f.findSessionsForUserCalledWith = userID
+	return f.findSessionsForUserSessions, f.findSessionsForUserErr
 }
 
 const testSessionTTL = time.Hour
@@ -916,6 +925,198 @@ func TestLogoutAll_InvalidatesCacheForUser(t *testing.T) {
 
 	if _, err := svc.ValidateToken(context.Background(), "sometoken"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("ValidateToken() after LogoutAll() = %v, want ErrNotFound -- tokenCache entry should have been invalidated", err)
+	}
+}
+
+// --- deriveSessionID / ListSessions / RevokeSession (issue #224) ---
+
+func TestDeriveSessionID_IsDeterministic(t *testing.T) {
+	id1 := deriveSessionID("some-token-hash")
+	id2 := deriveSessionID("some-token-hash")
+	if id1 != id2 {
+		t.Errorf("deriveSessionID() = %q and %q for the same input, want equal", id1, id2)
+	}
+}
+
+func TestDeriveSessionID_DiffersByInput(t *testing.T) {
+	id1 := deriveSessionID("hash-a")
+	id2 := deriveSessionID("hash-b")
+	if id1 == id2 {
+		t.Errorf("deriveSessionID() produced the same ID for different inputs: %q", id1)
+	}
+}
+
+func TestDeriveSessionID_NeverEqualsItsInput(t *testing.T) {
+	hash := "some-token-hash"
+	if got := deriveSessionID(hash); got == hash {
+		t.Error("deriveSessionID() returned the input unchanged, want a derived value")
+	}
+}
+
+func TestListSessions_ReturnsDerivedIDsNeverTokenHash(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionsForUserSessions: []Session{
+			{TokenHash: "hash-1", UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	got, err := svc.ListSessions(context.Background(), "u1", "current-raw-token")
+	if err != nil {
+		t.Fatalf("ListSessions() unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListSessions() returned %d entries, want 1", len(got))
+	}
+	if got[0].ID != deriveSessionID("hash-1") {
+		t.Errorf("ListSessions()[0].ID = %q, want %q", got[0].ID, deriveSessionID("hash-1"))
+	}
+	if got[0].ID == "hash-1" {
+		t.Error("ListSessions()[0].ID must never be the raw TokenHash")
+	}
+}
+
+func TestListSessions_MarksTheCallingSessionAsCurrent(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionsForUserSessions: []Session{
+			{TokenHash: hashToken("current-token"), UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+			{TokenHash: hashToken("other-token"), UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	got, err := svc.ListSessions(context.Background(), "u1", "current-token")
+	if err != nil {
+		t.Fatalf("ListSessions() unexpected error: %v", err)
+	}
+
+	var currentCount int
+	for _, s := range got {
+		if s.IsCurrent {
+			currentCount++
+			if s.ID != deriveSessionID(hashToken("current-token")) {
+				t.Errorf("the session marked current has ID %q, want the one derived from current-token", s.ID)
+			}
+		}
+	}
+	if currentCount != 1 {
+		t.Errorf("sessions marked IsCurrent = %d, want exactly 1", currentCount)
+	}
+}
+
+func TestListSessions_RepositoryError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	repo := &fakeRepository{findSessionsForUserErr: repoErr}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	_, err := svc.ListSessions(context.Background(), "u1", "sometoken")
+	if !errors.Is(err, repoErr) {
+		t.Errorf("ListSessions() repository error = %v, want %v", err, repoErr)
+	}
+}
+
+func TestRevokeSession_DeletesTheMatchingSession(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionsForUserSessions: []Session{
+			{TokenHash: "target-hash", UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+			{TokenHash: "other-hash", UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	targetID := deriveSessionID("target-hash")
+	if err := svc.RevokeSession(context.Background(), "u1", targetID); err != nil {
+		t.Fatalf("RevokeSession() unexpected error: %v", err)
+	}
+
+	if repo.deletedTokenHash != "target-hash" {
+		t.Errorf("RevokeSession() deleted hash = %q, want %q", repo.deletedTokenHash, "target-hash")
+	}
+}
+
+func TestRevokeSession_UnknownID_ReturnsErrNotFound(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionsForUserSessions: []Session{
+			{TokenHash: "some-hash", UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.RevokeSession(context.Background(), "u1", "not-a-real-id")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("RevokeSession() with an unknown id error = %v, want ErrNotFound", err)
+	}
+	if repo.deletedTokenHash != "" {
+		t.Error("RevokeSession() must not delete anything when the id doesn't match")
+	}
+}
+
+// TestRevokeSession_AnotherUsersSessionID_ReturnsErrNotFound pins the
+// never-confirm-existence discipline: sessionID here really does address
+// a session that exists, just not one belonging to userID — the fake
+// mirrors real Repository scoping (see go-repository-parity.md) by
+// simply never returning another user's session for this userID.
+func TestRevokeSession_AnotherUsersSessionID_ReturnsErrNotFound(t *testing.T) {
+	otherUsersID := deriveSessionID("belongs-to-someone-else")
+	repo := &fakeRepository{findSessionsForUserSessions: nil}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.RevokeSession(context.Background(), "u1", otherUsersID)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("RevokeSession() for another user's session id error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRevokeSession_InvalidatesTokenCache(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+		findSessionsForUserSessions: []Session{
+			{TokenHash: hashToken("sometoken"), UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("ValidateToken() unexpected error: %v", err)
+	}
+
+	targetID := deriveSessionID(hashToken("sometoken"))
+	if err := svc.RevokeSession(context.Background(), "u1", targetID); err != nil {
+		t.Fatalf("RevokeSession() unexpected error: %v", err)
+	}
+
+	repo.findSessionByHashErr = ErrNotFound
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ValidateToken() after RevokeSession() = %v, want ErrNotFound -- tokenCache entry should have been invalidated", err)
+	}
+}
+
+func TestRevokeSession_RepositoryError_OnFind(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	repo := &fakeRepository{findSessionsForUserErr: repoErr}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.RevokeSession(context.Background(), "u1", "some-id")
+	if !errors.Is(err, repoErr) {
+		t.Errorf("RevokeSession() repository error = %v, want %v", err, repoErr)
+	}
+}
+
+func TestRevokeSession_RepositoryError_OnDelete(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	repo := &fakeRepository{
+		findSessionsForUserSessions: []Session{
+			{TokenHash: "target-hash", UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+		deleteSessionErr: repoErr,
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.RevokeSession(context.Background(), "u1", deriveSessionID("target-hash"))
+	if !errors.Is(err, repoErr) {
+		t.Errorf("RevokeSession() repository error = %v, want %v", err, repoErr)
 	}
 }
 

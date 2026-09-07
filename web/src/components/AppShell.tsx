@@ -14,6 +14,7 @@ export interface AppShellProps {
   userEmail: string | undefined
   onLogout: () => void
   onLogoutAll: () => void
+  onManageSessions: () => void
   children: ReactNode
 }
 
@@ -36,11 +37,30 @@ export interface AppShellProps {
  * it revokes sessions this browser can't see and can't restore, which
  * is exactly the kind of consequence a user should get to read before
  * committing to it.
+ *
+ * "Manage sessions" (issue #224) sits in the same menu rather than as
+ * primary navigation: it is the one authenticated destination besides
+ * the task list, but it is a settings-shaped detour, not a second thing
+ * a visitor comes to this app to do — the same reasoning the header's
+ * own comment above gives for having no destination-switching nav at
+ * all.
  */
-export function AppShell({ userEmail, onLogout, onLogoutAll, children }: AppShellProps) {
+export function AppShell({
+  userEmail,
+  onLogout,
+  onLogoutAll,
+  onManageSessions,
+  children,
+}: AppShellProps) {
   const [confirmingLogoutAll, setConfirmingLogoutAll] = useState(false)
 
   const accountItems: MenuItem[] = [
+    {
+      key: 'sessions',
+      label: 'Manage sessions',
+      icon: <DevicesIcon />,
+      onSelect: onManageSessions,
+    },
     { key: 'logout', label: 'Log out', icon: <SignOutIcon />, onSelect: onLogout },
     {
       key: 'logout-all',
