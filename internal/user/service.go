@@ -14,13 +14,14 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// Password length bounds. minPasswordLen is a baseline strength floor, not
-// a full policy (no character-class rules — see Future Improvements in
-// docs/ARCHITECTURE.md). maxPasswordLen exists because bcrypt itself
-// rejects input over 72 bytes (golang.org/x/crypto/bcrypt.GenerateFromPassword
-// returns an error rather than silently truncating) — bounding it here
-// gives a clear ErrInvalidInput instead of a confusing failure surfacing
-// from inside the hashing call.
+// Password length bounds. minPasswordLen is a baseline strength floor —
+// see validatePassword's doc comment for the checks layered on top of it
+// (common-password and predictable-pattern rejection, issue #218).
+// maxPasswordLen exists because bcrypt itself rejects input over 72 bytes
+// (golang.org/x/crypto/bcrypt.GenerateFromPassword returns an error
+// rather than silently truncating) — bounding it here gives a clear
+// ErrInvalidInput instead of a confusing failure surfacing from inside
+// the hashing call.
 const (
 	minPasswordLen = 8
 	maxPasswordLen = 72
@@ -453,17 +454,44 @@ func validateEmail(email string) (string, error) {
 }
 
 // validatePassword checks password length is within
-// [minPasswordLen, maxPasswordLen]. Measured in bytes, not runes: bcrypt
-// itself operates on the byte representation and rejects input over 72
-// bytes, so byte length is the constraint that actually matters here
-// (unlike task.Service's title/description limits, which are a display
-// concern and correctly measured in runes).
+// [minPasswordLen, maxPasswordLen] and rejects the most predictable
+// passwords a length floor alone lets through (issue #218 — length was
+// the only check here before this, and "12345678"/"password" both
+// satisfied it). Length is measured in bytes, not runes: bcrypt itself
+// operates on the byte representation and rejects input over 72 bytes, so
+// byte length is the constraint that actually matters here (unlike
+// task.Service's title/description limits, which are a display concern
+// and correctly measured in runes).
+//
+// Deliberately no mandatory character-class composition rule (no "must
+// contain a digit AND a symbol"). NIST SP 800-63B recommends against
+// exactly that: it pushes users toward predictable decorations —
+// "Password1!" is the standard example, and it is also the reason
+// commonWeakPasswords includes it explicitly — without meaningfully
+// raising real entropy. Checking against a known-weak set and against
+// trivially generated patterns (isCommonWeakPassword, isSequentialRun,
+// isSingleRepeatedRune) targets what actually makes a password guessable
+// first, instead of what merely makes it *look* complex.
+//
+// What this does not cover, by design (see docs/DECISIONS.md § "Validação
+// de senha forte" for the trade-off and the rejected alternative): a live
+// breach-database check (e.g. Have I Been Pwned's k-anonymity API) would
+// catch real leaked passwords this local, dependency-free list cannot
+// enumerate in advance, at the cost of a network call — and a decision
+// about what happens when that service is unreachable — on every
+// registration and password change.
 func validatePassword(password string) error {
 	if len(password) < minPasswordLen {
 		return fmt.Errorf("%w: password must be at least %d characters", ErrInvalidInput, minPasswordLen)
 	}
 	if len(password) > maxPasswordLen {
 		return fmt.Errorf("%w: password must be at most %d characters", ErrInvalidInput, maxPasswordLen)
+	}
+	if isCommonWeakPassword(password) {
+		return fmt.Errorf("%w: password is too common — choose one that isn't on a list of frequently used passwords", ErrInvalidInput)
+	}
+	if isSingleRepeatedRune(password) || isSequentialRun(password) {
+		return fmt.Errorf("%w: password is too predictable (repeated or sequential characters)", ErrInvalidInput)
 	}
 	return nil
 }
