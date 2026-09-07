@@ -68,6 +68,15 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   falha nele ainda é enviada ao servidor, que continua sendo quem
   decide aceitar ou devolver `400`. Ver `docs/DECISIONS.md` § "Frontend
   (issue #219, 15.B2)".
+- Trilha de auditoria para login, falha de login, `logout-all`, troca
+  de senha e exclusão de conta (issue #223) — evento estruturado
+  (`event_type`, conta, endereço de origem, request ID) via o mesmo
+  `*slog.Logger` de sempre, já espelhado ao coletor OTLP configurado
+  (`CRIER_OTLP_ENDPOINT`) sem sink dedicado nenhum. Nunca registra
+  senha, token de sessão ou hash do token. Endereço de origem passa
+  pelo mesmo `realip`/`TRUSTED_PROXIES` que os tiers de rate limit já
+  usam, via o novo `middleware.RealIP`. Ver `docs/DECISIONS.md` §
+  "Trilha de auditoria".
 
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em

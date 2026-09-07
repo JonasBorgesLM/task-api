@@ -17,6 +17,17 @@ import (
 // request bodies.
 const maxRequestBodyBytes = 1 << 20 // 1 MiB
 
+// Audit event types (issue #223) — see logAuditEvent's doc comment for
+// what each one records and docs/DECISIONS.md § "Trilha de auditoria"
+// for the full reasoning.
+const (
+	auditEventLoginSuccess    = "login_success"
+	auditEventLoginFailure    = "login_failure"
+	auditEventLogoutAll       = "logout_all"
+	auditEventPasswordChanged = "password_changed"
+	auditEventAccountDeleted  = "account_deleted"
+)
+
 // userService is the interface Handler depends on, so it can be tested
 // with a fake — the same pattern as task/handler.go's taskService.
 type userService interface {
@@ -154,11 +165,17 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	normalizedEmail := normalizeEmail(req.Email)
+
 	u, err := h.svc.Authenticate(r.Context(), req.Email, req.Password)
 	if err != nil {
+		if errors.Is(err, ErrInvalidCredentials) {
+			h.logAuditEvent(r, auditEventLoginFailure, normalizedEmail)
+		}
 		h.handleServiceError(w, r, err)
 		return
 	}
+	h.logAuditEvent(r, auditEventLoginSuccess, normalizedEmail)
 
 	// Rotate replaces the CSRF cookie's value, so a token computed
 	// against whatever value it held before this login (e.g. one an
@@ -282,6 +299,7 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 		h.handleServiceError(w, r, err)
 		return
 	}
+	h.logAuditEvent(r, auditEventPasswordChanged, userID)
 
 	h.writeJSON(w, r, http.StatusOK, struct{}{})
 }
@@ -316,6 +334,7 @@ func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
 		h.handleServiceError(w, r, err)
 		return
 	}
+	h.logAuditEvent(r, auditEventLogoutAll, userID)
 
 	clearSessionCookie(w, h.cookieInsecure)
 	w.WriteHeader(http.StatusNoContent)
@@ -437,9 +456,47 @@ func (h *Handler) deleteAccount(w http.ResponseWriter, r *http.Request) {
 		h.handleServiceError(w, r, err)
 		return
 	}
+	h.logAuditEvent(r, auditEventAccountDeleted, userID)
 
 	clearSessionCookie(w, h.cookieInsecure)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// logAuditEvent emits a structured Info-level log line for a security-
+// relevant account event (issue #223) — login, login failure, logout-all,
+// password change, account deletion. This is a deliberate exception to
+// handleServiceError's "routine outcomes aren't logged here" rule right
+// below: that rule is about not duplicating what the access log already
+// records for every request, while this is a distinct, purpose-built
+// trail meant to answer "from where, and when" after an incident —
+// something a generic access log line, keyed by path and status rather
+// than by account, doesn't give a reviewer without cross-referencing.
+//
+// Nothing new is wired to emit it anywhere: this reuses h.logger exactly
+// as every other call site in this file does, so crierTeeHandler (see
+// cmd/api/crier.go) mirrors it to the configured OTLP collector the same
+// way it already mirrors every other log record, with no dedicated audit
+// sink to build or maintain.
+//
+// account identifies who the event is about — the authenticated user ID
+// for logout-all/password-changed/account_deleted (already known from
+// context by then), or the normalized email attempted for
+// login_success/login_failure (Authenticate deliberately never tells its
+// caller which internal case a failure was — see its own doc comment —
+// so the email actually submitted is the only identifier available for a
+// failed attempt, and is used for a successful one too so both event
+// types share one field's meaning instead of two incompatible ones).
+//
+// Never logs a password, a session token, or a token hash — the issue's
+// own explicit never-list.
+func (h *Handler) logAuditEvent(r *http.Request, eventType, account string) {
+	requestID, _ := middleware.RequestIDFromContext(r.Context())
+	h.logger.Info("audit event",
+		"event_type", eventType,
+		"account", account,
+		"source_ip", middleware.RealIPFromContext(r.Context()),
+		"request_id", requestID,
+	)
 }
 
 // handleServiceError maps known domain errors to HTTP status codes,

@@ -1874,3 +1874,70 @@ gap — `verifyPassword` já roda atrás de `RequireAuth`, coberto por
 antes de saber quem é o usuário, não pode ser. Estender a mesma curva a
 `verifyPassword` é um escopo maior que esta issue pedia, não uma
 inconsistência desta decisão.
+
+---
+
+## Trilha de auditoria (issue #223, 15.B6): reaproveita o log existente, sem sink dedicado
+
+Login, falha de login, `logout-all`, troca de senha e exclusão de conta
+não deixavam registro dedicado — depois de um incidente não havia como
+responder "de onde e quando" sem cruzar o log de acesso genérico (que
+identifica por rota e status, não por conta) com o que quer que a
+memória de alguém ainda lembrasse.
+
+**Nenhum sink novo — o `crier` já compilado no binário é o caminho de
+saída, o evento é que faltava.** `cmd/api/crier.go`'s `crierTeeHandler`
+já espelha **todo** `slog.Record` que passa por `h.logger` para o
+coletor OTLP configurado (`CRIER_OTLP_ENDPOINT`), sem que o call site
+precise saber que o `crier` existe. Isso significa que fechar esta issue
+não pedia nenhuma infraestrutura nova — só cinco chamadas de log
+estruturado nos pontos certos, mais um jeito de obter o endereço de
+origem sem duplicar a lógica de resolução que o rate limit já tem.
+
+**`Handler.logAuditEvent`** (`internal/user/handler.go`) emite uma linha
+`Info` com `event_type`, `account`, `source_ip` e `request_id` — nunca
+senha, token de sessão ou hash do token, a lista de "nunca registrar" que
+a própria issue nomeava. Cinco call sites, um por evento pedido:
+`login_success`/`login_failure` (`login`), `logout_all` (`logoutAll`),
+`password_changed` (`changePassword`), `account_deleted`
+(`deleteAccount`). Criação/revogação de link (Bloco A) fica de fora
+porque o Bloco A ainda não foi implementado — quando entrar, ganha seu
+próprio call site nesta mesma função, não uma reabertura desta decisão.
+
+**`account` tem dois significados diferentes, e isso é deliberado, não
+inconsistência.** Para `login_success`/`login_failure` é o e-mail
+normalizado submetido; para os outros três é o ID do usuário autenticado
+(já disponível via `middleware.UserIDFromContext`). A razão é estrutural,
+não estilística: `Service.Authenticate` devolve o mesmo
+`ErrInvalidCredentials` tanto para e-mail desconhecido quanto para senha
+errada — de propósito, ver o próprio doc comment de `Authenticate` — o
+que significa que `Handler` **não tem como saber** qual dos dois casos
+ocorreu nem para uso interno de auditoria. O e-mail submetido (já
+disponível no corpo da requisição, antes de qualquer resolução) é o único
+identificador que os dois casos de falha realmente compartilham; forçar
+`account_id` também para login exigiria mudar a assinatura de
+`Authenticate` para vazar internamente uma distinção que o resto do
+sistema foi construído para nunca vazar — mudança maior, e mais arriscada,
+do que esta issue pedia.
+
+**`middleware.RealIP` (novo) resolve o endereço de origem uma vez por
+requisição e o guarda no contexto**, reaproveitando exatamente a mesma
+função (`addressKeyFunc`, já usada pelos tiers de rate limit por
+endereço) que já passa por `realip`/`TRUSTED_PROXIES` — a mesma
+preocupação que a issue nomeava explicitamente: "um `X-Forwarded-For` cru
+numa trilha de auditoria é pior que nenhuma trilha". Isso garante que a
+trilha de auditoria e o rate limit **nunca podem discordar** sobre qual é
+o endereço de um cliente, porque são literalmente a mesma chamada de
+função — uma segunda implementação de "resolver o endereço real" teria
+sido exatamente o tipo de duplicação que pode silenciosamente divergir.
+`internal/middleware` continua sem conhecimento de domínio: `RealIP` só
+sabe resolver e guardar um endereço, não o que é um "evento de
+auditoria" — quem faz essa ponte é `user.Handler`, o lado que tem
+conhecimento de domínio.
+
+**Por que não em `Service`, e sim em `Handler`.** Um evento de auditoria
+é inerentemente uma preocupação de "o que aconteceu nesta requisição
+HTTP" — precisa do endereço de origem e do request ID, nenhum dos dois
+algo que `Service` deveria conhecer (ver `CLAUDE.md`'s regra de
+camadas). `Service` continua retornando só o que já retornava;
+`Handler` decide, a partir do resultado, se e como logar.
