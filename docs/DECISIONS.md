@@ -2091,3 +2091,163 @@ independentemente da ordem de registro. `TestTaskStats_Handler_RoutedCorrectly`
 prova isso na prática, passando pelo `http.ServeMux` real (não chamando
 o handler diretamente) e confirmando que a rota nunca cai em `getTask`
 tratando `"stats"` como um id.
+
+---
+
+## Exportação CSV de tasks (issues #239-#243, 15.F1-15.F5)
+
+Função nova — não existia CSV nem impressão no projeto antes disso. Cinco
+issues, quatro decisões levadas ao usuário (`JonasBorgesLM`) porque cada
+uma é um trade-off real sem resposta universalmente certa; a quinta
+(rota dedicada vs. negociação de `Accept`) foi decidida diretamente
+durante a implementação, com o raciocínio registrado abaixo.
+
+### Quem gera o CSV (issue #239, 15.F1): servidor
+
+**Alternativa rejeitada: gerar no cliente**, paginando o conjunto
+inteiro em JavaScript. Seriam N requisições sem transação, com risco
+real do conjunto mudar no meio de uma exportação — e o filtro/dono/
+ordenação já resolvidos num só lugar no servidor teriam que ser
+reimplementados no cliente, uma segunda cópia da regra livre para
+divergir da primeira.
+
+**Escolhido: servidor**, via uma rota que reusa a mesma autorização e o
+mesmo filtro que `GET /v1/tasks` já aplica, com o corpo transmitido em
+fluxo (`encoding/csv` escrevendo direto no `ResponseWriter`, nunca
+montando a resposta inteira em memória antes de escrever).
+
+**Trade-off aceito:** o servidor paga o custo de gerar e transmitir o
+arquivo inteiro numa única requisição HTTP, sujeita ao `WriteTimeout` já
+existente — daí a necessidade do teto de linhas (15.F5, abaixo).
+
+### Rota dedicada, não negociação por `Accept` (issue #240, 15.F2)
+
+A issue apresentava duas formas igualmente válidas de expor o mesmo
+recurso: uma rota dedicada (`GET /tasks/export`) ou negociar o formato
+de `GET /tasks` existente via `Accept: text/csv`. Decisão tomada durante
+a implementação, não levada ao usuário, porque o próprio código já
+tinha um precedente direto para copiar: `GET /tasks/stats` (issue #238)
+já resolveu exatamente esta pergunta — "uma rota nova por segmento
+literal, nunca sombreada por `/tasks/{id}`" — para uma necessidade com a
+mesma forma (mais uma visão sobre o mesmo conjunto filtrado).
+
+**Alternativa rejeitada: negociação por `Accept`.** Manteria um único
+caminho de filtro/autorização, mas exigiria ramificar `listTasks` por
+tipo de conteúdo — paginação, `ETag`/`X-Total-Count` e o teto de linhas
+do export não fazem sentido nos dois formatos ao mesmo tempo, então a
+ramificação teria que existir de qualquer forma, só que dentro de um
+único handler em vez de dois. Documentar dois comportamentos tão
+diferentes sob um único `operationId` no OpenAPI também ficaria confuso.
+
+**Escolhido: `GET /tasks/export`**, rota própria, mesmo tratamento de
+`ServeMux` que `/tasks/stats` já usa (segmento literal, nunca sombreado
+por `/tasks/{id}` independente da ordem de registro — confirmado por
+`TestExportTasks_Handler_RoutedCorrectly`, o mesmo padrão de
+`TestTaskStats_Handler_RoutedCorrectly`).
+
+### Neutralizar injeção de fórmula no CSV (issue #241, 15.F3)
+
+Um título ou descrição começando com `=`, `+`, `-`, `@`, tab ou CR é
+interpretado como fórmula pelo Excel/Sheets ao abrir o arquivo — a
+mesma classe (CWE-1236) documentada na issue. A defesa
+(`sanitizeCSVCell`, `internal/task/csv_export.go`) prefixa um apóstrofo
+a qualquer célula que comece com um desses caracteres, exatamente onde
+a issue pedia: na escrita do CSV, nunca perto de
+`validateTitleAndDescription` — dentro da aplicação esses caracteres
+são texto legítimo, e o risco só nasce no momento em que o valor vira
+célula de planilha.
+
+**Achado durante a implementação, não previsto pela issue:**
+`encoding/csv.Writer` com `UseCRLF = true` (obrigatório para RFC 4180,
+ver seção seguinte) **descarta silenciosamente um `\r` isolado dentro de
+um campo** — o pacote assume que qualquer `\r` que aparece ali pertence
+a um par `\r\n` na convenção de quebra de linha do próprio texto de
+origem, não ao terminador de linha do escritor. Confirmado
+empiricamente (não assumido) escrevendo o campo `"'\rcmd"` e inspecionando
+os bytes de saída: o `\r` nunca chega ao arquivo, restando `'cmd`. Na
+prática isso significa que o gatilho CR é neutralizado duas vezes de
+forma independente — pelo apóstrofo de `sanitizeCSVCell` e, mesmo sem
+ele, pelo próprio `encoding/csv` — o que só reforça a defesa, nunca a
+enfraquece. `TestExportTasks_Handler_NeutralizesFormulaInjection`
+documenta esse comportamento explicitamente no caso CR em vez de deixar
+um teste falhando parecer um bug.
+
+**Controle negativo aplicado** (mesmo padrão do resto do projeto):
+removida temporariamente a chamada a `sanitizeCSVCell` em
+`exportTasks`, confirmado que
+`TestExportTasks_Handler_NeutralizesFormulaInjection` falha em todo
+caso com gatilho (e continua passando no caso de texto comum, provando
+que a asserção não estava vazia), restaurada a chamada.
+
+### Formato do arquivo (issue #242, 15.F4)
+
+**RFC 4180:** `csv.Writer.UseCRLF = true` — o padrão do
+`encoding/csv` do Go é `\n` puro, não `\r\n`; precisa ser ligado
+explicitamente. Cabeçalho de colunas fixo (`id, title, description,
+status, priority, created_at, updated_at`) tratado como contrato: uma
+coluna nova entra no fim, nunca no meio.
+
+**Nome e `Content-Disposition`:** montado por `mime.FormatMediaType`,
+nunca à mão — o mesmo padrão que `internal/attachment/handler.go` já
+usa para o download de anexos, pela mesma razão (um nome com aspas ou
+acento não pode quebrar o valor do header). Nome inclui a data e, se
+houver filtro, uma indicação dele (`tasks-2026-09-08-status-pending.csv`)
+— um arquivo baixado mais de uma vez, ou comparado com o de outro dia,
+precisa do próprio escopo legível sem abrir o arquivo.
+
+**BOM UTF-8: incluído — decisão levada ao usuário.** Sem BOM, o Excel
+no Windows interpreta mal o byte de acentuação e corrompe título/
+descrição em português, o conteúdo mais comum deste projeto. Com BOM,
+algumas ferramentas de linha de comando leem os três bytes como parte
+da primeira coluna. **Escolhido incluir o BOM** porque o público
+principal deste export (uma pessoa abrindo o arquivo no Excel para ler
+ou imprimir, não um pipeline automatizado) é exatamente o caso que o
+BOM resolve, e é o caso que a ausência dele quebra de forma visível e
+confusa (acentos virando caracteres ilegíveis) — o custo do BOM para
+quem usa uma ferramenta de linha de comando é, na pior hipótese,
+precisar aparar três bytes conhecidos, um problema bem documentado e
+fácil de contornar.
+
+**Trade-off aceito:** um parser de CSV ingênuo que não trata BOM pode
+ler a primeira coluna do cabeçalho como `"﻿id"` em vez de `"id"`.
+
+### Teto do export (issue #243, 15.F5): 10.000 linhas, `400` antes de transmitir — decisão levada ao usuário
+
+O tier por usuário do `moat/ratelimit` já cobre a frequência de chamadas
+(o export fica atrás de `authenticated`, como toda rota de task) — o que
+faltava era um teto de **linhas**, já que o export por definição devolve
+o conjunto inteiro (nunca janelado por `limit`/`offset`, ao contrário de
+`GET /tasks`) sob o `WriteTimeout` de 10s do servidor.
+
+**Truncar em silêncio foi descartado explicitamente** (a própria issue
+já nomeia isso como "a pior saída possível"): produziria um arquivo que
+parece completo e não é, e quem o imprimir não tem como saber. A
+alternativa adotada é responder honestamente antes de começar: `Service.
+ExportTasks` chama `Repository.CountAll` **antes** de `FindAll`, e
+rejeita com `ErrInvalidInput` (`400`) se o total do filtro passar do
+teto — nada é buscado nem escrito nesse caso
+(`TestExportTasks_RejectsAboveCap` confirma que `FindAll` nunca é
+chamado).
+
+**Por que 10.000 e não outro número:** confortável dentro do
+`WriteTimeout` de 10s mesmo numa conexão lenta — cada linha do CSV tem
+algumas centenas de bytes, então mesmo 10k linhas ficam na casa de
+poucos MB, ordens de magnitude abaixo do que um upload lento
+conseguiria saturar em 10s — e bem acima do uso esperado de um
+gerenciador de tasks pessoal (o mesmo raciocínio de escala já usado em
+`docs/DECISIONS.md` § "Índices para status/priority", issue #236: uma
+conta com dezenas de milhares de tasks não é uma forma de uso que este
+produto tem qualquer indício de precisar suportar hoje).
+
+**Mapeamento de erro:** `ErrInvalidInput`, não um sentinel novo — mesmo
+padrão já usado por `attachment.Service.Upload` para o limite de
+tamanho de upload (`ErrTooLarge` da store vira `ErrInvalidInput` no
+Service): "o pedido como está não pode ser atendido, mude o filtro" é
+uma instância do mesmo `400` que qualquer outro filtro inválido já usa,
+não um código novo (`docs/openapi.yaml`'s "Status codes this API has
+already settled" não precisou de uma linha nova).
+
+**Quando revisitar:** se o teto passar a ser atingido com frequência
+real, a resposta certa é um export assíncrono (gerado em background,
+baixado depois pronto) — issue nova, não um remendo neste teto, como a
+própria 15.F5 já nomeia.

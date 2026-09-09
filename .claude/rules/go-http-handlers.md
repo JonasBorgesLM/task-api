@@ -65,6 +65,21 @@ description: 'HTTP layer conventions: ServeMux only, /v1 mount, bounded bodies, 
   in it (see `docs/DECISIONS.md`).
 - `userID` comes from `middleware.UserIDFromContext` and nowhere else — never
   from a body field, a query parameter or a path segment.
+- `GET /tasks/export` (`internal/task/csv_export.go`) checks the filtered
+  total via `Repository.CountAll` **before** calling `FindAll` or writing
+  anything, rejecting with `ErrInvalidInput` (`400`) if it exceeds
+  `maxExportRows`. Never move that check after streaming has started —
+  a response that begins streaming and then cuts off mid-file looks
+  complete to whoever opens it and isn't. Any new export/report route
+  built on the same filtered-fetch pattern must check its own cap the
+  same way, before the first byte of the body is written.
+- Any cell written into a CSV export must go through `sanitizeCSVCell`
+  first. A title/description that opens with `=`, `+`, `-`, `@`, tab, or
+  CR is how CWE-1236 (formula injection) reaches Excel/Sheets — this is
+  a property of the moment a value becomes a spreadsheet cell, never of
+  input validation, so don't try to "fix" this in
+  `validateTitleAndDescription` instead. See `docs/DECISIONS.md` §
+  "Exportação CSV de tasks".
 
 ## Middleware order (`cmd/api/newServer`)
 

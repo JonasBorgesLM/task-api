@@ -242,6 +242,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tasks/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export the authenticated caller's tasks as CSV
+         * @description Streams every one of the caller's tasks matching the `status`/`priority` filter as RFC 4180 CSV, in the same order `GET /v1/tasks` itself uses (`created_at` ascending, ties broken by `id`) — never windowed by `limit`/`offset`, since an export exists specifically to return the entire filtered set. Rejects with `400` up front, before anything is fetched or streamed, if the filtered total exceeds the server's export row limit (see `docs/DECISIONS.md` § "Teto do export CSV") — an export that started streaming and then cut off partway through would produce a file that looks complete and isn't. Any leading `=`, `+`, `-`, `@`, tab or carriage return in a `title`/`description` cell is prefixed with a single quote to prevent the file from being interpreted as containing spreadsheet formulas when opened (CWE-1236).
+         */
+        get: operations["exportTasks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/tasks/{id}": {
         parameters: {
             query?: never;
@@ -1566,6 +1586,63 @@ export interface operations {
                      *       "error": "invalid input: status must be one of pending, in_progress, done, cancelled"
                      *     }
                      */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    exportTasks: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Only export tasks with this status. Follows the exact same repetition/OR-within, AND-across-fields rules as `GET /v1/tasks`'s `status` parameter, validated identically.
+                 * @example [
+                 *       "pending",
+                 *       "in_progress"
+                 *     ]
+                 */
+                status?: components["schemas"]["Status"][];
+                /**
+                 * @description Only export tasks with this priority. Follows the exact same rules as `GET /v1/tasks`'s `priority` parameter.
+                 * @example [
+                 *       "high",
+                 *       "medium"
+                 *     ]
+                 */
+                priority?: components["schemas"]["Priority"][];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. The body is UTF-8 text prefixed with a BOM (see `docs/DECISIONS.md` § "BOM UTF-8 no export CSV"), CRLF line terminators, and a header row followed by one row per matching task — `id, title, description, status, priority, created_at, updated_at`, in that column order. A caller with no matching tasks still receives the header row alone, never an empty body. */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    /**
+                     * @description `attachment; filename="tasks-<date>[-status-<...>] [-priority-<...>].csv"`, encoded via RFC 2183 (`mime.FormatMediaType`), the same helper `GET /v1/files/{key}` uses for its own downloads.
+                     * @example attachment; filename="tasks-2026-09-08.csv"
+                     */
+                    "Content-Disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            /** @description `status`/`priority` is present but not one of the values in their respective enum (the same rejection `GET /v1/tasks` applies to the identical parameters), or the current filter matches more tasks than the export row limit allows. */
+            400: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };

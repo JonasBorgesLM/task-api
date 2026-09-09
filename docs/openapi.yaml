@@ -1019,6 +1019,111 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /v1/tasks/export:
+    get:
+      tags: [Tasks]
+      operationId: exportTasks
+      summary: Export the authenticated caller's tasks as CSV
+      description: >
+        Streams every one of the caller's tasks matching the
+        `status`/`priority` filter as RFC 4180 CSV, in the same order
+        `GET /v1/tasks` itself uses (`created_at` ascending, ties broken
+        by `id`) — never windowed by `limit`/`offset`, since an export
+        exists specifically to return the entire filtered set. Rejects
+        with `400` up front, before anything is fetched or streamed, if
+        the filtered total exceeds the server's export row limit (see
+        `docs/DECISIONS.md` § "Teto do export CSV") — an export that
+        started streaming and then cut off partway through would
+        produce a file that looks complete and isn't. Any leading `=`,
+        `+`, `-`, `@`, tab or carriage return in a `title`/`description`
+        cell is prefixed with a single quote to prevent the file from
+        being interpreted as containing spreadsheet formulas when
+        opened (CWE-1236).
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >
+            Only export tasks with this status. Follows the exact same
+            repetition/OR-within, AND-across-fields rules as `GET
+            /v1/tasks`'s `status` parameter, validated identically.
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/Status'
+          style: form
+          explode: true
+          example: [pending, in_progress]
+        - name: priority
+          in: query
+          required: false
+          description: >
+            Only export tasks with this priority. Follows the exact
+            same rules as `GET /v1/tasks`'s `priority` parameter.
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/Priority'
+          style: form
+          explode: true
+          example: [high, medium]
+      responses:
+        '200':
+          description: >
+            Success. The body is UTF-8 text prefixed with a BOM (see
+            `docs/DECISIONS.md` § "BOM UTF-8 no export CSV"), CRLF line
+            terminators, and a header row followed by one row per
+            matching task — `id, title, description, status, priority,
+            created_at, updated_at`, in that column order. A caller with
+            no matching tasks still receives the header row alone, never
+            an empty body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+            Content-Disposition:
+              description: >
+                `attachment; filename="tasks-<date>[-status-<...>]
+                [-priority-<...>].csv"`, encoded via RFC 2183
+                (`mime.FormatMediaType`), the same helper
+                `GET /v1/files/{key}` uses for its own downloads.
+              schema:
+                type: string
+              example: 'attachment; filename="tasks-2026-09-08.csv"'
+          content:
+            text/csv:
+              schema:
+                type: string
+        '400':
+          description: >
+            `status`/`priority` is present but not one of the values in
+            their respective enum (the same rejection `GET /v1/tasks`
+            applies to the identical parameters), or the current filter
+            matches more tasks than the export row limit allows.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalidStatusFilter:
+                  summary: status not a known value
+                  value:
+                    error: "invalid input: status must be one of pending, in_progress, done, cancelled"
+                tooManyRows:
+                  summary: filter matches more tasks than the export allows
+                  value:
+                    error: "invalid input: 12000 tasks match this filter, more than the 10000-row export limit; narrow the filter"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /v1/tasks/{id}:
     get:
       tags: [Tasks]

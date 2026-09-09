@@ -44,6 +44,7 @@ type taskService interface {
 	CompleteTask(ctx context.Context, userID, id string) (Task, error)
 	TransitionStatus(ctx context.Context, userID, id string, target Status) (Task, error)
 	TaskStats(ctx context.Context, userID string, statuses, priorities []string) (TaskStats, error)
+	ExportTasks(ctx context.Context, userID string, statuses, priorities []string) ([]Task, error)
 }
 
 // Handler exposes the task Service over HTTP.
@@ -75,6 +76,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth middleware.Midd
 	// this through the real mux rather than trusting the rule by
 	// reading it.
 	mux.Handle("GET /tasks/stats", protect(h.taskStats))
+	// /tasks/export is the same literal-over-wildcard case as /tasks/stats
+	// above — never shadowed by GET /tasks/{id} regardless of order.
+	mux.Handle("GET /tasks/export", protect(h.exportTasks))
 	mux.Handle("GET /tasks/{id}", protect(h.getTask))
 	mux.Handle("PUT /tasks/{id}", protect(h.updateTask))
 	mux.Handle("PATCH /tasks/{id}/done", protect(h.completeTask))

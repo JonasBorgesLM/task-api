@@ -269,6 +269,55 @@ func (s *Service) TaskStats(ctx context.Context, userID string, statuses, priori
 	return TaskStats{Total: total, ByStatus: byStatus, ByPriority: byPriority}, nil
 }
 
+// maxExportRows bounds how many tasks a single CSV export (issue #240,
+// GET /tasks/export) may return. Unlike maxTaskListLimit, this is not a
+// page size — an export exists specifically to return the caller's
+// *entire* filtered set, so there is no smaller page to ask for instead.
+// The cap exists because the response is streamed under the server's
+// ordinary WriteTimeout: a caller whose filter matches more rows than
+// can be written out honestly in that time gets rejected up front with
+// ErrInvalidInput, rather than receiving a response that starts
+// streaming and then cuts off mid-file, which produces a file that
+// looks complete and isn't. See docs/DECISIONS.md § "Teto do export
+// CSV" for the measurement behind this specific number.
+const maxExportRows = 10_000
+
+// ExportTasks returns every one of userID's tasks matching the
+// status/priority filter, for CSV export (issue #240) — never windowed
+// by limit/offset, unlike ListTasks. Validates and de-duplicates
+// statuses/priorities identically to ListTasks/TaskStats, so the three
+// operations can never disagree on what a given filter means.
+//
+// The total is checked against maxExportRows via Repository.CountAll
+// *before* FindAll is ever called — rejecting an over-limit request up
+// front, with nothing fetched or written, rather than letting Handler
+// discover the problem mid-stream after bytes have already reached the
+// client.
+func (s *Service) ExportTasks(ctx context.Context, userID string, statuses, priorities []string) ([]Task, error) {
+	st, err := validateStatusFilters(statuses)
+	if err != nil {
+		return nil, err
+	}
+	p, err := validatePriorityFilters(priorities)
+	if err != nil {
+		return nil, err
+	}
+
+	total, err := s.repo.CountAll(ctx, userID, st, p)
+	if err != nil {
+		return nil, fmt.Errorf("export tasks: count: %w", err)
+	}
+	if total > maxExportRows {
+		return nil, fmt.Errorf("%w: %d tasks match this filter, more than the %d-row export limit; narrow the filter", ErrInvalidInput, total, maxExportRows)
+	}
+
+	tasks, err := s.repo.FindAll(ctx, userID, -1, 0, st, p)
+	if err != nil {
+		return nil, fmt.Errorf("export tasks: %w", err)
+	}
+	return tasks, nil
+}
+
 // UpdateTask updates the title, description and (optionally) priority of
 // an existing Task owned by userID. CreatedAt and Status are never
 // modified here — see TransitionStatus for status changes. UpdatedAt is
