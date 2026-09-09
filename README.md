@@ -240,6 +240,7 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `POST` | `/v1/tasks` | required | Create a task |
 | `GET` | `/v1/tasks` | required | List the caller's tasks, oldest first (`?limit=`, `?offset=`, `?status=`, `?priority=`; `status`/`priority` may repeat, e.g. `?status=pending&status=done`, matching any of the given values); response carries an `X-Total-Count` header — the total matching the filter, independent of `limit`/`offset` |
 | `GET` | `/v1/tasks/stats` | required | Count the caller's tasks by status and by priority, across the whole filtered set (same `?status=`/`?priority=` as above) |
+| `GET` | `/v1/tasks/export` | required | Export the caller's whole filtered task set as RFC 4180 CSV (same `?status=`/`?priority=`; capped at 10,000 rows, rejected with `400` above that) |
 | `GET` | `/v1/tasks/{id}` | required | Get a task by ID |
 | `PUT` | `/v1/tasks/{id}` | required | Update title/description/priority |
 | `PATCH` | `/v1/tasks/{id}/status` | required | Move a task to a new status (`pending`/`in_progress`/`done`/`cancelled`) |

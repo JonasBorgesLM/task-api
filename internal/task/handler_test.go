@@ -23,6 +23,7 @@ type fakeService struct {
 	getTaskFn          func(userID, id string) (Task, error)
 	listTasksFn        func(userID string, limit, offset int, statuses, priorities []string) ([]Task, int, error)
 	taskStatsFn        func(userID string, statuses, priorities []string) (TaskStats, error)
+	exportTasksFn      func(userID string, statuses, priorities []string) ([]Task, error)
 	updateTaskFn       func(userID, id, title, description, priority string) (Task, error)
 	deleteTaskFn       func(userID, id string) error
 	completeTaskFn     func(userID, id string) (Task, error)
@@ -100,6 +101,13 @@ func (f *fakeService) TaskStats(_ context.Context, userID string, statuses, prio
 		return f.taskStatsFn(userID, statuses, priorities)
 	}
 	return TaskStats{}, nil
+}
+
+func (f *fakeService) ExportTasks(_ context.Context, userID string, statuses, priorities []string) ([]Task, error) {
+	if f.exportTasksFn != nil {
+		return f.exportTasksFn(userID, statuses, priorities)
+	}
+	return []Task{}, nil
 }
 
 // sampleTask returns a Task with predictable values for use in handler tests.

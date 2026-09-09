@@ -510,6 +510,125 @@ func TestTaskStats_RepositoryError(t *testing.T) {
 	}
 }
 
+// TestExportTasks_Delegates verifies ExportTasks returns Repository's
+// full result — a CSV export exists specifically to return the entire
+// matching set, so unlike ListTasks it never windows the result.
+func TestExportTasks_Delegates(t *testing.T) {
+	want := []Task{newFakeTask(StatusPending), newFakeTask(StatusDone)}
+	repo := &fakeRepository{findAllTasks: want, countAllResult: 2}
+	svc := NewService(repo)
+
+	got, err := svc.ExportTasks(context.Background(), testUserID, nil, nil)
+	if err != nil {
+		t.Fatalf("ExportTasks() unexpected error: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ExportTasks() returned %d tasks, want %d", len(got), len(want))
+	}
+}
+
+// TestExportTasks_FetchesWithNoLimit pins that ExportTasks passes -1
+// (no limit) and offset 0 to Repository.FindAll — an export by
+// definition returns the whole filtered set, never a windowed page.
+func TestExportTasks_FetchesWithNoLimit(t *testing.T) {
+	repo := &fakeRepository{countAllResult: 0}
+	svc := NewService(repo)
+
+	if _, err := svc.ExportTasks(context.Background(), testUserID, nil, nil); err != nil {
+		t.Fatalf("ExportTasks() unexpected error: %v", err)
+	}
+
+	want := [5]any{testUserID, -1, 0, "", ""}
+	if repo.findAllCalledWith != want {
+		t.Errorf("ExportTasks() called Repository.FindAll with %v, want %v", repo.findAllCalledWith, want)
+	}
+}
+
+// TestExportTasks_PassesValidatedDedupedFiltersToRepository pins that
+// both CountAll and FindAll receive the exact same validated/deduped
+// filters — the cap check and the actual fetch must agree on what
+// "matches the filter" means, or a request could be rejected (or
+// allowed) based on a count of a different set than what gets fetched.
+func TestExportTasks_PassesValidatedDedupedFiltersToRepository(t *testing.T) {
+	repo := &fakeRepository{countAllResult: 0}
+	svc := NewService(repo)
+
+	if _, err := svc.ExportTasks(context.Background(), testUserID, []string{"pending", "pending", "done"}, []string{"high"}); err != nil {
+		t.Fatalf("ExportTasks() unexpected error: %v", err)
+	}
+
+	wantCountAll := [3]any{testUserID, "pending,done", "high"}
+	if repo.countAllCalledWith != wantCountAll {
+		t.Errorf("ExportTasks() called Repository.CountAll with %v, want %v", repo.countAllCalledWith, wantCountAll)
+	}
+	wantFindAll := [5]any{testUserID, -1, 0, "pending,done", "high"}
+	if repo.findAllCalledWith != wantFindAll {
+		t.Errorf("ExportTasks() called Repository.FindAll with %v, want %v", repo.findAllCalledWith, wantFindAll)
+	}
+}
+
+// TestExportTasks_AtCapIsAllowed pins the boundary: a filtered total
+// exactly equal to maxExportRows is still exported in full, not
+// rejected — the limit is "more than maxExportRows", not "maxExportRows
+// or more".
+func TestExportTasks_AtCapIsAllowed(t *testing.T) {
+	repo := &fakeRepository{countAllResult: maxExportRows}
+	svc := NewService(repo)
+
+	if _, err := svc.ExportTasks(context.Background(), testUserID, nil, nil); err != nil {
+		t.Errorf("ExportTasks() at exactly maxExportRows unexpected error: %v", err)
+	}
+}
+
+// TestExportTasks_RejectsAboveCap pins issue #243 (15.F5): a filtered
+// total over maxExportRows is rejected with ErrInvalidInput before
+// Repository.FindAll is ever called — never a response that starts
+// streaming and gets cut off partway through by the server's
+// WriteTimeout, which would produce a file that looks complete and
+// isn't.
+func TestExportTasks_RejectsAboveCap(t *testing.T) {
+	repo := &fakeRepository{countAllResult: maxExportRows + 1}
+	svc := NewService(repo)
+
+	_, err := svc.ExportTasks(context.Background(), testUserID, nil, nil)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("ExportTasks() over cap error = %v, want ErrInvalidInput", err)
+	}
+	if repo.findAllCalledWith != ([5]any{}) {
+		t.Error("ExportTasks() over cap called Repository.FindAll — it must reject before fetching anything")
+	}
+}
+
+func TestExportTasks_UnknownStatusFilterIsInvalidInput(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	_, err := svc.ExportTasks(context.Background(), testUserID, []string{"archived"}, nil)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("ExportTasks() error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestExportTasks_CountAllError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	svc := NewService(&fakeRepository{countAllErr: repoErr})
+
+	_, err := svc.ExportTasks(context.Background(), testUserID, nil, nil)
+	if !errors.Is(err, repoErr) {
+		t.Errorf("ExportTasks() error = %v, want %v", err, repoErr)
+	}
+}
+
+func TestExportTasks_FindAllError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	svc := NewService(&fakeRepository{countAllResult: 1, findAllErr: repoErr})
+
+	_, err := svc.ExportTasks(context.Background(), testUserID, nil, nil)
+	if !errors.Is(err, repoErr) {
+		t.Errorf("ExportTasks() error = %v, want %v", err, repoErr)
+	}
+}
+
 // TestListTasks_UnknownStatusFilterIsInvalidInput verifies that an
 // unrecognized status filter is rejected before Repository is ever
 // reached — Repository.FindAll must never see a value it doesn't know

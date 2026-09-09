@@ -98,6 +98,16 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   prioridade sobre todo o conjunto filtrado do chamador, não só a página;
   `by_status`/`by_priority` sempre incluem toda chave do enum, mesmo em
   `0`. Ver `docs/DECISIONS.md` § "Total real na listagem".
+- Nova rota `GET /v1/tasks/export` (issues #239-#243) — exporta o
+  conjunto filtrado inteiro do chamador (mesmo `status`/`priority` de
+  `GET /v1/tasks`, nunca janelado por `limit`/`offset`) como CSV RFC
+  4180, transmitido em fluxo. Título/descrição que começam com `=`, `+`,
+  `-`, `@`, tab ou CR ganham um apóstrofo à frente, para o arquivo nunca
+  ser lido como contendo fórmulas ao abrir no Excel/Sheets (CWE-1236).
+  Um filtro que casa mais de 10.000 tasks é recusado com `400` antes de
+  qualquer linha ser transmitida, em vez de um arquivo que corta no meio
+  e parece completo. Ver `docs/DECISIONS.md` § "Exportação CSV de
+  tasks".
 
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em
