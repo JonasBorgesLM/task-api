@@ -299,7 +299,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// order for this one cascade path.
 	deleteAccountCascade := func(ctx context.Context, userID string) error {
 		const noLimit = -1
-		tasks, err := taskSvc.ListTasks(ctx, userID, noLimit, 0, nil, nil)
+		tasks, _, err := taskSvc.ListTasks(ctx, userID, noLimit, 0, nil, nil)
 		if err != nil {
 			return fmt.Errorf("delete account cascade: list tasks: %w", err)
 		}

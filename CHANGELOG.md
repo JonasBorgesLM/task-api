@@ -88,6 +88,16 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   não pertence a quem pergunta. `web/` ganha a tela correspondente
   ("Manage sessions" no menu de conta). Ver `docs/DECISIONS.md` § "Tela
   de sessões ativas".
+- `GET /v1/tasks` responde o header `X-Total-Count` (issue #237) — o
+  total de tasks que casam com o filtro `status`/`priority`, independente
+  de `limit`/`offset`. Aditivo — quem já lê só o array do corpo não
+  percebe diferença. Calculado por `COUNT(*)` no próprio banco (nunca uma
+  segunda leitura da tabela inteira em Go) e presente tanto num `200`
+  quanto num `304`, para nunca servir um total desatualizado. Nova rota
+  `GET /v1/tasks/stats` (issue #238) — contagem por status e por
+  prioridade sobre todo o conjunto filtrado do chamador, não só a página;
+  `by_status`/`by_priority` sempre incluem toda chave do enum, mesmo em
+  `0`. Ver `docs/DECISIONS.md` § "Total real na listagem".
 
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em

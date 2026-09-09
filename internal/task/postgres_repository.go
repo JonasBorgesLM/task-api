@@ -125,11 +125,14 @@ func (r *postgresRepository) FindByID(ctx context.Context, id, userID string) (T
 // were never sent, and a filter still benefits from
 // idx_tasks_user_id_created_at_id rather than forcing a different plan.
 func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, offset int, statuses []Status, priorities []Priority) ([]Task, error) {
+	whereClause, args := buildTaskFilterWhere(userID, statuses, priorities)
+	// #nosec G202 -- whereClause is fixed clause text plus placeholder
+	// numbers only (see buildTaskFilterWhere); every value reaching
+	// Postgres travels through args as a bound parameter.
 	query := `
 		SELECT id::text, user_id::text, title, description, status, priority, created_at, updated_at, version
 		FROM tasks
-		WHERE user_id = $1::uuid
-	`
+	` + whereClause
 
 	// limit < 0 ("no limit") must reach the query as SQL NULL, not as a
 	// negative number — PostgreSQL's LIMIT rejects a negative value.
@@ -137,47 +140,15 @@ func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, 
 	if limit >= 0 {
 		limitArg = limit
 	}
-	args := []any{userID}
-
-	// One placeholder per value rather than a driver-encoded array: an
-	// IN list of ordinary parameters is still a single indexed lookup
-	// here, and it keeps this query free of any dependency on how the
-	// driver happens to marshal a Go slice into a Postgres array. The
-	// lists are bounded by the enums themselves — Service validates and
-	// de-duplicates before this is reached — so the clause can never
-	// grow past four (status) or three (priority) placeholders.
-	appendInClause := func(column string, values []string) {
-		if len(values) == 0 {
-			return
-		}
-		placeholders := make([]string, len(values))
-		for i, v := range values {
-			args = append(args, v)
-			placeholders[i] = fmt.Sprintf("$%d", len(args))
-		}
-		query += fmt.Sprintf(" AND %s IN (%s)", column, strings.Join(placeholders, ", "))
-	}
-
-	statusValues := make([]string, len(statuses))
-	for i, s := range statuses {
-		statusValues[i] = string(s)
-	}
-	priorityValues := make([]string, len(priorities))
-	for i, p := range priorities {
-		priorityValues[i] = string(p)
-	}
-	appendInClause("status", statusValues)
-	appendInClause("priority", priorityValues)
-
 	args = append(args, limitArg, offset)
 	// #nosec G202 -- every %d here is a placeholder *number* ($3, $4, ...),
 	// never a value; the values themselves travel through args, bound below.
 	query += fmt.Sprintf(" ORDER BY created_at, id LIMIT $%d::bigint OFFSET $%d::bigint", len(args)-1, len(args))
 
 	// #nosec G701 -- query is built from fixed clause text and generated
-	// placeholder numbers only (see appendInClause and the Sprintf above);
-	// every value reaching Postgres travels through args as a bound
-	// parameter, never interpolated into the query string.
+	// placeholder numbers only (see buildTaskFilterWhere and the Sprintf
+	// above); every value reaching Postgres travels through args as a
+	// bound parameter, never interpolated into the query string.
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: find all tasks: %w", err)
@@ -197,6 +168,145 @@ func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, 
 	}
 
 	return tasks, nil
+}
+
+// buildTaskFilterWhere returns the WHERE clause — starting from
+// "WHERE user_id = $1::uuid" — and its bound args for the
+// userID/statuses/priorities filter FindAll, CountAll and
+// CountByStatusAndPriority all apply identically. Shared rather than
+// duplicated four times over so the four queries can never quietly
+// drift apart on what "matching the filter" means.
+//
+// One placeholder per value rather than a driver-encoded array: an IN
+// list of ordinary parameters is still a single indexed lookup here,
+// and it keeps every caller free of any dependency on how the driver
+// happens to marshal a Go slice into a Postgres array. The lists are
+// bounded by the enums themselves — Service validates and de-duplicates
+// before this is reached — so the clause can never grow past four
+// (status) or three (priority) placeholders.
+func buildTaskFilterWhere(userID string, statuses []Status, priorities []Priority) (whereClause string, args []any) {
+	whereClause = "WHERE user_id = $1::uuid"
+	args = []any{userID}
+
+	appendInClause := func(column string, values []string) {
+		if len(values) == 0 {
+			return
+		}
+		placeholders := make([]string, len(values))
+		for i, v := range values {
+			args = append(args, v)
+			placeholders[i] = fmt.Sprintf("$%d", len(args))
+		}
+		// #nosec G202 -- every %d here is a placeholder *number*, never a
+		// value; the values themselves travel through args, bound by the
+		// caller.
+		whereClause += fmt.Sprintf(" AND %s IN (%s)", column, strings.Join(placeholders, ", "))
+	}
+
+	statusValues := make([]string, len(statuses))
+	for i, s := range statuses {
+		statusValues[i] = string(s)
+	}
+	priorityValues := make([]string, len(priorities))
+	for i, p := range priorities {
+		priorityValues[i] = string(p)
+	}
+	appendInClause("status", statusValues)
+	appendInClause("priority", priorityValues)
+
+	return whereClause, args
+}
+
+// CountAll returns how many tasks match userID/statuses/priorities —
+// the same filter FindAll applies, without the limit/offset window.
+// Backs GET /v1/tasks' X-Total-Count header (issue #237). A COUNT(*)
+// with this WHERE clause was measured (see docs/DECISIONS.md § "Total
+// real na listagem") at 1-3ms against a realistic-heavy volume and
+// ~28ms against a deliberately extreme one — cheap enough to compute on
+// every listing request rather than gating it behind an opt-in
+// parameter.
+func (r *postgresRepository) CountAll(ctx context.Context, userID string, statuses []Status, priorities []Priority) (int, error) {
+	whereClause, args := buildTaskFilterWhere(userID, statuses, priorities)
+	// #nosec G202 -- whereClause is fixed clause text plus placeholder
+	// numbers only (see buildTaskFilterWhere); every value reaching
+	// Postgres travels through args as a bound parameter.
+	query := `SELECT COUNT(*) FROM tasks ` + whereClause
+
+	var count int
+	if err := r.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("postgres: count tasks: %w", err)
+	}
+	return count, nil
+}
+
+// CountByStatusAndPriority returns, for userID's tasks matching
+// statuses/priorities, a count grouped by status and a separate count
+// grouped by priority — GET /v1/tasks/stats (issue #238). Computed as
+// two GROUP BY queries in SQL, never by fetching rows to count in Go
+// (the same rule FindAll's pagination already follows). Every status
+// and every priority value is present in its map even at zero — GROUP
+// BY only returns groups that exist, and a caller should not have to
+// tell "zero tasks" apart from "this key is simply absent" (map
+// zero-values happen to read as absent to Go, but Handler still has to
+// serialize them — always including the key means the JSON response
+// itself is unambiguous, not just the Go value).
+func (r *postgresRepository) CountByStatusAndPriority(ctx context.Context, userID string, statuses []Status, priorities []Priority) (byStatus map[Status]int, byPriority map[Priority]int, err error) {
+	whereClause, args := buildTaskFilterWhere(userID, statuses, priorities)
+
+	byStatus = map[Status]int{
+		StatusPending:    0,
+		StatusInProgress: 0,
+		StatusDone:       0,
+		StatusCancelled:  0,
+	}
+	// #nosec G202 -- whereClause is fixed clause text plus placeholder
+	// numbers only (see buildTaskFilterWhere); every value reaching
+	// Postgres travels through args as a bound parameter.
+	statusRows, err := r.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM tasks `+whereClause+` GROUP BY status`, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("postgres: count tasks by status: %w", err)
+	}
+	for statusRows.Next() {
+		var status string
+		var count int
+		if err := statusRows.Scan(&status, &count); err != nil {
+			statusRows.Close()
+			return nil, nil, fmt.Errorf("postgres: count tasks by status: scan: %w", err)
+		}
+		byStatus[Status(status)] = count
+	}
+	statusErr := statusRows.Err()
+	statusRows.Close()
+	if statusErr != nil {
+		return nil, nil, fmt.Errorf("postgres: count tasks by status: %w", statusErr)
+	}
+
+	byPriority = map[Priority]int{
+		PriorityLow:    0,
+		PriorityMedium: 0,
+		PriorityHigh:   0,
+	}
+	// #nosec G202 -- whereClause is fixed clause text plus placeholder
+	// numbers only (see buildTaskFilterWhere); every value reaching
+	// Postgres travels through args as a bound parameter.
+	priorityRows, err := r.db.QueryContext(ctx, `SELECT priority, COUNT(*) FROM tasks `+whereClause+` GROUP BY priority`, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("postgres: count tasks by priority: %w", err)
+	}
+	defer priorityRows.Close()
+	for priorityRows.Next() {
+		var priority string
+		var count int
+		if err := priorityRows.Scan(&priority, &count); err != nil {
+			return nil, nil, fmt.Errorf("postgres: count tasks by priority: scan: %w", err)
+		}
+		byPriority[Priority(priority)] = count
+	}
+	if err := priorityRows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("postgres: count tasks by priority: %w", err)
+	}
+
+	return byStatus, byPriority, nil
 }
 
 // Update replaces an existing task. Returns ErrNotFound if the ID does
