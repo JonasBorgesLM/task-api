@@ -100,6 +100,22 @@ type Repository interface {
 	// "nothing to sum".
 	TotalBytesForUser(ctx context.Context, userID string) (int64, error)
 
+	// CountByTask counts the attachments on taskID, scoped to userID —
+	// the same quantity Service.Upload checks against
+	// maxAttachmentsPerTask. A dedicated count rather than
+	// len(FindByTask(...)) for the same reason TotalBytesForUser is its
+	// own method and not a sum over FindByTask's result: the caller
+	// needs a number, not the rows behind it, and PostgreSQL can answer
+	// COUNT(*) without materializing them.
+	//
+	// Returns 0, nil when taskID does not name a task userID owns —
+	// never ErrTaskNotFound. Service.Upload runs this quota check before
+	// Create's own ownership check (see Upload's ordering), the same way
+	// TotalBytesForUser needs no ownership error of its own; a caller
+	// asking about a task that is not theirs learns that from Create,
+	// not from a quota check that ran first.
+	CountByTask(ctx context.Context, taskID, userID string) (int, error)
+
 	// UnreferencedKeys returns those of the given storage keys that no
 	// attachment row references.
 	//

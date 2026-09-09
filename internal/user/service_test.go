@@ -38,8 +38,9 @@ type fakeRepository struct {
 	savedSession            Session
 	createSessionCalledWith int // maxSessions passed to CreateSession
 
-	findSessionByHashSession Session
-	findSessionByHashErr     error
+	findSessionByHashSession   Session
+	findSessionByHashErr       error
+	findSessionByHashCallCount int
 
 	deleteSessionErr error
 	deletedTokenHash string
@@ -55,6 +56,10 @@ type fakeRepository struct {
 
 	deleteExpiredSessionsErr        error
 	deleteExpiredSessionsCalledWith time.Time
+
+	findSessionsForUserSessions   []Session
+	findSessionsForUserErr        error
+	findSessionsForUserCalledWith string
 }
 
 func (f *fakeRepository) CreateUser(_ context.Context, u User) error {
@@ -100,6 +105,7 @@ func (f *fakeRepository) DeleteSessionsForUserExcept(_ context.Context, userID, 
 }
 
 func (f *fakeRepository) FindSessionByTokenHash(_ context.Context, _ string) (Session, error) {
+	f.findSessionByHashCallCount++
 	return f.findSessionByHashSession, f.findSessionByHashErr
 }
 
@@ -113,6 +119,11 @@ func (f *fakeRepository) DeleteExpiredSessions(_ context.Context, now time.Time)
 	return f.deleteExpiredSessionsErr
 }
 
+func (f *fakeRepository) FindSessionsForUser(_ context.Context, userID string) ([]Session, error) {
+	f.findSessionsForUserCalledWith = userID
+	return f.findSessionsForUserSessions, f.findSessionsForUserErr
+}
+
 const testSessionTTL = time.Hour
 
 // mustHash returns the bcrypt hash of password, failing the test on error.
@@ -123,6 +134,19 @@ func mustHash(t *testing.T, password string) string {
 		t.Fatalf("bcrypt.GenerateFromPassword: %v", err)
 	}
 	return string(hash)
+}
+
+// freezeTokenCache pins svc's tokenCache clock to a single instant, so a
+// test asserting a cache hit/miss depends only on the invalidation logic
+// under test, never on how much real wall-clock time a slow step (bcrypt,
+// especially under -race on a loaded CI runner) happened to consume
+// relative to tokenCacheTTL. Without this, TestChangePassword_* — which
+// calls bcrypt twice — was observed taking long enough in CI for the
+// cache entry it asserts on to expire for real, failing for the wrong
+// reason.
+func freezeTokenCache(svc *Service) {
+	frozen := time.Now()
+	svc.tokenCache.now = func() time.Time { return frozen }
 }
 
 // --- Register ---
@@ -195,6 +219,11 @@ func TestRegister_InvalidPassword(t *testing.T) {
 	}{
 		{"too short", "short1"},
 		{"too long", strings.Repeat("a", maxPasswordLen+1)},
+		{"common password", "welcome1"},
+		{"common password, different case", "WELCOME1"},
+		{"single repeated rune", "aaaaaaaa"},
+		{"sequential ascending", "12345678"},
+		{"sequential descending", "87654321"},
 	}
 
 	for _, tc := range cases {
@@ -299,7 +328,140 @@ func TestAuthenticate_NormalizesEmailCase(t *testing.T) {
 	}
 }
 
-// --- CreateSession ---
+// --- Authenticate: login backoff (issue #220) ---
+
+// captureSleep replaces svc's injectable sleep with one that records the
+// delay it was asked for instead of actually waiting — the tests below
+// assert on that recorded value, not on wall-clock time.
+func captureSleep(svc *Service) *time.Duration {
+	var captured time.Duration
+	svc.sleep = func(_ context.Context, d time.Duration) { captured = d }
+	return &captured
+}
+
+func TestAuthenticate_NoDelayBelowFailureThreshold(t *testing.T) {
+	repo := &fakeRepository{findUserByEmailErr: ErrNotFound}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	for i := 0; i < loginBackoffThreshold-1; i++ {
+		_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong")
+	}
+
+	if *captured != 0 {
+		t.Errorf("sleep delay after %d failures (threshold %d) = %v, want 0", loginBackoffThreshold-1, loginBackoffThreshold, *captured)
+	}
+}
+
+func TestAuthenticate_DelaysAfterRepeatedFailures_UnknownEmail(t *testing.T) {
+	repo := &fakeRepository{findUserByEmailErr: ErrNotFound}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	// delay() reflects failures *before* the in-flight attempt (see
+	// Authenticate's doc comment), so it takes one extra call beyond the
+	// threshold for the delay to actually show up on the captured sleep.
+	for i := 0; i < loginBackoffThreshold+1; i++ {
+		_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong")
+	}
+
+	if *captured != loginBackoffBase {
+		t.Errorf("sleep delay on attempt %d = %v, want %v", loginBackoffThreshold+1, *captured, loginBackoffBase)
+	}
+}
+
+func TestAuthenticate_DelaysAfterRepeatedFailures_WrongPassword(t *testing.T) {
+	stored := User{ID: "u1", Email: "victim@example.com", PasswordHash: mustHash(t, "correct-password123")}
+	repo := &fakeRepository{findUserByEmailUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	for i := 0; i < loginBackoffThreshold+1; i++ {
+		_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	}
+
+	if *captured != loginBackoffBase {
+		t.Errorf("sleep delay on attempt %d = %v, want %v", loginBackoffThreshold+1, *captured, loginBackoffBase)
+	}
+}
+
+// TestAuthenticate_UnknownEmailAndWrongPassword_ShareOneCounter pins the
+// indistinguishability the issue's first pitfall demands: an attacker
+// alternating between "is this email registered" and "is this the
+// password" against the same address must not get two separate, half-
+// sized budgets — both outcomes count against the same per-email state.
+func TestAuthenticate_UnknownEmailAndWrongPassword_ShareOneCounter(t *testing.T) {
+	stored := User{ID: "u1", Email: "victim@example.com", PasswordHash: mustHash(t, "correct-password123")}
+	repo := &fakeRepository{findUserByEmailUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	// Three failures split across both outcome kinds, then a fourth
+	// attempt to observe the effect: delay() reflects failures *before*
+	// the in-flight attempt (see Authenticate's doc comment).
+	_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	repo.findUserByEmailErr = ErrNotFound // simulate the same email now reported as unknown
+	_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	repo.findUserByEmailErr = nil
+	_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+
+	if *captured != loginBackoffBase {
+		t.Errorf("sleep delay on the attempt after %d mixed-outcome failures = %v, want %v (one shared counter)", loginBackoffThreshold, *captured, loginBackoffBase)
+	}
+}
+
+// TestAuthenticate_DelayAppliesEvenOnSuccess pins the same
+// indistinguishability guarantee from the other direction: once an
+// account is under backoff, a *correct* password must still pay the
+// delay before succeeding — an outcome-dependent delay (skipped on
+// success) would itself leak "this account is currently throttled".
+func TestAuthenticate_DelayAppliesEvenOnSuccess(t *testing.T) {
+	stored := User{ID: "u1", Email: "victim@example.com", PasswordHash: mustHash(t, "correct-password123")}
+	repo := &fakeRepository{findUserByEmailUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	for i := 0; i < loginBackoffThreshold; i++ {
+		_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	}
+
+	u, err := svc.Authenticate(context.Background(), "victim@example.com", "correct-password123")
+	if err != nil {
+		t.Fatalf("Authenticate() with the correct password unexpected error: %v", err)
+	}
+	if u.ID != "u1" {
+		t.Errorf("Authenticate() ID = %q, want %q", u.ID, "u1")
+	}
+	if *captured != loginBackoffBase {
+		t.Errorf("sleep delay on the successful attempt = %v, want %v (same as a failure would have paid)", *captured, loginBackoffBase)
+	}
+}
+
+// TestAuthenticate_SuccessClearsBackoff is the middle-ground half of the
+// issue's second pitfall: once a correct password gets in, the account
+// is no longer under suspicion — a hard lock never existed here, and a
+// resolved account shouldn't keep paying for failures before it.
+func TestAuthenticate_SuccessClearsBackoff(t *testing.T) {
+	stored := User{ID: "u1", Email: "victim@example.com", PasswordHash: mustHash(t, "correct-password123")}
+	repo := &fakeRepository{findUserByEmailUser: stored}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	captured := captureSleep(svc)
+
+	for i := 0; i < loginBackoffThreshold; i++ {
+		_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+	}
+	if _, err := svc.Authenticate(context.Background(), "victim@example.com", "correct-password123"); err != nil {
+		t.Fatalf("Authenticate() with the correct password unexpected error: %v", err)
+	}
+
+	*captured = -1 // sentinel: prove the next call actually overwrites this
+	_, _ = svc.Authenticate(context.Background(), "victim@example.com", "wrong-password")
+
+	if *captured != 0 {
+		t.Errorf("sleep delay on the first failure after a successful login = %v, want 0 (backoff should have been cleared)", *captured)
+	}
+}
 
 // --- ChangePassword ---
 
@@ -410,6 +572,44 @@ func TestChangePassword_RevokeRepositoryError(t *testing.T) {
 	}
 }
 
+// TestChangePassword_InvalidatesCacheForOtherSessions_ButKeepsCallers is
+// ChangePassword's shaped version of the same guarantee: the cache
+// entry for the calling session must survive (Repository's own
+// DeleteSessionsForUserExcept leaves it alive for the identical reason
+// — see ChangePassword's doc comment), while every other cached session
+// for the user must be invalidated immediately.
+func TestChangePassword_InvalidatesCacheForOtherSessions_ButKeepsCallers(t *testing.T) {
+	stored := User{ID: "u1", PasswordHash: mustHash(t, "old-password123")}
+	repo := &fakeRepository{
+		findUserByIDUser:         stored,
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
+
+	if _, err := svc.ValidateToken(context.Background(), "current-token"); err != nil {
+		t.Fatalf("ValidateToken(current-token) unexpected error: %v", err)
+	}
+	if _, err := svc.ValidateToken(context.Background(), "other-token"); err != nil {
+		t.Fatalf("ValidateToken(other-token) unexpected error: %v", err)
+	}
+
+	if err := svc.ChangePassword(context.Background(), "u1", "old-password123", "new-password456", "current-token"); err != nil {
+		t.Fatalf("ChangePassword() unexpected error: %v", err)
+	}
+
+	// Simulate what DeleteSessionsForUserExcept would really have done:
+	// every session except the caller's own is gone from the repository.
+	repo.findSessionByHashErr = ErrNotFound
+
+	if _, err := svc.ValidateToken(context.Background(), "current-token"); err != nil {
+		t.Errorf("ValidateToken(current-token) after ChangePassword() = %v, want nil -- the calling session's cache entry must survive", err)
+	}
+	if _, err := svc.ValidateToken(context.Background(), "other-token"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ValidateToken(other-token) after ChangePassword() = %v, want ErrNotFound -- every other session's cache entry must be invalidated", err)
+	}
+}
+
 // --- VerifyPassword ---
 
 func TestVerifyPassword_Valid(t *testing.T) {
@@ -482,6 +682,31 @@ func TestDeleteAccount_UserRepositoryError(t *testing.T) {
 	err := svc.DeleteAccount(context.Background(), "u1")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("DeleteAccount() DeleteUser error = %v, want %v", err, repoErr)
+	}
+}
+
+// TestDeleteAccount_InvalidatesCacheForUser is DeleteAccount's half of
+// the same same-process revocation guarantee TestLogout_InvalidatesCache_*
+// pins.
+func TestDeleteAccount_InvalidatesCacheForUser(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("ValidateToken() unexpected error: %v", err)
+	}
+
+	if err := svc.DeleteAccount(context.Background(), "u1"); err != nil {
+		t.Fatalf("DeleteAccount() unexpected error: %v", err)
+	}
+
+	repo.findSessionByHashErr = ErrNotFound
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ValidateToken() after DeleteAccount() = %v, want ErrNotFound -- tokenCache entry should have been invalidated", err)
 	}
 }
 
@@ -568,6 +793,36 @@ func TestValidateToken_Unknown(t *testing.T) {
 	}
 }
 
+// TestValidateToken_CachesResult_SecondCallSkipsRepository is the whole
+// point of tokenCache (see token_cache.go and docs/DECISIONS.md § "Cache
+// de ValidateToken"): a second call for the same token must not touch
+// Repository again.
+func TestValidateToken_CachesResult_SecondCallSkipsRepository(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("first ValidateToken() unexpected error: %v", err)
+	}
+	if repo.findSessionByHashCallCount != 1 {
+		t.Fatalf("findSessionByHashCallCount after first call = %d, want 1", repo.findSessionByHashCallCount)
+	}
+
+	userID, err := svc.ValidateToken(context.Background(), "sometoken")
+	if err != nil {
+		t.Fatalf("second ValidateToken() unexpected error: %v", err)
+	}
+	if userID != "u1" {
+		t.Errorf("second ValidateToken() userID = %q, want %q", userID, "u1")
+	}
+	if repo.findSessionByHashCallCount != 1 {
+		t.Errorf("findSessionByHashCallCount after second call = %d, want still 1 (should have hit tokenCache instead of Repository)", repo.findSessionByHashCallCount)
+	}
+}
+
 // --- Logout ---
 
 func TestLogout_DeletesSessionByHash(t *testing.T) {
@@ -593,6 +848,37 @@ func TestLogout_RepositoryError(t *testing.T) {
 	}
 }
 
+// TestLogout_InvalidatesCache_SoARevokedTokenStopsValidatingImmediately
+// pins the same-process half of tokenCache's revocation guarantee (see
+// token_cache.go's doc comment): the *only* staleness this cache is
+// meant to ever tolerate is cross-process, never "the process that just
+// revoked a token still accepts it."
+func TestLogout_InvalidatesCache_SoARevokedTokenStopsValidatingImmediately(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("ValidateToken() unexpected error: %v", err)
+	}
+
+	if err := svc.Logout(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("Logout() unexpected error: %v", err)
+	}
+
+	// Simulate what Logout's own DeleteSession call would really have
+	// caused: the repository no longer has this session. If ValidateToken
+	// answered from a stale cache entry instead of consulting the
+	// repository again, this would still succeed.
+	repo.findSessionByHashErr = ErrNotFound
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ValidateToken() after Logout() = %v, want ErrNotFound -- tokenCache entry should have been invalidated", err)
+	}
+}
+
 // --- LogoutAll ---
 
 func TestLogoutAll_DeletesEverySessionForUser(t *testing.T) {
@@ -615,6 +901,222 @@ func TestLogoutAll_RepositoryError(t *testing.T) {
 	err := svc.LogoutAll(context.Background(), "u1")
 	if !errors.Is(err, repoErr) {
 		t.Errorf("LogoutAll() repository error = %v, want %v", err, repoErr)
+	}
+}
+
+// TestLogoutAll_InvalidatesCacheForUser is LogoutAll's half of the same
+// same-process revocation guarantee TestLogout_InvalidatesCache_* pins.
+func TestLogoutAll_InvalidatesCacheForUser(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("ValidateToken() unexpected error: %v", err)
+	}
+
+	if err := svc.LogoutAll(context.Background(), "u1"); err != nil {
+		t.Fatalf("LogoutAll() unexpected error: %v", err)
+	}
+
+	repo.findSessionByHashErr = ErrNotFound
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ValidateToken() after LogoutAll() = %v, want ErrNotFound -- tokenCache entry should have been invalidated", err)
+	}
+}
+
+// --- deriveSessionID / ListSessions / RevokeSession (issue #224) ---
+
+func TestDeriveSessionID_IsDeterministic(t *testing.T) {
+	id1 := deriveSessionID("some-token-hash")
+	id2 := deriveSessionID("some-token-hash")
+	if id1 != id2 {
+		t.Errorf("deriveSessionID() = %q and %q for the same input, want equal", id1, id2)
+	}
+}
+
+func TestDeriveSessionID_DiffersByInput(t *testing.T) {
+	id1 := deriveSessionID("hash-a")
+	id2 := deriveSessionID("hash-b")
+	if id1 == id2 {
+		t.Errorf("deriveSessionID() produced the same ID for different inputs: %q", id1)
+	}
+}
+
+func TestDeriveSessionID_NeverEqualsItsInput(t *testing.T) {
+	hash := "some-token-hash"
+	if got := deriveSessionID(hash); got == hash {
+		t.Error("deriveSessionID() returned the input unchanged, want a derived value")
+	}
+}
+
+func TestListSessions_ReturnsDerivedIDsNeverTokenHash(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionsForUserSessions: []Session{
+			{TokenHash: "hash-1", UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	got, err := svc.ListSessions(context.Background(), "u1", "current-raw-token")
+	if err != nil {
+		t.Fatalf("ListSessions() unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListSessions() returned %d entries, want 1", len(got))
+	}
+	if got[0].ID != deriveSessionID("hash-1") {
+		t.Errorf("ListSessions()[0].ID = %q, want %q", got[0].ID, deriveSessionID("hash-1"))
+	}
+	if got[0].ID == "hash-1" {
+		t.Error("ListSessions()[0].ID must never be the raw TokenHash")
+	}
+}
+
+func TestListSessions_MarksTheCallingSessionAsCurrent(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionsForUserSessions: []Session{
+			{TokenHash: hashToken("current-token"), UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+			{TokenHash: hashToken("other-token"), UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	got, err := svc.ListSessions(context.Background(), "u1", "current-token")
+	if err != nil {
+		t.Fatalf("ListSessions() unexpected error: %v", err)
+	}
+
+	var currentCount int
+	for _, s := range got {
+		if s.IsCurrent {
+			currentCount++
+			if s.ID != deriveSessionID(hashToken("current-token")) {
+				t.Errorf("the session marked current has ID %q, want the one derived from current-token", s.ID)
+			}
+		}
+	}
+	if currentCount != 1 {
+		t.Errorf("sessions marked IsCurrent = %d, want exactly 1", currentCount)
+	}
+}
+
+func TestListSessions_RepositoryError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	repo := &fakeRepository{findSessionsForUserErr: repoErr}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	_, err := svc.ListSessions(context.Background(), "u1", "sometoken")
+	if !errors.Is(err, repoErr) {
+		t.Errorf("ListSessions() repository error = %v, want %v", err, repoErr)
+	}
+}
+
+func TestRevokeSession_DeletesTheMatchingSession(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionsForUserSessions: []Session{
+			{TokenHash: "target-hash", UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+			{TokenHash: "other-hash", UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	targetID := deriveSessionID("target-hash")
+	if err := svc.RevokeSession(context.Background(), "u1", targetID); err != nil {
+		t.Fatalf("RevokeSession() unexpected error: %v", err)
+	}
+
+	if repo.deletedTokenHash != "target-hash" {
+		t.Errorf("RevokeSession() deleted hash = %q, want %q", repo.deletedTokenHash, "target-hash")
+	}
+}
+
+func TestRevokeSession_UnknownID_ReturnsErrNotFound(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionsForUserSessions: []Session{
+			{TokenHash: "some-hash", UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.RevokeSession(context.Background(), "u1", "not-a-real-id")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("RevokeSession() with an unknown id error = %v, want ErrNotFound", err)
+	}
+	if repo.deletedTokenHash != "" {
+		t.Error("RevokeSession() must not delete anything when the id doesn't match")
+	}
+}
+
+// TestRevokeSession_AnotherUsersSessionID_ReturnsErrNotFound pins the
+// never-confirm-existence discipline: sessionID here really does address
+// a session that exists, just not one belonging to userID — the fake
+// mirrors real Repository scoping (see go-repository-parity.md) by
+// simply never returning another user's session for this userID.
+func TestRevokeSession_AnotherUsersSessionID_ReturnsErrNotFound(t *testing.T) {
+	otherUsersID := deriveSessionID("belongs-to-someone-else")
+	repo := &fakeRepository{findSessionsForUserSessions: nil}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.RevokeSession(context.Background(), "u1", otherUsersID)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("RevokeSession() for another user's session id error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRevokeSession_InvalidatesTokenCache(t *testing.T) {
+	repo := &fakeRepository{
+		findSessionByHashSession: Session{UserID: "u1", ExpiresAt: time.Now().Add(time.Hour)},
+		findSessionsForUserSessions: []Session{
+			{TokenHash: hashToken("sometoken"), UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+	freezeTokenCache(svc)
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); err != nil {
+		t.Fatalf("ValidateToken() unexpected error: %v", err)
+	}
+
+	targetID := deriveSessionID(hashToken("sometoken"))
+	if err := svc.RevokeSession(context.Background(), "u1", targetID); err != nil {
+		t.Fatalf("RevokeSession() unexpected error: %v", err)
+	}
+
+	repo.findSessionByHashErr = ErrNotFound
+
+	if _, err := svc.ValidateToken(context.Background(), "sometoken"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ValidateToken() after RevokeSession() = %v, want ErrNotFound -- tokenCache entry should have been invalidated", err)
+	}
+}
+
+func TestRevokeSession_RepositoryError_OnFind(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	repo := &fakeRepository{findSessionsForUserErr: repoErr}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.RevokeSession(context.Background(), "u1", "some-id")
+	if !errors.Is(err, repoErr) {
+		t.Errorf("RevokeSession() repository error = %v, want %v", err, repoErr)
+	}
+}
+
+func TestRevokeSession_RepositoryError_OnDelete(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	repo := &fakeRepository{
+		findSessionsForUserSessions: []Session{
+			{TokenHash: "target-hash", UserID: "u1", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+		deleteSessionErr: repoErr,
+	}
+	svc := NewService(repo, testSessionTTL, unlimitedSessions)
+
+	err := svc.RevokeSession(context.Background(), "u1", deriveSessionID("target-hash"))
+	if !errors.Is(err, repoErr) {
+		t.Errorf("RevokeSession() repository error = %v, want %v", err, repoErr)
 	}
 }
 

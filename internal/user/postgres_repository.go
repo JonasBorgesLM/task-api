@@ -246,6 +246,37 @@ func (r *postgresRepository) DeleteSession(ctx context.Context, tokenHash string
 	return nil
 }
 
+// FindSessionsForUser returns every session belonging to userID, newest
+// first — idx_sessions_user_id_created_at (already built for
+// CreateSession's own eviction query) serves this ORDER BY directly,
+// with no additional index.
+func (r *postgresRepository) FindSessionsForUser(ctx context.Context, userID string) ([]Session, error) {
+	const query = `
+		SELECT token_hash, user_id::text, expires_at, created_at
+		FROM sessions
+		WHERE user_id = $1::uuid
+		ORDER BY created_at DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: find sessions for user: %w", err)
+	}
+	defer rows.Close()
+
+	sessions := make([]Session, 0)
+	for rows.Next() {
+		var s Session
+		if err := rows.Scan(&s.TokenHash, &s.UserID, &s.ExpiresAt, &s.CreatedAt); err != nil {
+			return nil, fmt.Errorf("postgres: find sessions for user: scan: %w", err)
+		}
+		sessions = append(sessions, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: find sessions for user: %w", err)
+	}
+	return sessions, nil
+}
+
 // DeleteExpiredSessions removes every session whose expires_at is before
 // now.
 func (r *postgresRepository) DeleteExpiredSessions(ctx context.Context, now time.Time) error {

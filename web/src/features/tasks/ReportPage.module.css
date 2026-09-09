@@ -1,0 +1,132 @@
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.reportHeader {
+  margin-bottom: var(--space-6);
+}
+
+.title {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  margin: 0 0 var(--space-3) 0;
+}
+
+/* A definition list rather than prose: "what filter, generated when" is
+   the one thing this report can't be trusted without (issue 245) — a
+   printed page with no header saying what it shows is unauditable a
+   month later. Laid out as label-above-value pairs so it reads the
+   same on screen and on paper without a separate print-only rule. */
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  margin: 0;
+}
+
+.meta dt {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.meta dd {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.skeletonRow {
+  padding: var(--space-2) 0;
+}
+
+.empty,
+.error {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.error {
+  color: var(--color-danger);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+}
+
+.table th,
+.table td {
+  text-align: left;
+  vertical-align: top;
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.table th {
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.03em;
+}
+
+.table td {
+  color: var(--color-text-primary);
+}
+
+/* On screen this reads exactly like the pills TaskItem uses elsewhere
+   in the app (issue 245's print override below is what strips the
+   color away — this rule itself is unchanged from that visual
+   language, not a second one invented for this page). */
+.badge {
+  display: inline-block;
+  font-weight: var(--font-weight-medium);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-full);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+}
+
+/* Never split a task's own row across a page boundary — a description
+   that continues on the next sheet with no visible task title above it
+   reads as someone else's paragraph, not this row's own. */
+.table tr {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+@media print {
+  /* Nothing here is part of the report — the print dialog already
+     shows its own controls, and a stray "Print" button rendered onto
+     the printed page would be nonsensical on paper. */
+  .topBar {
+    display: none;
+  }
+
+  /* Status/priority are colour-coded on screen; colour is exactly what
+     a page printed in black and white can't be trusted to keep (issue
+     245's own reasoning) — background print settings vary by browser,
+     and hue alone survives grayscale conversion unevenly. The badge
+     falls back to a plain bordered box so the label text is what
+     carries the meaning, not the color underneath it. */
+  .badge {
+    background-color: transparent;
+    color: var(--color-text-primary);
+    border-color: var(--color-text-primary);
+  }
+}

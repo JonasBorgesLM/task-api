@@ -2,14 +2,26 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { invalidateCsrfToken } from '../../api/client'
 import { assertOnlyTokens } from '../../test-utils/assertOnlyTokens'
 import { useAuth } from '../auth/useAuth'
 import { TaskList } from './TaskList'
 import { useTasks } from './useTasks'
+
+// TaskList now calls useNavigate() (the Print button, issue #246) —
+// needs a Router context to render at all, even in tests that never
+// touch navigation themselves.
+function renderTaskList() {
+  return render(
+    <MemoryRouter>
+      <TaskList />
+    </MemoryRouter>,
+  )
+}
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -18,7 +30,13 @@ function jsonResponse(status: number, body: unknown): Response {
   })
 }
 
-vi.mock('./useTasks', () => ({ useTasks: vi.fn() }))
+vi.mock('./useTasks', () => ({
+  useTasks: vi.fn(),
+  // Real implementation, not mocked: it's the pure "pending,done" ->
+  // ["pending", "done"] splitter handleExport reuses to build the same
+  // query string useTasks' own (mocked-away) fetch would have.
+  splitFilter: (value: string) => (value ? value.split(',').filter(Boolean) : []),
+}))
 vi.mock('../auth/useAuth', () => ({ useAuth: vi.fn() }))
 
 describe('TaskList.module.css', () => {
@@ -47,6 +65,8 @@ function mockTasksResult(overrides: Partial<ReturnType<typeof useTasks>>) {
     tasks: [],
     error: null,
     page: 1,
+    totalPages: 1,
+    total: 0,
     hasNextPage: false,
     hasPreviousPage: false,
     isPaging: false,
@@ -90,7 +110,7 @@ describe('TaskList', () => {
 
   it('loading: shows skeleton placeholders, not the list or a message', () => {
     mockTasksResult({ status: 'loading' })
-    render(<TaskList />)
+    renderTaskList()
 
     expect(screen.getByRole('list', { name: 'Loading tasks' })).toHaveAttribute('aria-busy', 'true')
     expect(screen.queryByText("You don't have any tasks yet.")).not.toBeInTheDocument()
@@ -98,7 +118,7 @@ describe('TaskList', () => {
 
   it('empty: shows the empty-state message, not a spinner or an empty list', () => {
     mockTasksResult({ status: 'empty', tasks: [] })
-    render(<TaskList />)
+    renderTaskList()
 
     expect(screen.getByText(/You don't have any tasks yet/)).toBeInTheDocument()
     expect(screen.queryByRole('list')).not.toBeInTheDocument()
@@ -116,7 +136,7 @@ describe('TaskList', () => {
       reload,
     })
     const user = userEvent.setup()
-    render(<TaskList />)
+    renderTaskList()
 
     expect(screen.getByRole('alert')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Retry' }))
@@ -125,7 +145,7 @@ describe('TaskList', () => {
 
   it('success: renders each task with its title, status and priority', () => {
     mockTasksResult({ status: 'success', tasks: [makeTask()] })
-    render(<TaskList />)
+    renderTaskList()
 
     expect(screen.getByRole('heading', { name: 'Buy groceries' })).toBeInTheDocument()
     expect(screen.getByText('pending')).toBeInTheDocument()
@@ -138,27 +158,44 @@ describe('TaskList', () => {
   // The page title and its always-visible count were dropped in the
   // design review: the title named the only screen this app has, and
   // the count now lives one glyph away, in the counts panel.
-  it('the counts button names how many are on the page, without opening anything', () => {
-    mockTasksResult({ status: 'success', tasks: [makeTask(), makeTask({ id: 't2' })] })
-    render(<TaskList />)
+  //
+  // Issue #247/15.G1: the count is the filtered set's total (from
+  // X-Total-Count), not the page on screen — a page can hold 2 tasks
+  // while the total is much larger.
+  it('the counts button names the total across the filtered set, without opening anything', () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask(), makeTask({ id: 't2' })], total: 2 })
+    renderTaskList()
 
-    expect(screen.getByRole('button', { name: 'Task counts (2 on this page)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Task counts (2)' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Tasks' })).not.toBeInTheDocument()
   })
 
-  // The panel counts the page on screen and says so. It never implies a
-  // total, because GET /v1/tasks does not return one.
-  it('the counts panel describes the page on screen, not a total', async () => {
-    mockTasksResult({ status: 'success', tasks: [makeTask()], hasNextPage: true })
+  // The panel now shows the whole filtered set's total (free — it rides
+  // on useTasks' own X-Total-Count), not the page on screen. A page
+  // holding 1 task while the total is 5 proves the two are no longer
+  // the same number.
+  it('the counts panel shows the total across the filtered set, not just the page on screen', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { by_status: {}, by_priority: {} }))
+    mockTasksResult({ status: 'success', tasks: [makeTask()], total: 5 })
     const user = userEvent.setup()
-    render(<TaskList />)
+    renderTaskList()
 
-    await user.click(screen.getByRole('button', { name: 'Task counts (1 on this page)' }))
+    await user.click(screen.getByRole('button', { name: 'Task counts (5)' }))
 
-    expect(screen.getByText('on this page')).toBeInTheDocument()
+    expect(screen.getByText('5')).toBeInTheDocument()
+    expect(screen.getByText('total')).toBeInTheDocument()
+    expect(screen.queryByText(/on this page/)).not.toBeInTheDocument()
   })
 
   it('the counts panel breaks the loaded tasks down by status and priority', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        by_status: { pending: 2, in_progress: 0, done: 1, cancelled: 0 },
+        by_priority: { high: 2, medium: 0, low: 1 },
+      }),
+    )
     mockTasksResult({
       status: 'success',
       tasks: [
@@ -166,11 +203,16 @@ describe('TaskList', () => {
         makeTask({ id: 't2', status: 'done', priority: 'high' }),
         makeTask({ id: 't3', status: 'pending', priority: 'low' }),
       ],
+      total: 3,
     })
     const user = userEvent.setup()
-    render(<TaskList />)
+    renderTaskList()
 
     await user.click(screen.getByRole('button', { name: /^Task counts/ }))
+    // The breakdown loads from GET /v1/tasks/stats after the panel
+    // opens (issue #247/15.G1) — wait past the loading placeholders
+    // before reading values.
+    await waitFor(() => expect(screen.queryAllByText('—')).toHaveLength(0))
 
     // Scoped to each group: "Pending"/"High" are also filter options.
     const byStatus = within(screen.getByText('By status').parentElement!.querySelector('dl')!)
@@ -194,7 +236,7 @@ describe('TaskList', () => {
   // controls exist.
   it('success: sort order is fixed (no sort control), but status/priority filters exist', () => {
     mockTasksResult({ status: 'success', tasks: [makeTask()] })
-    render(<TaskList />)
+    renderTaskList()
 
     expect(screen.queryByRole('combobox', { name: /sort/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Filter by status' })).toBeInTheDocument()
@@ -205,7 +247,7 @@ describe('TaskList', () => {
   // three active statuses, named explicitly on the wire.
   it('defaults to the three active statuses, leaving cancelled out', () => {
     mockTasksResult({ status: 'success', tasks: [makeTask()] })
-    render(<TaskList />)
+    renderTaskList()
 
     expect(useTasks).toHaveBeenLastCalledWith('pending,in_progress,done', '')
     expect(screen.getByRole('button', { name: 'Filter by status' })).toHaveTextContent(
@@ -216,7 +258,7 @@ describe('TaskList', () => {
   it('ticking cancelled adds it to the filter without removing the others', async () => {
     mockTasksResult({ status: 'success', tasks: [makeTask()] })
     const user = userEvent.setup()
-    render(<TaskList />)
+    renderTaskList()
 
     await user.click(screen.getByRole('button', { name: 'Filter by status' }))
     await user.click(screen.getByRole('menuitemcheckbox', { name: 'Cancelled' }))
@@ -232,7 +274,7 @@ describe('TaskList', () => {
   it('unticking a status narrows the filter, and the menu stays open for the next one', async () => {
     mockTasksResult({ status: 'success', tasks: [makeTask()] })
     const user = userEvent.setup()
-    render(<TaskList />)
+    renderTaskList()
 
     await user.click(screen.getByRole('button', { name: 'Filter by status' }))
     await user.click(screen.getByRole('menuitemcheckbox', { name: 'Done' }))
@@ -246,7 +288,7 @@ describe('TaskList', () => {
   it('refuses to untick the last remaining value — an empty filter would mean "everything"', async () => {
     mockTasksResult({ status: 'success', tasks: [makeTask()] })
     const user = userEvent.setup()
-    render(<TaskList />)
+    renderTaskList()
 
     await user.click(screen.getByRole('button', { name: 'Filter by priority' }))
     await user.click(screen.getByRole('menuitemcheckbox', { name: 'High' }))
@@ -262,7 +304,7 @@ describe('TaskList', () => {
   it('empty: shows a filter-specific message once a filter is active', async () => {
     mockTasksResult({ status: 'empty', tasks: [] })
     const user = userEvent.setup()
-    render(<TaskList />)
+    renderTaskList()
 
     // The default already excludes cancelled, so ticking it back on is
     // what "no filter" looks like here.
@@ -283,7 +325,7 @@ describe('TaskList', () => {
     const nextPage = vi.fn()
     mockTasksResult({ status: 'success', tasks: [makeTask()], hasNextPage: true, nextPage })
     const user = userEvent.setup()
-    render(<TaskList />)
+    renderTaskList()
 
     const button = screen.getByRole('button', { name: 'Next' })
     await user.click(button)
@@ -296,13 +338,14 @@ describe('TaskList', () => {
       status: 'success',
       tasks: [makeTask()],
       page: 3,
+      totalPages: 3,
       hasPreviousPage: true,
       previousPage,
     })
     const user = userEvent.setup()
-    render(<TaskList />)
+    renderTaskList()
 
-    expect(screen.getByText('Page 3')).toBeInTheDocument()
+    expect(screen.getByText('Page 3 of 3')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Previous' }))
 
     expect(previousPage).toHaveBeenCalledOnce()
@@ -315,7 +358,7 @@ describe('TaskList', () => {
       hasPreviousPage: false,
       hasNextPage: true,
     })
-    render(<TaskList />)
+    renderTaskList()
 
     expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
@@ -330,7 +373,7 @@ describe('TaskList', () => {
       hasNextPage: false,
       hasPreviousPage: false,
     })
-    render(<TaskList />)
+    renderTaskList()
 
     expect(screen.queryByRole('navigation', { name: 'Task pages' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
@@ -338,7 +381,7 @@ describe('TaskList', () => {
 
   it('offers "New task" even with zero tasks — creating the first one isn\'t blocked by the empty state', () => {
     mockTasksResult({ status: 'empty', tasks: [] })
-    render(<TaskList />)
+    renderTaskList()
 
     expect(screen.getByRole('button', { name: 'New task' })).toBeInTheDocument()
   })
@@ -351,7 +394,7 @@ describe('TaskList', () => {
     const addTaskLocally = vi.fn()
     mockTasksResult({ status: 'success', tasks: [makeTask()], addTaskLocally })
     const user = userEvent.setup()
-    render(<TaskList />)
+    renderTaskList()
 
     await user.click(screen.getByRole('button', { name: 'New task' }))
     expect(screen.getByRole('dialog', { name: 'New task' })).toBeInTheDocument()
@@ -363,4 +406,116 @@ describe('TaskList', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(await screen.findByText('Task created.')).toBeInTheDocument()
   })
+
+  describe('export', () => {
+    beforeEach(() => {
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock-url')
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      // A real click would have jsdom attempt navigation (it does not
+      // implement one) and log a distracting "not implemented" error;
+      // this test only needs to know the link the app built, never that
+      // jsdom completed a browser-level download.
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    })
+
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    it('fetches the current filter as CSV and hands the browser a download named from Content-Disposition', async () => {
+      const fetchMock = vi.mocked(fetch)
+      // A string body, not a Blob: jsdom's Blob polyfill isn't
+      // structurally compatible with Node's native Response
+      // constructor — see Preview.test.tsx's own comment on the same
+      // issue. response.blob() still produces a real, usable Blob.
+      fetchMock.mockResolvedValueOnce(
+        new Response('id,title\n1,Buy milk\n', {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/csv; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="tasks-2026-09-08.csv"',
+          },
+        }),
+      )
+      mockTasksResult({ status: 'success', tasks: [makeTask()] })
+      const user = userEvent.setup()
+      renderTaskList()
+
+      await user.click(screen.getByRole('button', { name: 'Export' }))
+
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+      const [url] = fetchMock.mock.calls[0]!
+      // Default filters: DEFAULT_STATUSES excludes "cancelled" (not all
+      // four, so it's sent explicitly); every priority is selected (all
+      // three, so the API's own "absent means no filter" applies and
+      // none is sent).
+      expect(String(url)).toBe(
+        'http://localhost:8080/v1/tasks/export?status=pending&status=in_progress&status=done',
+      )
+
+      await vi.waitFor(() => expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledOnce())
+      expect(URL.createObjectURL).toHaveBeenCalledOnce()
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
+    })
+
+    it('shows the server-provided message when the filter matches too many tasks to export', async () => {
+      const fetchMock = vi.mocked(fetch)
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(400, {
+          error: 'invalid input: 12000 tasks match this filter, more than the 10000-row export limit; narrow the filter',
+        }),
+      )
+      mockTasksResult({ status: 'success', tasks: [makeTask()] })
+      const user = userEvent.setup()
+      renderTaskList()
+
+      await user.click(screen.getByRole('button', { name: 'Export' }))
+
+      expect(
+        await screen.findByText(/more than the 10000-row export limit/),
+      ).toBeInTheDocument()
+      expect(URL.createObjectURL).not.toHaveBeenCalled()
+    })
+
+    it('shows a generic message for a failure with no actionable detail', async () => {
+      const fetchMock = vi.mocked(fetch)
+      fetchMock.mockResolvedValueOnce(jsonResponse(500, { error: 'internal server error' }))
+      mockTasksResult({ status: 'success', tasks: [makeTask()] })
+      const user = userEvent.setup()
+      renderTaskList()
+
+      await user.click(screen.getByRole('button', { name: 'Export' }))
+
+      expect(await screen.findByText('Could not export tasks. Please try again.')).toBeInTheDocument()
+    })
+  })
+
+  it('Print opens /report carrying the current filter in the URL', async () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask()] })
+    const user = userEvent.setup()
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<TaskList />} />
+          {/* A stub, not the real ReportPage — this test only needs to
+              know handlePrint navigated with the right query string,
+              which is TaskList's own responsibility; ReportPage.test.tsx
+              covers what that page does with it. */}
+          <Route path="/report" element={<ReportRouteProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Print' }))
+
+    // Default filters: DEFAULT_STATUSES excludes "cancelled"; every
+    // priority is selected, so none is sent — same filter shape
+    // asserted for Export above.
+    expect(await screen.findByText('/report?status=pending&status=in_progress&status=done')).toBeInTheDocument()
+  })
 })
+
+function ReportRouteProbe() {
+  const location = useLocation()
+  return <p>{location.pathname + location.search}</p>
+}

@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 )
@@ -17,16 +19,32 @@ import (
 // against clients sending unbounded payloads.
 const maxRequestBodyBytes = 1 << 20 // 1 MiB
 
+// maxTaskListLimit bounds an explicit "limit" query parameter on GET
+// /tasks. It does not change what an *absent* limit means (still "no
+// limit" — see parsePagination and docs/openapi.yaml, which documents
+// that omitting it returns every task the caller owns; changing that
+// promise would be an edit to what /v1 already means, which
+// docs/DECISIONS.md § "Versionamento" reserves for a new mount, not a
+// patch to this one). What this closes is the other half of the gap: a
+// caller that does pass a limit could ask for an arbitrarily large one
+// (?limit=1000000) and get the whole result set built in memory and
+// serialized in one response regardless. 100 mirrors the common
+// convention for a single page of a list endpoint; a caller that
+// genuinely wants more pages past it.
+const maxTaskListLimit = 100
+
 // taskService is the interface the Handler depends on.
 // It allows the Handler to be tested with a fake implementation.
 type taskService interface {
 	CreateTask(ctx context.Context, userID, title, description, priority string) (Task, error)
 	GetTask(ctx context.Context, userID, id string) (Task, error)
-	ListTasks(ctx context.Context, userID string, limit, offset int, statuses, priorities []string) ([]Task, error)
+	ListTasks(ctx context.Context, userID string, limit, offset int, statuses, priorities []string) (tasks []Task, total int, err error)
 	UpdateTask(ctx context.Context, userID, id, title, description, priority string) (Task, error)
 	DeleteTask(ctx context.Context, userID, id string) error
 	CompleteTask(ctx context.Context, userID, id string) (Task, error)
 	TransitionStatus(ctx context.Context, userID, id string, target Status) (Task, error)
+	TaskStats(ctx context.Context, userID string, statuses, priorities []string) (TaskStats, error)
+	ExportTasks(ctx context.Context, userID string, statuses, priorities []string) ([]Task, error)
 }
 
 // Handler exposes the task Service over HTTP.
@@ -50,6 +68,17 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth middleware.Midd
 
 	mux.Handle("POST /tasks", protect(h.createTask))
 	mux.Handle("GET /tasks", protect(h.listTasks))
+	// /tasks/stats is a literal segment, not a task id — Go's ServeMux
+	// (1.22+) prefers a literal match over a {wildcard} at the same
+	// position regardless of registration order, so this can never be
+	// shadowed by GET /tasks/{id} below matching "stats" as an id.
+	// Confirmed directly: TestTaskStats_Handler_RoutedCorrectly drives
+	// this through the real mux rather than trusting the rule by
+	// reading it.
+	mux.Handle("GET /tasks/stats", protect(h.taskStats))
+	// /tasks/export is the same literal-over-wildcard case as /tasks/stats
+	// above — never shadowed by GET /tasks/{id} regardless of order.
+	mux.Handle("GET /tasks/export", protect(h.exportTasks))
 	mux.Handle("GET /tasks/{id}", protect(h.getTask))
 	mux.Handle("PUT /tasks/{id}", protect(h.updateTask))
 	mux.Handle("PATCH /tasks/{id}/done", protect(h.completeTask))
@@ -134,7 +163,7 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 	// A single occurrence still arrives here as a one-element slice, so
 	// every caller written against the old single-value contract keeps
 	// working unchanged.
-	tasks, err := h.svc.ListTasks(r.Context(), userID, limit, offset, query["status"], query["priority"])
+	tasks, total, err := h.svc.ListTasks(r.Context(), userID, limit, offset, query["status"], query["priority"])
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return
@@ -145,13 +174,56 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 		tasks = make([]Task, 0)
 	}
 
+	// Set before the ETag/304 check, and therefore sent on both a 200
+	// and a 304 (issue #237): X-Total-Count reflects every task matching
+	// the filter, not just the page returned, so it can change between
+	// two requests that carry the exact same page ETag (a task added on
+	// a different page changes the total without changing this page's
+	// own rows). A 304 must not serve a stale total just because the
+	// page content itself didn't change.
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
+
+	etag := pageETag(tasks)
+	w.Header().Set("ETag", etag)
+	if ifNoneMatchHits(r, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
 	h.writeJSON(w, r, http.StatusOK, tasks)
+}
+
+// taskStatsResponse is the body GET /tasks/stats (issue #238) returns.
+// Field names match docs/openapi.yaml's TaskStats schema.
+type taskStatsResponse struct {
+	Total      int              `json:"total"`
+	ByStatus   map[Status]int   `json:"by_status"`
+	ByPriority map[Priority]int `json:"by_priority"`
+}
+
+// taskStats handles GET /tasks/stats — counts across the caller's
+// entire filtered set (never just the current page), respecting the
+// same status/priority query parameters GET /tasks itself accepts and
+// validating them identically.
+func (h *Handler) taskStats(w http.ResponseWriter, r *http.Request) {
+	userID, _ := middleware.UserIDFromContext(r.Context())
+	query := r.URL.Query()
+
+	stats, err := h.svc.TaskStats(r.Context(), userID, query["status"], query["priority"])
+	if err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
+	h.writeJSON(w, r, http.StatusOK, taskStatsResponse(stats))
 }
 
 // parsePagination reads the optional "limit" and "offset" query
 // parameters. A missing limit is reported as -1 (paginate's "no limit"
 // sentinel); a missing offset defaults to 0. Both, when present, must
-// parse as non-negative integers.
+// parse as non-negative integers, and limit must not exceed
+// maxTaskListLimit (see its own doc comment for why an absent limit is
+// not bounded the same way).
 func parsePagination(query url.Values) (limit, offset int, err error) {
 	limit = -1
 
@@ -159,6 +231,9 @@ func parsePagination(query url.Values) (limit, offset int, err error) {
 		limit, err = strconv.Atoi(raw)
 		if err != nil || limit < 0 {
 			return 0, 0, fmt.Errorf("%w: limit must be a non-negative integer", ErrInvalidInput)
+		}
+		if limit > maxTaskListLimit {
+			return 0, 0, fmt.Errorf("%w: limit must be at most %d", ErrInvalidInput, maxTaskListLimit)
 		}
 	}
 
@@ -183,7 +258,63 @@ func (h *Handler) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	etag := taskETag(task)
+	w.Header().Set("ETag", etag)
+	if ifNoneMatchHits(r, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
 	h.writeJSON(w, r, http.StatusOK, task)
+}
+
+// taskETag derives a strong validator from Repository's own optimistic-
+// concurrency counter (Version — see Repository's doc comment) rather
+// than hashing the response body: Version already changes exactly when
+// the row does, which is the property an ETag needs, and reusing it
+// costs nothing extra to compute. The id is included so the value
+// itself is never confused with another task's, even though HTTP
+// conditional requests are only ever compared within one URL's own
+// cache entry.
+func taskETag(t Task) string {
+	return fmt.Sprintf(`"%s:%d"`, t.ID, t.Version)
+}
+
+// pageETag is taskETag's counterpart for a whole page of GET /tasks:
+// there is no single row's Version to reuse, so this derives one from
+// every row actually returned, in order — id and Version, never the
+// full row — which changes exactly when either an existing row's
+// Version changes or the window's composition changes (a row entering,
+// leaving, or reordering within it), the two cases 15.D2 asks for.
+// Cheap to compute: these are the same rows already read to build the
+// response body, not an extra query.
+func pageETag(tasks []Task) string {
+	digest := sha256.New()
+	for _, t := range tasks {
+		fmt.Fprintf(digest, "%s:%d;", t.ID, t.Version)
+	}
+	return fmt.Sprintf(`"%x"`, digest.Sum(nil))
+}
+
+// ifNoneMatchHits reports whether r's If-None-Match header names etag —
+// exactly (a strong comparison; this handler never issues a weak "W/"
+// validator, so it never has to interpret one) or via the wildcard "*",
+// which matches any current representation. A request carrying neither
+// gets false, the same as one with no If-None-Match at all.
+func ifNoneMatchHits(r *http.Request, etag string) bool {
+	header := r.Header.Get("If-None-Match")
+	if header == "" {
+		return false
+	}
+	if header == "*" {
+		return true
+	}
+	for _, candidate := range strings.Split(header, ",") {
+		if strings.TrimSpace(candidate) == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // updateTask handles PUT /tasks/{id}.

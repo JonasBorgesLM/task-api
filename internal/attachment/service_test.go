@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -732,6 +733,67 @@ func TestUpload_AtQuota_Refused(t *testing.T) {
 	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "second.png", bytes.NewReader(pngHeader))
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("Upload() at quota: error = %v, want ErrInvalidInput", err)
+	}
+}
+
+// --- Per-task attachment count cap ---
+
+// TestUpload_UnderTaskAttachmentCap_Succeeds mirrors
+// TestUpload_UnderQuota_Succeeds for the other quota Upload enforces:
+// how many attachments a single task may carry, independent of their
+// combined size.
+func TestUpload_UnderTaskAttachmentCap_Succeeds(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	svc := NewService(repo, newTestStore(t), 1024, 1<<20)
+
+	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "photo.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Fatalf("Upload() under the task cap: unexpected error: %v", err)
+	}
+}
+
+// TestUpload_AtTaskAttachmentCap_Refused pre-populates the task with
+// exactly maxAttachmentsPerTask rows (via Repository.Create directly,
+// not maxAttachmentsPerTask real uploads) and confirms the next one is
+// refused — the boundary case, the same way TestUpload_AtQuota_Refused
+// pins it for the per-user byte quota.
+func TestUpload_AtTaskAttachmentCap_Refused(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	for i := 0; i < maxAttachmentsPerTask; i++ {
+		key := fmt.Sprintf("existing-%d", i)
+		if err := repo.Create(context.Background(), testAttachment(key, key, ownedTaskID), ownerID); err != nil {
+			t.Fatalf("seed Create(%d) unexpected error: %v", i, err)
+		}
+	}
+	svc := NewService(repo, newTestStore(t), 1024, 1<<20)
+
+	_, err := svc.Upload(context.Background(), ownerID, ownedTaskID, "one-too-many.png", bytes.NewReader(pngHeader))
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("Upload() at the task cap: error = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestUpload_TaskAttachmentCapIsPerTask_NotSharedAcrossTasks guards the
+// scoping: a task at its own cap must not block an upload to a
+// *different* task the same user owns.
+func TestUpload_TaskAttachmentCapIsPerTask_NotSharedAcrossTasks(t *testing.T) {
+	repo := NewMemoryRepository(fixedOwnership)
+	for i := 0; i < maxAttachmentsPerTask; i++ {
+		key := fmt.Sprintf("full-task-%d", i)
+		if err := repo.Create(context.Background(), testAttachment(key, key, ownedTaskID), ownerID); err != nil {
+			t.Fatalf("seed Create(%d) unexpected error: %v", i, err)
+		}
+	}
+	svc := NewService(repo, newTestStore(t), 1024, 1<<20)
+
+	// otherTaskID belongs to strangerID in the fixedOwnership fixture,
+	// not ownerID — Create's own ownership check is what would reject
+	// this, which is a different failure than the one this test exists
+	// to rule out. A task ownerID actually owns and has never uploaded
+	// to is the right second task for this assertion.
+	_, err := svc.Upload(context.Background(), strangerID, otherTaskID, "unrelated.png", bytes.NewReader(pngHeader))
+	if err != nil {
+		t.Errorf("Upload() to a different, uncapped task: unexpected error: %v", err)
 	}
 }
 

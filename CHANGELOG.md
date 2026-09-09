@@ -8,7 +8,9 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
 
 ## [1.6.0] — a definir na tag
 
-**Minor, não major:** rota nova, aditiva — nenhum contrato existente muda.
+**Minor, não major:** a rota nova é aditiva, e os itens abaixo em
+"Segurança" são endurecimento — nenhum cliente que já respeitava o que
+`docs/openapi.yaml` documentava é afetado.
 
 ### Adicionado
 - `POST /v1/auth/password` (issue #196) — troca a própria senha. Exige a
@@ -32,6 +34,211 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   mensagem; agora é um campo dedicado. Escopo deliberadamente restrito a
   esta rota — `PUT /tasks/{id}`'s `409` (só concorrência, sem
   ambiguidade de transição) não ganhou o campo.
+- `cmd/web` (issue #229) — servidor Go próprio para o build de produção
+  da SPA (`web/dist`), imagem e binário separados de `cmd/api`
+  (`web/Dockerfile`, `docker-compose.yml`'s serviço `web`,
+  `k8s/50-web.yaml`). Antes desta mudança, `web/` não tinha nenhum
+  caminho de deploy — só `npm run dev`. Content-Security-Policy própria
+  para um documento HTML real (a de `cmd/api` é `default-src 'none'`,
+  correta para uma API que não serve documento nenhum), calculada a
+  partir do `index.html` real servido a cada startup, não uma string
+  fixa — ver `docs/DECISIONS.md` § "SPA deployment: um servidor Go
+  próprio" para o porquê da escolha e o porquê nonce foi considerado e
+  rejeitado.
+- `GET /v1/tasks` e `GET /v1/tasks/{id}` respondem `ETag` e aceitam
+  `If-None-Match`, devolvendo `304` sem corpo quando nada mudou (issue
+  #233). Aditivo — um cliente que nunca manda `If-None-Match` não
+  percebe diferença. O validador da listagem é derivado das linhas já
+  lidas para montar a resposta, nunca uma consulta a mais; ver
+  `docs/DECISIONS.md` § "ETag de GET /v1/tasks".
+- `web/`'s lista de tasks (`useTasks`) passa a guardar cada página já
+  buscada em memória e mostrá-la de imediato ao revisitar — "Anterior"
+  e trocar de filtro deixam de mostrar um skeleton para dados que o
+  hook já tinha (issue #234). Revalida em segundo plano usando o `ETag`
+  de #233; uma revalidação que falha mantém os dados já mostrados em
+  vez de virar tela de erro. Criar ou excluir uma task limpa o cache
+  inteiro (a composição de toda página seguinte pode ter mudado); uma
+  edição que continua batendo com o filtro atualiza só a própria
+  entrada. Só em memória — nunca `localStorage`. Ver `docs/DECISIONS.md`
+  § "Cache de páginas".
+- `web/`'s tela de cadastro ganha confirmação de senha e um checklist
+  ao vivo dos requisitos que o servidor de fato aplica (comprimento,
+  não estar numa lista de senhas comuns, não ser um padrão repetido ou
+  sequencial — issue #219). O checklist é só informativo: uma senha que
+  falha nele ainda é enviada ao servidor, que continua sendo quem
+  decide aceitar ou devolver `400`. Ver `docs/DECISIONS.md` § "Frontend
+  (issue #219, 15.B2)".
+- Trilha de auditoria para login, falha de login, `logout-all`, troca
+  de senha e exclusão de conta (issue #223) — evento estruturado
+  (`event_type`, conta, endereço de origem, request ID) via o mesmo
+  `*slog.Logger` de sempre, já espelhado ao coletor OTLP configurado
+  (`CRIER_OTLP_ENDPOINT`) sem sink dedicado nenhum. Nunca registra
+  senha, token de sessão ou hash do token. Endereço de origem passa
+  pelo mesmo `realip`/`TRUSTED_PROXIES` que os tiers de rate limit já
+  usam, via o novo `middleware.RealIP`. Ver `docs/DECISIONS.md` §
+  "Trilha de auditoria".
+- `GET /v1/auth/sessions` e `DELETE /v1/auth/sessions/{id}` (issue
+  #224) — a lacuna entre "esta sessão" (`POST /auth/logout`) e "todas"
+  (`POST /auth/logout-all`): lista as sessões ativas da conta (mais
+  recente primeiro, marcando qual é a atual) e revoga uma específica.
+  Nunca expõe o token nem seu hash — cada sessão é endereçada por um id
+  opaco derivado do hash sob demanda, não uma coluna nova. Um `id` que
+  não pertence ao chamador — incluindo um que existe de verdade mas é
+  de outra conta — devolve `404`, igual a qualquer outro recurso que
+  não pertence a quem pergunta. `web/` ganha a tela correspondente
+  ("Manage sessions" no menu de conta). Ver `docs/DECISIONS.md` § "Tela
+  de sessões ativas".
+- `GET /v1/tasks` responde o header `X-Total-Count` (issue #237) — o
+  total de tasks que casam com o filtro `status`/`priority`, independente
+  de `limit`/`offset`. Aditivo — quem já lê só o array do corpo não
+  percebe diferença. Calculado por `COUNT(*)` no próprio banco (nunca uma
+  segunda leitura da tabela inteira em Go) e presente tanto num `200`
+  quanto num `304`, para nunca servir um total desatualizado. Nova rota
+  `GET /v1/tasks/stats` (issue #238) — contagem por status e por
+  prioridade sobre todo o conjunto filtrado do chamador, não só a página;
+  `by_status`/`by_priority` sempre incluem toda chave do enum, mesmo em
+  `0`. Ver `docs/DECISIONS.md` § "Total real na listagem".
+- Nova rota `GET /v1/tasks/export` (issues #239-#243) — exporta o
+  conjunto filtrado inteiro do chamador (mesmo `status`/`priority` de
+  `GET /v1/tasks`, nunca janelado por `limit`/`offset`) como CSV RFC
+  4180, transmitido em fluxo. Título/descrição que começam com `=`, `+`,
+  `-`, `@`, tab ou CR ganham um apóstrofo à frente, para o arquivo nunca
+  ser lido como contendo fórmulas ao abrir no Excel/Sheets (CWE-1236).
+  Um filtro que casa mais de 10.000 tasks é recusado com `400` antes de
+  qualquer linha ser transmitida, em vez de um arquivo que corta no meio
+  e parece completo. Ver `docs/DECISIONS.md` § "Exportação CSV de
+  tasks".
+- `web/`'s lista de tasks ganha um botão "Export" ao lado dos filtros
+  (issue #244) — baixa `GET /v1/tasks/export` com o filtro `status`/
+  `priority` correntemente aplicado na tela. Via `apiFetch` + blob, não
+  um `<a href>` solto: precisa inspecionar a resposta antes de decidir
+  entre entregar o arquivo ao navegador ou mostrar o erro pelo mesmo
+  `classifyError` do resto do app.
+- `web/` ganha uma rota `/report` (issues #245/#246) — um relatório
+  para impressão do conjunto filtrado inteiro do chamador (nunca só a
+  página de 10 itens que a tela normal mostra), sem menus, paginação ou
+  botões de ação. Reusa `GET /v1/tasks` sem `limit` (o "ausente
+  significa sem limite" que `/v1` já promete), nenhuma rota nova no
+  backend. Cabeçalho mostra o filtro aplicado e quando foi gerado;
+  status/prioridade perdem a cor ao imprimir (`@media print`), sobrando
+  só o rótulo de texto e a borda. Botão "Print" ao lado de "Export" abre
+  a rota com o filtro corrente da tela. Ver `docs/DECISIONS.md` §
+  "Relatório de impressão".
+- Encurtador de links (issues #209-#217), opt-in via
+  `LINK_SHORTENING_ENABLED` (padrão `false` — sem ela, nenhuma rota
+  existe, nunca "existe e recusa"): `POST /v1/links` encurta uma URL
+  própria do chamador, `GET /v1/links` lista as próprias, `DELETE
+  /v1/links/{code}` revoga uma própria (dono errado devolve `404`,
+  nunca `403` — mesma regra do resto do projeto), e `GET /{code}`
+  resolve e redireciona, pública e deliberadamente fora de `/v1`. A
+  política de destino recusa endereços privados/internos (padrão do
+  `cairn`) e o próprio domínio configurado desta implantação
+  (`LINK_PUBLIC_BASE_URL`), fechando um caminho de SSRF específico de
+  ser um encurtador. Nesta versão o armazenamento é em memória
+  (`memstore`) — o primeiro passo deliberado de um rollout em direção a
+  Redis, não a implantação final. Ver `docs/DECISIONS.md` §
+  "Encurtador de links".
+
+### Alterado
+- `web/`'s paginador e painel de contagens (issue #247/15.G1) deixam de
+  aproximar — o paginador dizia só "Página N", sem saber quantas
+  existiam, e o painel de contagens contava apenas as tasks da página
+  carregada, rotulado "N nesta página" para não sugerir um total que não
+  tinha como calcular. Agora que `GET /v1/tasks` expõe `X-Total-Count`
+  (issue #237) e `GET /v1/tasks/stats` existe (issue #238), o paginador
+  mostra "Página N de M" e o painel mostra o total real do conjunto
+  filtrado, com a distribuição por status/prioridade buscada de
+  `/v1/tasks/stats` só quando o painel é aberto pela primeira vez sob um
+  filtro — quem nunca abre o painel nunca paga por essa requisição
+  extra.
+
+### Segurança
+- `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em
+  vez de aceitar qualquer inteiro e montar o resultado inteiro em
+  memória. `limit` ausente continua significando "sem limite" — essa
+  promessa já documentada de `/v1` não muda; só um valor explícito
+  grande demais passa a ser recusado.
+- Toda resposta sob `/v1` passa a carregar `Cache-Control`:
+  `private, no-store` em `/v1/auth/*`, `private, no-cache` no resto.
+  Nenhuma resposta autenticada emitia esse header antes — um `200` sem
+  ele é cacheável por heurística (RFC 9111 §4.2.2), e nada aqui deveria
+  ser servido por um cache compartilhado a um segundo usuário.
+- A resposta `403` de CSRF passa a usar o envelope `{"error": "..."}`
+  do resto da API, via `csrf.WithErrorHandler` — fecha a dívida técnica
+  registrada no release anterior (ver "Dívidas técnicas conhecidas" do
+  release que a introduziu). Um cliente que dependia especificamente do
+  corpo em texto puro `Forbidden` observa uma mudança; nenhum cliente
+  que já lia `{"error": "..."}`, como todo o resto da API sempre
+  garantiu, é afetado.
+- `POST /v1/tasks/{id}/attachments` rejeita com `400` a partir do 51º
+  anexo de uma mesma task — teto fixo (`maxAttachmentsPerTask`, não
+  configurável), independente de `ATTACHMENT_MAX_BYTES_PER_USER`, que
+  continua sendo o controle de abuso por bytes. Existe para manter a
+  lista de anexos de uma task navegável, não para fechar um vetor de
+  abuso novo. Ver `docs/DECISIONS.md` § "Teto de anexos por task".
+- `user.Service.ValidateToken` — chamada em toda requisição autenticada
+  — passa a checar um cache em memória, por processo, antes de ler o
+  banco (`tokenCacheTTL = 2s`, issue #232). `Logout`, `LogoutAll`,
+  `ChangePassword` e `DeleteAccount` invalidam a entrada correspondente
+  no mesmo processo assim que a revogação é persistida — a única
+  janela de atraso que o TTL ainda permite é uma sessão revogada
+  continuar validando por até 2s num processo *diferente* daquele que
+  processou a revogação (relevante só durante a sobreposição breve de
+  um rolling update, não em regime estável — ver "Topologia de
+  deploy"). Nenhuma rota muda de comportamento; ver
+  `docs/DECISIONS.md` § "Cache de ValidateToken" para o porquê do TTL
+  e as duas alternativas rejeitadas.
+- `POST /v1/auth/register`'s `password` e `POST /v1/auth/password`'s
+  `new_password` passam a rejeitar, além dos limites de 8–72
+  caracteres já existentes, uma senha que está numa lista de senhas
+  frequentemente usadas (`"password"`, `"12345678"`, `"Password1!"`,
+  ...) ou que é um padrão previsível (caractere único repetido, ou uma
+  sequência ascendente/descendente como `"12345678"`/`"abcdefgh"`,
+  issue #218). Sem exigência de composição de caracteres (nunca "precisa
+  ter maiúscula e símbolo") — deliberado, ver `docs/DECISIONS.md` §
+  "Validação de senha forte". Um cliente cuja senha já satisfazia os
+  limites de tamanho documentados mas cai numa dessas duas categorias
+  passa a receber `400` onde antes recebia `201`/`200`.
+- `POST /v1/auth/login` passa a aplicar um atraso crescente por conta
+  após falhas repetidas — nenhum dos três tiers de rate limit já
+  existentes protegia uma conta especificamente contra um atacante
+  distribuído (issue #220). Sem exigência a partir dos 8/72 caracteres
+  já existentes até a 2ª falha; da 3ª em diante, `250ms × 2^(falhas-3)`
+  até um teto de 4s, zerado no login bem-sucedido ou após 15min de
+  inatividade contra aquela conta. O atraso se aplica igual a e-mail
+  desconhecido, senha errada ou senha correta — nunca só às falhas,
+  para não virar ele mesmo um jeito de saber se uma conta está sob
+  contenção — e nunca bloqueia uma senha correta, só a atrasa. Nenhuma
+  mudança de contrato (`401` continua `401`); latência a mais numa
+  conta sob ataque é o efeito observável. Ver `docs/DECISIONS.md` §
+  "Atraso progressivo por conta" para a curva e o que ela não cobre.
+
+### Corrigido
+- `web/`'s lista de tasks (`useTasks`) podia mostrar dados de um filtro
+  ou página que o usuário já tinha trocado — trocar dois filtros em
+  sequência rápida deixava duas requisições em voo, e a que respondesse
+  **por último** vencia, independente de qual tinha sido pedida por
+  último. Sem erro, sem indicador — a tela simplesmente mentia até um
+  recarregamento manual. `fetchPage` agora aborta a requisição anterior
+  (`AbortController`) antes de iniciar uma nova, issue #235.
+- `X-Total-Count` e `ETag` — cabeçalhos que `GET /v1/tasks` já enviava
+  desde a issue #237 — nunca chegavam a um cliente browser
+  **cross-origin** (o próprio deployment que `docker-compose.yml`
+  documenta, frontend e API em origens diferentes ligadas por
+  `CORS_ALLOWED_ORIGINS`/`VITE_API_BASE_URL`): `Access-Control-Expose-
+  Headers` nunca foi enviado, e a restrição de "safelisted response
+  headers" do CORS torna qualquer cabeçalho de resposta não listado ali
+  invisível para `fetch`'s `Response.headers`. O total lido pelo
+  frontend caía silenciosamente para `0` e a revalidação por `ETag`
+  nunca dava cache-hit — sem erro de rede, sem exceção, só um número
+  errado na tela. `web/e2e/pagination.spec.ts` é a suíte que teria
+  pegado isso — um total lido como `0` desabilita "Next" numa página que
+  ainda deveria ter uma seguinte — mas é cross-origin por padrão só sob
+  o `CORS_ALLOWED_ORIGINS=http://localhost:4173` que
+  `playwright.config.ts` documenta, e não roda em CI; descoberto ao
+  verificar manualmente a issue #247/15.G1 (que passou a depender de ler
+  `X-Total-Count` de verdade) contra o backend numa origem diferente do
+  frontend. `internal/middleware/cors.go` agora expõe os dois.
 
 ## [1.5.0] — a definir na tag
 

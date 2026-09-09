@@ -3,18 +3,23 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"expvar"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/JonasBorgesLM/cairn"
+	"github.com/JonasBorgesLM/cairn/memstore"
+	"github.com/JonasBorgesLM/cairn/policy"
 	core "github.com/JonasBorgesLM/crier/core"
 
 	"github.com/JonasBorgesLM/moat/csrf"
@@ -25,6 +30,7 @@ import (
 
 	"github.com/JonasBorgesLM/task-api/internal/attachment"
 	"github.com/JonasBorgesLM/task-api/internal/config"
+	"github.com/JonasBorgesLM/task-api/internal/link"
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 	"github.com/JonasBorgesLM/task-api/internal/platform/migrate"
 	"github.com/JonasBorgesLM/task-api/internal/task"
@@ -298,7 +304,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// order for this one cascade path.
 	deleteAccountCascade := func(ctx context.Context, userID string) error {
 		const noLimit = -1
-		tasks, err := taskSvc.ListTasks(ctx, userID, noLimit, 0, nil, nil)
+		tasks, _, err := taskSvc.ListTasks(ctx, userID, noLimit, 0, nil, nil)
 		if err != nil {
 			return fmt.Errorf("delete account cascade: list tasks: %w", err)
 		}
@@ -332,7 +338,19 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// comment) and before requireAuth/rate-limit wiring below because
 	// nothing there depends on it — construction order here follows use,
 	// not a required sequence.
+	// csrf.WithErrorHandler replaces the library's default rejection
+	// response — plain text "Forbidden" — with this API's own
+	// {"error": "..."} envelope, which every other response guarantees
+	// (see docs/ARCHITECTURE.md's Future Improvements, where this was
+	// tracked as a known gap: the plain-text response still carried the
+	// right status and X-Request-Id, which is why it was deferred rather
+	// than blocking Fase 12). writeCSRFError below mirrors
+	// user.writeAuthError's exact shape rather than importing it — the
+	// composition root wires cross-cutting concerns together, but
+	// internal/user has no reason to export a helper whose only other
+	// caller is here.
 	var csrfOpts []csrf.Option
+	csrfOpts = append(csrfOpts, csrf.WithErrorHandler(http.HandlerFunc(writeCSRFError)))
 	if cfg.CookieInsecure {
 		csrfOpts = append(csrfOpts, csrf.WithInsecureCookie())
 	}
@@ -519,6 +537,71 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 		}
 	}
 
+	// Link shortening (issues #209-#217, 15.A1-15.A9) is opt-in and, with
+	// LinkShorteningEnabled false (the default), none of this runs: no
+	// routes registered, no cairn.Shortener built at all — not "built but
+	// idle." See docs/DECISIONS.md's "Encurtador de links" section for
+	// the four-step rollout this flag is step 1 of: memstore.Store here,
+	// never Redis yet, is deliberate — swapping in redisstore is its own
+	// later change, made once this step has actually been exercised.
+	//
+	// POST /links needs no dedicated rate-limit tier of its own: it is
+	// wrapped in `authenticated`, the same per-user moat/ratelimit tier
+	// every other mutating route already goes through — cairn carries no
+	// request counter of its own by design (docs/INTEGRATION.md §2.2),
+	// and this is the layer the library's own threat model assumes closes
+	// that gap (T-10).
+	if cfg.LinkShorteningEnabled {
+		linkBaseURL, err := url.Parse(cfg.LinkPublicBaseURL)
+		if err != nil {
+			// Unreachable in practice: config.Load already validated this
+			// as an absolute http(s) URL before Config ever left it. Not
+			// worth a panic over, but also not worth a bespoke error path
+			// for a condition config.Load's own contract already rules out.
+			closeLimiters()
+			closeDB()
+			closeBlobs()
+			return nil, nil, fmt.Errorf("parse LINK_PUBLIC_BASE_URL: %w", err)
+		}
+
+		linkStore := memstore.New()
+		linkPolicy := policy.Default([]string{linkBaseURL.Host})
+		shortener, err := cairn.New(linkStore, cairn.WithPolicy(linkPolicy))
+		if err != nil {
+			closeLimiters()
+			closeDB()
+			closeBlobs()
+			return nil, nil, fmt.Errorf("build link shortener: %w", err)
+		}
+
+		linkSvc, err := link.NewService(shortener, linkStore)
+		if err != nil {
+			closeLimiters()
+			closeDB()
+			closeBlobs()
+			return nil, nil, fmt.Errorf("build link service: %w", err)
+		}
+		link.NewHandler(linkSvc, logger, cfg.LinkPublicBaseURL).RegisterRoutes(v1, authenticated)
+
+		// The public resolve route deliberately never joins v1 — see
+		// docs/DECISIONS.md's "Encurtador de links" section for why a
+		// short link's own address should not carry this API's version
+		// prefix. Registered on mux (not v1), it still inherits
+		// everything mux itself sits under: RequestID, Logging, Recovery,
+		// secureheaders, CORS, RealIP, and — through root's catch-all
+		// below — the global address-keyed rate limiter (T-01, scan
+		// resistance; cairn's own threat model assumes this layer exists,
+		// docs/INTEGRATION.md §2.1).
+		//
+		// "/{code}" is a single-path-segment wildcard, not a bare "/"
+		// catch-all: ServeMux already prefers "/v1/" and "GET /debug/vars"
+		// over it at the same or a shorter level, so this can never
+		// shadow either regardless of registration order — the same
+		// literal-beats-wildcard rule internal/task's GET /tasks/stats
+		// and GET /tasks/export both already rely on.
+		mux.Handle("/{code}", link.NewPublicResolveHandler(shortener))
+	}
+
 	// Mount the versioned contract. StripPrefix is what lets the handlers
 	// register unprefixed patterns: the sub-mux sees "/tasks/{id}" and
 	// therefore still populates r.PathValue as it would unmounted.
@@ -535,7 +618,12 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// the readiness probe in particular is named in deployment manifests
 	// (see docs/DECISIONS.md), which should not have to be re-edited
 	// every time the API version moves.
-	mux.Handle("/v1/", http.StripPrefix("/v1", v1))
+	//
+	// middleware.CacheControl sits inside StripPrefix, not outside it, so
+	// it sees the same unprefixed path ("/auth/login", not
+	// "/v1/auth/login") the handlers themselves register against — see
+	// its own doc comment for why every /v1 response needs one.
+	mux.Handle("/v1/", http.StripPrefix("/v1", middleware.CacheControl("/auth/")(v1)))
 
 	root := http.NewServeMux()
 	registerHealthRoute(root, logger)
@@ -556,6 +644,18 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// chain). It is a no-op end to end unless CORS_ALLOWED_ORIGINS is set;
 	// see middleware.CORS.
 	//
+	// RealIP sits right after RequestID, before anything that could
+	// answer a request early: it reuses addressKey — the exact same
+	// function the two address-keyed rate-limit tiers below key on —
+	// purely to make that already-resolved address available in context
+	// (RealIPFromContext) for anything downstream that wants it, most
+	// concretely user.Handler's audit-event logging (issue #223). It
+	// never changes request handling itself, so its position relative to
+	// secureheaders/CORS/Recovery carries none of their ordering
+	// constraints — only "after RequestID" matters, and even that is a
+	// convenience (matching where request-scoped context values
+	// conventionally get set), not a hard requirement.
+	//
 	// secureheaders sits outside CORS, and therefore outside everything
 	// that can answer a request without reaching the mux: it has to run
 	// before the preflight CORS short-circuits, before the 429 the rate
@@ -573,6 +673,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// on.
 	rootHandler := middleware.Chain(
 		middleware.RequestID,
+		middleware.RealIP(middleware.AddressKeyFunc(addressKey)),
 		middleware.Logging(logger),
 		secureheaders.Middleware(
 			// This API only ever returns JSON, so nothing it serves
@@ -768,6 +869,21 @@ func buildBlobStore(ctx context.Context, cfg config.Config) (attachment.BlobStor
 		})
 	}
 	return attachment.NewFSBlobStore(cfg.AttachmentStorageDir)
+}
+
+// writeCSRFError is csrf.WithErrorHandler's replacement for the
+// library's default plain-text "Forbidden" — it writes the same
+// {"error": "..."} shape every other response in this API guarantees.
+// Deliberately not distinguishing *why* the check failed (missing
+// cookie, mismatched token, disallowed Origin): csrf.Protector.reject's
+// own doc comment already makes this call for its default response, and
+// a caller-visible reason here would be the same kind of information
+// leak — it would give a forger issuing forged requests a progress
+// indicator instead of an opaque rejection.
+func writeCSRFError(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "CSRF verification failed"})
 }
 
 // userIDKey keys the per-user rate limiter by the authenticated user's

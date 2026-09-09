@@ -2,10 +2,10 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PAGE_SIZE, useTasks } from './useTasks'
 
-function jsonResponse(status: number, body: unknown): Response {
+function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...headers },
   })
 }
 
@@ -23,6 +23,18 @@ function makeTask(id: string) {
 
 function makeTasks(count: number, offset = 0) {
   return Array.from({ length: count }, (_, i) => makeTask(String(offset + i + 1)))
+}
+
+// A deferred Response the test controls the timing of, standing in for a
+// slow request that resolves only when resolve() below is called — as
+// opposed to mockResolvedValueOnce, which resolves on the next
+// microtask and can never be made to arrive *after* a later call.
+function deferredResponse() {
+  let resolve!: (response: Response) => void
+  const promise = new Promise<Response>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
 }
 
 describe('useTasks', () => {
@@ -71,38 +83,99 @@ describe('useTasks', () => {
     })
   })
 
-  it('requests limit+1: exactly limit+1 back means there IS more, and the extra item is never shown', async () => {
+  it('requests exactly PAGE_SIZE, and derives hasNextPage from X-Total-Count', async () => {
     const fetchMock = vi.mocked(fetch)
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE + 1)))
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(PAGE_SIZE), { 'X-Total-Count': String(PAGE_SIZE + 5) }),
+    )
 
     const { result } = renderHook(() => useTasks())
     await waitFor(() => expect(result.current.status).toBe('success'))
 
     const requestedUrl = fetchMock.mock.calls[0]![0]
-    expect(String(requestedUrl)).toContain(`limit=${PAGE_SIZE + 1}`)
+    expect(String(requestedUrl)).toContain(`limit=${PAGE_SIZE}`)
     expect(String(requestedUrl)).toContain('offset=0')
 
     expect(result.current.tasks).toHaveLength(PAGE_SIZE)
+    expect(result.current.total).toBe(PAGE_SIZE + 5)
+    expect(result.current.totalPages).toBe(2)
     expect(result.current.hasNextPage).toBe(true)
     expect(result.current.page).toBe(1)
     expect(result.current.hasPreviousPage).toBe(false)
   })
 
-  it('exactly limit back (not limit+1) means there is NO more', async () => {
+  it('a total no larger than PAGE_SIZE means there is NO more', async () => {
     const fetchMock = vi.mocked(fetch)
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE)))
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(PAGE_SIZE), { 'X-Total-Count': String(PAGE_SIZE) }),
+    )
 
     const { result } = renderHook(() => useTasks())
     await waitFor(() => expect(result.current.status).toBe('success'))
 
     expect(result.current.tasks).toHaveLength(PAGE_SIZE)
+    expect(result.current.totalPages).toBe(1)
     expect(result.current.hasNextPage).toBe(false)
+  })
+
+  // #235: two fetchPage calls can be in flight together whenever a
+  // filter or a page changes while the previous request hasn't answered
+  // yet. Before AbortController tracking, whichever one resolved *last*
+  // won regardless of which one was asked for last.
+  //
+  // Negative control run during development, in the same spirit as
+  // cmd/web's TestPathEscapesDir: temporarily removing the
+  // `if (controller.signal.aborted) return` checks from useTasks.tsx's
+  // fetchPage (simulating the pre-#235 behavior) made this test fail
+  // with tasks equal to the stale ids (['1', '2', '3']) instead of
+  // ['101', '102'] — confirming it actually catches the regression it
+  // exists for, not just the current passing behavior. Restored
+  // immediately after.
+  it('a stale request resolving after a newer one does not overwrite its result', async () => {
+    const fetchMock = vi.mocked(fetch)
+    const stale = deferredResponse()
+    fetchMock.mockImplementationOnce(() => stale.promise)
+
+    const { result, rerender } = renderHook(({ status }) => useTasks(status), {
+      initialProps: { status: 'pending' },
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const staleSignal = fetchMock.mock.calls[0]![1]?.signal
+    expect(staleSignal).toBeInstanceOf(AbortSignal)
+
+    // Changing the filter resets to page 0 and fires a second request
+    // while the first is still pending — the exact shape the issue
+    // describes ("trocar dois filtros em sequência rápida").
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(2, 100)))
+    rerender({ status: 'done' })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    // fetchPage aborts whatever it superseded before issuing its own
+    // request — this is what the newer request is supposed to do to the
+    // older one.
+    expect(staleSignal?.aborted).toBe(true)
+
+    // The stale request now answers, late, with data for the filter
+    // that is no longer selected.
+    stale.resolve(jsonResponse(200, makeTasks(3, 0)))
+
+    await waitFor(() => expect(result.current.status).toBe('success'))
+    // Give the resolved-but-superseded promise's continuation a turn to
+    // run before asserting nothing changed because of it.
+    await act(async () => {})
+
+    expect(result.current.tasks.map((t) => t.id)).toEqual(['101', '102'])
   })
 
   it('nextPage replaces the page at the next offset — it does not accumulate', async () => {
     const fetchMock = vi.mocked(fetch)
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE + 1, 0)))
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE)))
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(PAGE_SIZE, 0), { 'X-Total-Count': String(PAGE_SIZE + 5) }),
+    )
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(5, PAGE_SIZE), { 'X-Total-Count': String(PAGE_SIZE + 5) }),
+    )
 
     const { result } = renderHook(() => useTasks())
     await waitFor(() => expect(result.current.status).toBe('success'))
@@ -127,9 +200,10 @@ describe('useTasks', () => {
 
   it('previousPage goes back to the page before it', async () => {
     const fetchMock = vi.mocked(fetch)
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE + 1, 0)))
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE)))
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE + 1, 0)))
+    const total = { 'X-Total-Count': String(PAGE_SIZE + 5) }
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE, 0), total))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE), total))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE, 0), total))
 
     const { result } = renderHook(() => useTasks())
     await waitFor(() => expect(result.current.status).toBe('success'))
@@ -150,7 +224,7 @@ describe('useTasks', () => {
 
   it('nextPage is a no-op on the last page', async () => {
     const fetchMock = vi.mocked(fetch)
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(3)))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(3), { 'X-Total-Count': '3' }))
 
     const { result } = renderHook(() => useTasks())
     await waitFor(() => expect(result.current.status).toBe('success'))
@@ -165,12 +239,18 @@ describe('useTasks', () => {
 
   it('emptying the last page by deleting its last row steps back a page', async () => {
     const fetchMock = vi.mocked(fetch)
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE + 1, 0)))
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(1, PAGE_SIZE)))
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(PAGE_SIZE, 0), { 'X-Total-Count': String(PAGE_SIZE + 1) }),
+    )
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(1, PAGE_SIZE), { 'X-Total-Count': String(PAGE_SIZE + 1) }),
+    )
     // The delete's re-fetch of page 2 finds it empty...
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, []))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, [], { 'X-Total-Count': String(PAGE_SIZE) }))
     // ...so the hook drops back to page 1 and fetches that instead.
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE, 0)))
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(PAGE_SIZE, 0), { 'X-Total-Count': String(PAGE_SIZE) }),
+    )
 
     const { result } = renderHook(() => useTasks())
     await waitFor(() => expect(result.current.status).toBe('success'))
@@ -342,9 +422,10 @@ describe('useTasks', () => {
   // set would show page 3 of a different one.
   it('changing a filter returns to page 1 and re-fetches from offset 0', async () => {
     const fetchMock = vi.mocked(fetch)
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE + 1, 0)))
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE)))
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(2)))
+    const total = { 'X-Total-Count': String(PAGE_SIZE + 5) }
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE, 0), total))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE), total))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(2), { 'X-Total-Count': '2' }))
 
     const { result, rerender } = renderHook(({ status }: { status: string }) => useTasks(status), {
       initialProps: { status: '' },
@@ -363,5 +444,189 @@ describe('useTasks', () => {
     const thirdUrl = String(fetchMock.mock.calls[2]![0])
     expect(thirdUrl).toContain('offset=0')
     expect(thirdUrl).toContain('status=done')
+  })
+})
+
+describe('page cache (15.D3)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('revisiting an already-fetched page shows it immediately, before revalidation resolves', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(PAGE_SIZE, 0), {
+        ETag: '"page-0"',
+        'X-Total-Count': String(PAGE_SIZE + 5),
+      }),
+    )
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(5, PAGE_SIZE), {
+        ETag: '"page-1"',
+        'X-Total-Count': String(PAGE_SIZE + 5),
+      }),
+    )
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+    expect(result.current.tasks).toHaveLength(PAGE_SIZE)
+
+    await act(async () => {
+      result.current.nextPage()
+    })
+    await waitFor(() => expect(result.current.page).toBe(2))
+    await waitFor(() => expect(result.current.isPaging).toBe(false))
+
+    // Page 0's revalidation is made to hang forever — if the hook
+    // needed a network response to show anything, this would leave it
+    // stuck showing a loading skeleton instead.
+    const hang = deferredResponse()
+    fetchMock.mockImplementationOnce(() => hang.promise)
+
+    await act(async () => {
+      result.current.previousPage()
+    })
+
+    expect(result.current.page).toBe(1)
+    expect(result.current.status).toBe('success')
+    expect(result.current.isPaging).toBe(false)
+    expect(result.current.tasks).toHaveLength(PAGE_SIZE)
+  })
+
+  it('revalidates a cached page with If-None-Match, and a 304 keeps the cached data', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(3), { ETag: '"v1"' }))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    // No If-None-Match on the very first fetch of a page — nothing
+    // cached yet to send.
+    expect(fetchMock.mock.calls[0]![1]?.headers).not.toHaveProperty('If-None-Match')
+
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 304 }))
+    await act(async () => {
+      result.current.reload()
+    })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    const revalidateHeaders = new Headers(fetchMock.mock.calls[1]![1]?.headers)
+    expect(revalidateHeaders.get('If-None-Match')).toBe('"v1"')
+
+    // 304 is not an error, and the tasks shown are still the ones the
+    // cache already had.
+    expect(result.current.status).toBe('success')
+    expect(result.current.error).toBeNull()
+    expect(result.current.tasks).toHaveLength(3)
+  })
+
+  it('a failed background revalidation keeps showing the cached page instead of erroring', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(3), { ETag: '"v1"' }))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(503, { error: 'service temporarily unavailable, please retry' }),
+    )
+    await act(async () => {
+      result.current.reload()
+    })
+    // Let the failed revalidation's promise chain settle.
+    await act(async () => {})
+
+    expect(result.current.status).toBe('success')
+    expect(result.current.error).toBeNull()
+    expect(result.current.tasks).toHaveLength(3)
+  })
+
+  // A revalidation fetch fires whether or not there was a cache hit —
+  // stale-while-revalidate always goes back to the network, it just
+  // doesn't *wait* on it when there's something cached to show first.
+  // So counting fetch calls cannot tell "cleared" from "not cleared";
+  // what distinguishes them is whether the page renders synchronously
+  // from cache (a hit) or sits in 'loading' until the network answers (a
+  // miss) — the same synchronous check
+  // "revisiting an already-fetched page" above uses, on a response held
+  // open with deferredResponse() so the test can inspect that in-between
+  // state at all.
+  it('addTaskLocally clears every cached page, not only the current one', async () => {
+    const fetchMock = vi.mocked(fetch)
+    const total = { 'X-Total-Count': String(PAGE_SIZE + 5) }
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(PAGE_SIZE, 0), total))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE), total))
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    await act(async () => {
+      result.current.nextPage()
+    })
+    await waitFor(() => expect(result.current.page).toBe(2)) // page 0 and page 1 both cached now
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeTasks(5, PAGE_SIZE), total))
+    await act(async () => {
+      result.current.addTaskLocally(makeTask('new'))
+    })
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    // Page 0's entry must be gone: hang its revalidation and confirm the
+    // hook has nothing to show synchronously, i.e. it is genuinely
+    // fetching rather than instantly redisplaying a stale cache hit.
+    const hang = deferredResponse()
+    fetchMock.mockImplementationOnce(() => hang.promise)
+    await act(async () => {
+      result.current.previousPage()
+    })
+
+    expect(result.current.page).toBe(1)
+    expect(result.current.status).toBe('loading')
+  })
+
+  it('updateTaskLocally patches the cached page, so a later revisit reflects the edit', async () => {
+    const fetchMock = vi.mocked(fetch)
+    // A total above PAGE_SIZE so hasNextPage is true and nextPage()
+    // below actually moves — a total no larger than PAGE_SIZE (no next
+    // page) would make nextPage() a no-op, and this test would pass
+    // without ever revisiting anything.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(PAGE_SIZE, 0), { 'X-Total-Count': String(PAGE_SIZE + 5) }),
+    )
+
+    const { result } = renderHook(() => useTasks())
+    await waitFor(() => expect(result.current.status).toBe('success'))
+
+    const original = result.current.tasks[0]!
+    const edited = { ...original, title: 'Edited title' }
+    act(() => {
+      result.current.updateTaskLocally(edited)
+    })
+    expect(result.current.tasks[0]!.title).toBe('Edited title')
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeTasks(5, PAGE_SIZE), { 'X-Total-Count': String(PAGE_SIZE + 5) }),
+    )
+    await act(async () => {
+      result.current.nextPage()
+    })
+    await waitFor(() => expect(result.current.page).toBe(2))
+
+    // Page 0's revalidation is held open — if the edit had not reached
+    // cacheRef, this assertion would be checking the pre-edit title
+    // (or, with no third mock queued at all, the call would throw
+    // instead of resolving to anything).
+    const hang = deferredResponse()
+    fetchMock.mockImplementationOnce(() => hang.promise)
+    await act(async () => {
+      result.current.previousPage()
+    })
+
+    expect(result.current.page).toBe(1)
+    expect(result.current.tasks[0]!.title).toBe('Edited title')
   })
 })

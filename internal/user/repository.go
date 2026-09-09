@@ -62,6 +62,13 @@ type Repository interface {
 	FindSessionByTokenHash(ctx context.Context, tokenHash string) (Session, error)
 	DeleteSession(ctx context.Context, tokenHash string) error
 
+	// FindSessionsForUser returns every session belonging to userID,
+	// newest first (ORDER BY created_at DESC) — the same order
+	// CreateSession's own eviction query already gets from
+	// idx_sessions_user_id_created_at, so this needs no new index.
+	// Backs Service.ListSessions (issue #224, GET /v1/auth/sessions).
+	FindSessionsForUser(ctx context.Context, userID string) ([]Session, error)
+
 	// DeleteSessionsForUser removes every session belonging to userID,
 	// unconditionally — including the one that authenticated the
 	// request that led here. Backs Service.LogoutAll: a caller who

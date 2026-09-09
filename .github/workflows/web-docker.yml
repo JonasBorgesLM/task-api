@@ -1,0 +1,111 @@
+name: Web Docker Image
+
+# A third pipeline, deliberately — neither ci.yml nor web-ci.yml can
+# cover this on their own. ci.yml ignores web/** entirely (see its own
+# paths-ignore); web-ci.yml triggers only on web/** and never installs
+# Go. web/Dockerfile's build spans both: cmd/web (this repository's Go
+# module, at the root) and web/ (the Vite project) in one multi-stage
+# build. A change to either side needs this to run, so its own path
+# filter names both.
+#
+# Same reasoning as ci.yml's own docker-image job: the image is the
+# artifact that actually runs in production, and until this workflow
+# existed nothing built or ran it — a build-breaking regression (an npm
+# dependency that stops resolving, a Go build error inside the
+# go-builder stage) would only surface at deploy time.
+on:
+  push:
+    branches: [main, develop]
+    paths: ['web/**', 'cmd/web/**', 'go.mod', 'go.sum']
+  pull_request:
+    branches: [main, develop]
+    paths: ['web/**', 'cmd/web/**', 'go.mod', 'go.sum']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/develop' }}
+
+jobs:
+  docker-image:
+    name: Docker Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Built from the repository root, not web/ — see web/Dockerfile's
+      # own top comment for why (cmd/web lives outside web/, in the same
+      # Go module as cmd/api). A throwaway origin: nothing here actually
+      # calls the API, this job only proves the image builds and serves
+      # its files correctly.
+      - name: Build image
+        run: |
+          docker build -f web/Dockerfile \
+            --build-arg VITE_API_BASE_URL=http://localhost:8080 \
+            -t task-api-web:ci .
+
+      # Same double duty as ci.yml's own smoke test: proving the process
+      # actually serves correctly, and proving the binary is genuinely
+      # static — the runtime base is `scratch`, no libc and no loader,
+      # so a dynamically linked binary would not even start.
+      - name: Smoke test the image
+        run: |
+          docker run -d --name task-api-web-ci -p 18081:8080 \
+            -e WEB_API_ORIGIN="http://localhost:8080" \
+            task-api-web:ci
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18081/healthz >/dev/null; then
+              echo "web respondeu após ${i}s"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "web não respondeu em 30s"
+              docker logs task-api-web-ci
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "--- /healthz ---"
+          curl -sf -o /dev/null -w "  status=%{http_code}\n" http://127.0.0.1:18081/healthz
+
+          echo "--- / deve ser 200 e carregar a Content-Security-Policy computada ---"
+          headers=$(curl -sD - -o /tmp/index.html http://127.0.0.1:18081/)
+          echo "$headers" | grep -qi "^content-security-policy:.*script-src 'self' 'sha256-" || {
+            echo "Content-Security-Policy sem hash de script-src computado:"
+            echo "$headers"
+            exit 1
+          }
+          echo "  Content-Security-Policy ok"
+
+          echo "--- rota da SPA sem arquivo correspondente deve cair no index.html (200) ---"
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18081/tasks/some-id)
+          if [ "$code" != "200" ]; then
+            echo "esperado 200 (fallback da SPA), recebido $code"
+            docker logs task-api-web-ci
+            exit 1
+          fi
+          echo "  status=200"
+
+      # O binário roda como 65532:65532 (ver web/Dockerfile) — mesma
+      # checagem que ci.yml já faz para task-api:ci, pela mesma razão: um
+      # USER removido por engano não muda nenhum comportamento que um
+      # teste funcional pegue sozinho.
+      - name: Assert the container does not run as root
+        run: |
+          uid=$(docker inspect -f '{{.Config.User}}' task-api-web:ci)
+          if [ "$uid" != "65532:65532" ]; then
+            echo "esperado USER 65532:65532, encontrado \"$uid\""
+            exit 1
+          fi
+          echo "  USER=$uid"
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f task-api-web-ci || true

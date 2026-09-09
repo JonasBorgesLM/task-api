@@ -1,3 +1,4 @@
+import { useNavigate } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
 import { ErrorBoundary, SectionErrorFallback } from './components/ErrorBoundary'
 import { useAuth } from './features/auth/useAuth'
@@ -25,12 +26,14 @@ import { TaskList } from './features/tasks/TaskList'
  */
 export function AuthenticatedHome() {
   const { user, logout, logoutAll } = useAuth()
+  const navigate = useNavigate()
 
   return (
     <AppShell
       userEmail={user?.email}
       onLogout={() => void logout()}
       onLogoutAll={() => void logoutAll()}
+      onManageSessions={() => navigate('/sessions')}
     >
       {/* A second, narrower boundary than the app-wide one in main.tsx:
           a malformed task shouldn't also take the header and account

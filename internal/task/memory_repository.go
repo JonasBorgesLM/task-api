@@ -113,6 +113,73 @@ func (r *memoryRepository) FindAll(ctx context.Context, userID string, limit, of
 	return paginateTasks(tasks, limit, offset), nil
 }
 
+// CountAll returns how many of userID's tasks match statuses/priorities —
+// the same filter FindAll applies, without the limit/offset window. See
+// Repository's doc comment.
+func (r *memoryRepository) CountAll(ctx context.Context, userID string, statuses []Status, priorities []Priority) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	count := 0
+	for _, task := range r.store {
+		if task.UserID != userID {
+			continue
+		}
+		if !matchesAny(task.Status, statuses) {
+			continue
+		}
+		if !matchesAny(task.Priority, priorities) {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
+// CountByStatusAndPriority mirrors postgresRepository's GROUP BY pair —
+// see Repository's doc comment for why every Status/Priority value is
+// present in its map even at zero.
+func (r *memoryRepository) CountByStatusAndPriority(ctx context.Context, userID string, statuses []Status, priorities []Priority) (byStatus map[Status]int, byPriority map[Priority]int, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	byStatus = map[Status]int{
+		StatusPending:    0,
+		StatusInProgress: 0,
+		StatusDone:       0,
+		StatusCancelled:  0,
+	}
+	byPriority = map[Priority]int{
+		PriorityLow:    0,
+		PriorityMedium: 0,
+		PriorityHigh:   0,
+	}
+
+	for _, task := range r.store {
+		if task.UserID != userID {
+			continue
+		}
+		if !matchesAny(task.Status, statuses) {
+			continue
+		}
+		if !matchesAny(task.Priority, priorities) {
+			continue
+		}
+		byStatus[task.Status]++
+		byPriority[task.Priority]++
+	}
+
+	return byStatus, byPriority, nil
+}
+
 // paginateTasks returns the sub-slice of tasks starting at offset and
 // containing at most limit elements. limit < 0 means "no limit" (return
 // everything from offset onward). offset or limit values beyond the end of

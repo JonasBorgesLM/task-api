@@ -129,6 +129,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List every active session belonging to the caller
+         * @description Fills the gap between "this session" (`POST /auth/logout`) and "every session" (`POST /auth/logout-all`): shows how many sessions exist and when each was created, so a caller can decide whether one specific session looks suspicious before revoking it — see `DELETE /v1/auth/sessions/{id}`.
+         *
+         *     Never exposes the raw token or its stored hash. Each session's `id` is an opaque value derived from its hash (see `docs/DECISIONS.md` § "Tela de sessões ativas"), meaningful only for addressing `DELETE /v1/auth/sessions/{id}` — it carries no other information and cannot be reversed back to a usable credential.
+         *
+         *     Ordered newest first. `is_current` marks the one session that authenticated this very request.
+         */
+        get: operations["listSessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke one specific session
+         * @description Addressed by the opaque `id` `GET /v1/auth/sessions` lists each session under — never the token or its hash. Revoking the session that authenticated this very call is allowed: nothing here special-cases it, since that is exactly what `POST /auth/logout` already does under a different address (see `docs/DECISIONS.md` § "Tela de sessões ativas").
+         *
+         *     An `id` that does not address any session of the caller's own — including one that names a real session belonging to a *different* account — returns `404`, the same never-confirm- existence treatment every other single-resource lookup in this API gives a row it does not own.
+         */
+        delete: operations["revokeSession"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/me": {
         parameters: {
             query?: never;
@@ -170,6 +216,46 @@ export interface paths {
          * @description Creates a new task owned by the authenticated caller, with status `pending`. `id`, `status`, `created_at` and `updated_at` are always assigned by the server; if the client includes any of these fields in the request body, or any other field not part of CreateTaskRequest, they are silently ignored — the API never returns a 400 for unknown fields.
          */
         post: operations["createTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tasks/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Count the authenticated caller's tasks, grouped by status and priority
+         * @description Counts across the caller's entire filtered set — never just one page — grouped by status and, separately, by priority. Accepts the same `status`/`priority` query parameters as `GET /v1/tasks`, validated identically (an unrecognized value rejects the whole request with `400`, the same as listing does). `by_status` and `by_priority` always carry every `Status`/ `Priority` enum value, including at `0` — a caller never has to tell "no tasks in this group" apart from "this key is absent". `total` is the sum of `by_status`'s values (equivalently, of `by_priority`'s) and matches what `X-Total-Count` would report for `GET /v1/tasks` with the same filter.
+         */
+        get: operations["taskStats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tasks/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export the authenticated caller's tasks as CSV
+         * @description Streams every one of the caller's tasks matching the `status`/`priority` filter as RFC 4180 CSV, in the same order `GET /v1/tasks` itself uses (`created_at` ascending, ties broken by `id`) — never windowed by `limit`/`offset`, since an export exists specifically to return the entire filtered set. Rejects with `400` up front, before anything is fetched or streamed, if the filtered total exceeds the server's export row limit (see `docs/DECISIONS.md` § "Teto do export CSV") — an export that started streaming and then cut off partway through would produce a file that looks complete and isn't. Any leading `=`, `+`, `-`, `@`, tab or carriage return in a `title`/`description` cell is prefixed with a single quote to prevent the file from being interpreted as containing spreadsheet formulas when opened (CWE-1236).
+         */
+        get: operations["exportTasks"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -274,6 +360,8 @@ export interface paths {
          *
          *     The caller's total across every attachment they own — `ATTACHMENT_MAX_BYTES_PER_USER`, 500 MiB by default — is checked *before* the upload streams in, using the total the caller already had. A caller already at or over the quota is refused without a single byte being read; one accepted upload can push the total up to `ATTACHMENT_MAX_BYTES` past the quota (see `docs/DECISIONS.md` § "Quota de anexos" for why that overshoot is accepted).
          *
+         *     A single task may carry at most 50 attachments, checked the same way and before the same one — this is a fixed limit, not a per-deployment setting, since it exists to keep one task's attachment list practical to fetch and browse rather than to bound abuse (`ATTACHMENT_MAX_BYTES_PER_USER` already does that).
+         *
          *     These routes exist only when `ATTACHMENT_STORAGE_DIR` is configured; otherwise every one of them returns 404.
          */
         post: operations["uploadAttachment"];
@@ -306,6 +394,70 @@ export interface paths {
          *     Ownership follows the same rule as download: a key belonging to another user's task is answered exactly like a key that names nothing. No request body.
          */
         delete: operations["deleteAttachment"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the authenticated caller's links
+         * @description Returns the caller's own links, oldest first, windowed by `limit`/`after` — cairn's own cursor pagination (never an offset), continued by passing back the `X-Next-Cursor` response header's value as the next request's `after`.
+         */
+        get: operations["listLinks"];
+        put?: never;
+        /**
+         * Shorten a URL
+         * @description Creates a short link owned by the authenticated caller. The destination is validated and evaluated against this deployment's policy before anything is stored — SR-05 through SR-10 in the cairn module's own requirements, plus this deployment's own-domain block (see `422` below and `docs/DECISIONS.md`'s "Encurtador de links" section).
+         */
+        post: operations["createLink"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/links/{code}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke one of the authenticated caller's links
+         * @description Revoking keeps the record (so the code stays distinguishable from one that never existed) but makes it stop resolving. Immediate: there is no cache in front of the store to invalidate. A code that does not exist, or that exists but belongs to another caller, both answer `404` — identically, the same rule every other resource in this API follows for a resource that isn't yours (never `403`, which would itself confirm the code exists).
+         */
+        delete: operations["revokeLink"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/{code}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Resolve a short code and redirect to its destination
+         * @description Public — no authentication required or checked, by design (cairn's own ADR-0010: a read has no owner to scope against). Deliberately **outside `/v1`**: a short link's own address is meant to be handed out and clicked, and should not carry this API's version prefix — see `docs/DECISIONS.md`'s "Encurtador de links" section. Not found, invalid, expired and revoked all answer the identical `404` shape (cairn's SR-03): distinguishing them would help a legitimate visitor but is also a free oracle for anyone scanning the code space, so this API does not opt into distinguishing them on this anonymous route (contrast `DELETE /v1/links/{code}`'s own `404`, which is indistinguishable for a different, ownership-shaped reason).
+         */
+        get: operations["resolveLink"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -411,6 +563,29 @@ export interface components {
             /** @example true */
             readonly attachments_enabled: boolean;
         };
+        /** @description One entry in GET /v1/auth/sessions' array. Never the raw token or its stored hash — id is an opaque value derived from the hash, meaningful only for addressing DELETE /v1/auth/sessions/{id} (see docs/DECISIONS.md § "Tela de sessões ativas"). */
+        SessionResponse: {
+            /**
+             * @description Opaque identifier for this session. Not the session token, not its hash, and not reversible back to either.
+             * @example 7f9e1c2a8b3d4560f1e2d3c4b5a69788
+             */
+            readonly id: string;
+            /**
+             * Format: date-time
+             * @example 2026-08-08T12:00:00Z
+             */
+            readonly created_at: string;
+            /**
+             * Format: date-time
+             * @example 2026-08-15T12:00:00Z
+             */
+            readonly expires_at: string;
+            /**
+             * @description True for the one session that authenticated the request asking for this list.
+             * @example true
+             */
+            readonly is_current: boolean;
+        };
         /** @description Accepted body for POST /auth/register. */
         RegisterRequest: {
             /**
@@ -420,7 +595,7 @@ export interface components {
              */
             email: string;
             /**
-             * @description Required, 8–72 characters. The 72-character ceiling is bcrypt's own input limit (golang.org/x/crypto/bcrypt rejects longer input outright), not an arbitrary policy choice.
+             * @description Required, 8–72 characters. The 72-character ceiling is bcrypt's own input limit (golang.org/x/crypto/bcrypt rejects longer input outright), not an arbitrary policy choice. Also rejected: a password on a list of frequently used passwords, and a password that is a single repeated character or a sequential run (e.g. "12345678", "abcdefgh") — see `docs/DECISIONS.md` § "Validação de senha forte". There is no mandatory character-class rule (no forced digit/symbol).
              * @example correct horse battery staple
              */
             password: string;
@@ -443,7 +618,7 @@ export interface components {
              */
             current_password: string;
             /**
-             * @description Required, 8–72 characters — the same bounds RegisterRequest's password enforces, for the same bcrypt-input-limit reason.
+             * @description Required, 8–72 characters — the same bounds, and the same common/predictable-password rejection, that RegisterRequest's password enforces.
              * @example another correct horse battery staple
              */
             new_password: string;
@@ -499,6 +674,72 @@ export interface components {
          * @enum {string}
          */
         Priority: "low" | "medium" | "high";
+        /** @description Body returned by `GET /v1/tasks/stats`. `by_status` and `by_priority` always carry every `Status`/`Priority` enum value, including at `0`. */
+        TaskStats: {
+            /** @example 9 */
+            total: number;
+            /**
+             * @example {
+             *       "pending": 3,
+             *       "in_progress": 1,
+             *       "done": 5,
+             *       "cancelled": 0
+             *     }
+             */
+            by_status: {
+                [key: string]: number;
+            };
+            /**
+             * @example {
+             *       "low": 2,
+             *       "medium": 4,
+             *       "high": 3
+             *     }
+             */
+            by_priority: {
+                [key: string]: number;
+            };
+        };
+        /** @description Request body for POST /v1/links. */
+        CreateLinkRequest: {
+            /**
+             * Format: uri
+             * @description The destination to shorten.
+             */
+            url: string;
+            /** @description A caller-chosen code instead of a generated one. Omit for a generated code. Any code is accepted except one colliding with the generated code length, or one on the reserved list (`admin`, `api`, `health`, `login`, `static`, `assets`, `robots.txt`, `favicon.ico`, `.well-known`). */
+            vanity_code?: string;
+            /** @description This link's time-to-live in seconds. Omit or `0` for this deployment's default (which itself defaults to "never expires"). */
+            ttl_seconds?: number;
+        };
+        /** @description The persisted representation of a short link, as returned by `POST /v1/links` and `GET /v1/links`. The owning user's id is deliberately not included — every link a client can ever retrieve already belongs to it, the same convention `Task` follows. */
+        Link: {
+            /**
+             * @description The short code.
+             * @example aZ3kQ9
+             */
+            code: string;
+            /**
+             * Format: uri
+             * @description `LINK_PUBLIC_BASE_URL` joined with `code` — ready to hand out or click.
+             * @example https://s.example.com/aZ3kQ9
+             */
+            short_url: string;
+            /**
+             * Format: uri
+             * @description The destination this code resolves to.
+             */
+            url: string;
+            /** @description Whether `code` was chosen by the caller rather than generated. */
+            vanity: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: date-time
+             * @description Absent when the link never expires.
+             */
+            expires_at?: string;
+        };
         /** @description The persisted representation of a task, as returned by every endpoint that returns a task body. Field order and JSON keys match the `json` struct tags on task.Task exactly (snake_case). The owning user's id is deliberately not included — every task a client can ever retrieve already belongs to it. */
         Task: {
             /**
@@ -628,6 +869,15 @@ export interface components {
         };
     };
     responses: {
+        /** @description The caller's `If-None-Match` names the current representation's `ETag` (see the `TaskETag` header component) — nothing has changed, and the body is intentionally empty. `Cache-Control` and `ETag` are still sent, matching what the `200` would have carried. */
+        NotModified: {
+            headers: {
+                "X-Request-Id": components["headers"]["XRequestID"];
+                ETag: components["headers"]["TaskETag"];
+                [name: string]: unknown;
+            };
+            content?: never;
+        };
         /** @description Missing, malformed, or invalid/expired `Authorization: Bearer` header. */
         Unauthorized: {
             headers: {
@@ -644,9 +894,9 @@ export interface components {
             };
         };
         /**
-         * @description CSRF verification failed on a state-changing request that did not carry `Authorization: Bearer` (see the `cookieAuth` security scheme and docs/DECISIONS.md § "Autenticação: modo duplo"). Concretely, one of: the request has no `X-CSRF-Token` header; the token doesn't match the CSRF cookie; the CSRF cookie itself is missing, expired, or was never issued (call GET /v1/auth/csrf-token first); or the `Origin`/`Referer` header doesn't identify an allowed origin. The response is deliberately identical for all of these — distinguishing them would hand an attacker a progress indicator for a forged request.
+         * @description CSRF verification failed on a state-changing request that did not carry `Authorization: Bearer` (see the `cookieAuth` security scheme and docs/DECISIONS.md § "Autenticação: modo duplo"). Concretely, one of: the request has no `X-CSRF-Token` header; the token doesn't match the CSRF cookie; the CSRF cookie itself is missing, expired, or was never issued (call GET /v1/auth/csrf-token first); or the `Origin`/`Referer` header doesn't identify an allowed origin. The response is deliberately identical for all of these — distinguishing them would hand an attacker a progress indicator for a forged request, the same reasoning `ErrorResponse`'s own doc comment states for every other error body in this API.
          *
-         *     **Unlike every other error response in this API, the body here is NOT the `{"error": "..."}` envelope.** It is the plain text `Forbidden`, with `Content-Type: text/plain`, written by `moat/csrf`'s default rejection handler — a known, intentional-for-now inconsistency; see docs/ARCHITECTURE.md § Future Improvements.
+         *     Uses the same `{"error": "..."}` envelope as every other error response (`writeCSRFError`, wired via `csrf.WithErrorHandler` — `moat/csrf`'s own default here is plain text, which this API does not use for anything else).
          *
          *     A request carrying `Authorization: Bearer` never sees this response — it is exempt from CSRF entirely, whatever cookies it happens to also carry.
          */
@@ -656,8 +906,12 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                /** @example Forbidden */
-                "text/plain": string;
+                /**
+                 * @example {
+                 *       "error": "CSRF verification failed"
+                 *     }
+                 */
+                "application/json": components["schemas"]["ErrorResponse"];
             };
         };
         /**
@@ -735,6 +989,11 @@ export interface components {
          * @example f47ac10b-58cc-4372-a567-0e02b2c3d479
          */
         TaskID: string;
+        /**
+         * @description A value previously seen in this same resource's `ETag` response header (see the `TaskETag` header component). A match, or the wildcard `*`, gets `304` with no body instead of re-sending a representation the caller already has. Comparison is exact (strong) — this API never issues a weak `W/"..."` validator.
+         * @example "f47ac10b-58cc-4372-a567-0e02b2c3d479:3"
+         */
+        IfNoneMatch: string;
     };
     requestBodies: never;
     headers: {
@@ -743,6 +1002,16 @@ export interface components {
          * @example 7a947bb6436a2e5009efcaa55c42cdf8
          */
         XRequestID: string;
+        /**
+         * @description A strong validator for conditional requests. On `GET /v1/tasks/{id}` it is derived from that task's own optimistic- concurrency counter (`"<id>:<version>"`); on `GET /v1/tasks` it is derived from every row actually returned, in order, so it changes whenever any row's counter changes or the page's composition changes (a row entering, leaving, or reordering within it). Send back as `If-None-Match` to get `304` when nothing has changed — see the `304` response on each of these two operations, and `docs/DECISIONS.md` for why the listing's validator does not require reading anything beyond the page already being returned.
+         * @example "f47ac10b-58cc-4372-a567-0e02b2c3d479:3"
+         */
+        TaskETag: string;
+        /**
+         * @description Number of tasks matching the request's `status`/`priority` filter, independent of `limit`/`offset` — i.e. the total a client would see across every page, not the size of the page actually returned. Present on both `200` and `304` (set before the `ETag`/`If-None-Match` check is applied), since the total can change between two requests carrying the identical page `ETag` — a task added on a different page moves the total without moving this page's own rows. See `docs/DECISIONS.md` for why this is always computed rather than gated behind an opt-in parameter.
+         * @example 42
+         */
+        XTotalCount: number;
     };
     pathItems: never;
 }
@@ -786,7 +1055,7 @@ export interface operations {
                     "application/json": components["schemas"]["User"];
                 };
             };
-            /** @description Malformed JSON body; an empty/malformed `email` (must contain "@", at most 320 characters); or a `password` shorter than 8 or longer than 72 characters (bcrypt's own input limit). */
+            /** @description Malformed JSON body; an empty/malformed `email` (must contain "@", at most 320 characters); a `password` shorter than 8 or longer than 72 characters (bcrypt's own input limit); or a `password` that is too common (on a list of frequently used passwords) or too predictable (a repeated or sequential character run, e.g. "aaaaaaaa" or "12345678") — see `docs/DECISIONS.md` § "Validação de senha forte". */
             400: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
@@ -957,7 +1226,7 @@ export interface operations {
                     "application/json": Record<string, never>;
                 };
             };
-            /** @description Malformed JSON body, or a `new_password` shorter than 8 or longer than 72 characters (bcrypt's own input limit). */
+            /** @description Malformed JSON body; a `new_password` shorter than 8 or longer than 72 characters (bcrypt's own input limit); or a `new_password` that is too common or too predictable — the same rule `POST /v1/auth/register`'s `password` enforces, see `docs/DECISIONS.md` § "Validação de senha forte". */
             400: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
@@ -1036,6 +1305,72 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listSessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The account's active sessions, newest first. An account with no other sessions still returns an array of exactly one (the caller's own). */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionResponse"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    revokeSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description A session's opaque identifier, from `GET /v1/auth/sessions`. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session revoked. No response body. */
+            204: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description No session of the caller's own matches `id` — including an unrecognized value and one addressing another account's session. */
+            404: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "user not found"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalServerError"];
             503: components["responses"]["ServiceUnavailable"];
@@ -1148,7 +1483,7 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description Maximum number of tasks to return. Sending the parameter with an empty value (`?limit=`) is treated as omitting it, not as an error.
+                 * @description Maximum number of tasks to return. Sending the parameter with an empty value (`?limit=`) is treated as omitting it, not as an error — omitting it entirely still returns every task the caller owns. An explicit value over 100 is rejected with 400 rather than accepted and silently capped; a caller wanting more than one page repeats the request with `offset` advanced instead of asking for everything in one response.
                  * @example 20
                  */
                 limit?: number;
@@ -1174,7 +1509,13 @@ export interface operations {
                  */
                 priority?: components["schemas"]["Priority"][];
             };
-            header?: never;
+            header?: {
+                /**
+                 * @description A value previously seen in this same resource's `ETag` response header (see the `TaskETag` header component). A match, or the wildcard `*`, gets `304` with no body instead of re-sending a representation the caller already has. Comparison is exact (strong) — this API never issues a weak `W/"..."` validator.
+                 * @example "f47ac10b-58cc-4372-a567-0e02b2c3d479:3"
+                 */
+                "If-None-Match"?: components["parameters"]["IfNoneMatch"];
+            };
             path?: never;
             cookie?: never;
         };
@@ -1184,11 +1525,23 @@ export interface operations {
             200: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
+                    ETag: components["headers"]["TaskETag"];
+                    "X-Total-Count": components["headers"]["XTotalCount"];
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["Task"][];
                 };
+            };
+            /** @description The caller's `If-None-Match` names the current representation's `ETag` — nothing has changed, and the body is intentionally empty. `Cache-Control`, `ETag` and `X-Total-Count` are still sent, matching what the `200` would have carried — `X-Total-Count` in particular is set before the `ETag`/`If-None-Match` check, so a `304` never serves a stale total. */
+            304: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    ETag: components["headers"]["TaskETag"];
+                    "X-Total-Count": components["headers"]["XTotalCount"];
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description `limit`/`offset` is present but not a non-negative integer, or `status`/`priority` is present but not one of the values in their respective enum. */
             400: {
@@ -1273,10 +1626,146 @@ export interface operations {
             503: components["responses"]["ServiceUnavailable"];
         };
     };
+    taskStats: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Only count tasks with this status. Follows the exact same repetition/OR-within, AND-across-fields rules as `GET /v1/tasks`'s `status` parameter.
+                 * @example [
+                 *       "pending",
+                 *       "in_progress"
+                 *     ]
+                 */
+                status?: components["schemas"]["Status"][];
+                /**
+                 * @description Only count tasks with this priority. Follows the exact same rules as `GET /v1/tasks`'s `priority` parameter.
+                 * @example [
+                 *       "high",
+                 *       "medium"
+                 *     ]
+                 */
+                priority?: components["schemas"]["Priority"][];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "total": 9,
+                     *       "by_status": {
+                     *         "pending": 3,
+                     *         "in_progress": 1,
+                     *         "done": 5,
+                     *         "cancelled": 0
+                     *       },
+                     *       "by_priority": {
+                     *         "low": 2,
+                     *         "medium": 4,
+                     *         "high": 3
+                     *       }
+                     *     }
+                     */
+                    "application/json": components["schemas"]["TaskStats"];
+                };
+            };
+            /** @description `status`/`priority` is present but not one of the values in their respective enum — the same rejection `GET /v1/tasks` applies to the identical parameters. */
+            400: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "invalid input: status must be one of pending, in_progress, done, cancelled"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    exportTasks: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Only export tasks with this status. Follows the exact same repetition/OR-within, AND-across-fields rules as `GET /v1/tasks`'s `status` parameter, validated identically.
+                 * @example [
+                 *       "pending",
+                 *       "in_progress"
+                 *     ]
+                 */
+                status?: components["schemas"]["Status"][];
+                /**
+                 * @description Only export tasks with this priority. Follows the exact same rules as `GET /v1/tasks`'s `priority` parameter.
+                 * @example [
+                 *       "high",
+                 *       "medium"
+                 *     ]
+                 */
+                priority?: components["schemas"]["Priority"][];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. The body is UTF-8 text prefixed with a BOM (see `docs/DECISIONS.md` § "BOM UTF-8 no export CSV"), CRLF line terminators, and a header row followed by one row per matching task — `id, title, description, status, priority, created_at, updated_at`, in that column order. A caller with no matching tasks still receives the header row alone, never an empty body. */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    /**
+                     * @description `attachment; filename="tasks-<date>[-status-<...>] [-priority-<...>].csv"`, encoded via RFC 2183 (`mime.FormatMediaType`), the same helper `GET /v1/files/{key}` uses for its own downloads.
+                     * @example attachment; filename="tasks-2026-09-08.csv"
+                     */
+                    "Content-Disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            /** @description `status`/`priority` is present but not one of the values in their respective enum (the same rejection `GET /v1/tasks` applies to the identical parameters), or the current filter matches more tasks than the export row limit allows. */
+            400: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
     getTask: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description A value previously seen in this same resource's `ETag` response header (see the `TaskETag` header component). A match, or the wildcard `*`, gets `304` with no body instead of re-sending a representation the caller already has. Comparison is exact (strong) — this API never issues a weak `W/"..."` validator.
+                 * @example "f47ac10b-58cc-4372-a567-0e02b2c3d479:3"
+                 */
+                "If-None-Match"?: components["parameters"]["IfNoneMatch"];
+            };
             path: {
                 /**
                  * @description Server-generated task identifier (a UUIDv4 as produced by CreateTask), scoped to the authenticated caller.
@@ -1293,6 +1782,7 @@ export interface operations {
             200: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
+                    ETag: components["headers"]["TaskETag"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -1310,6 +1800,7 @@ export interface operations {
                     "application/json": components["schemas"]["Task"];
                 };
             };
+            304: components["responses"]["NotModified"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
             429: components["responses"]["TooManyRequests"];
@@ -1647,7 +2138,7 @@ export interface operations {
                     "application/json": components["schemas"]["Attachment"];
                 };
             };
-            /** @description The body was not multipart, carried no `file` part, exceeded the size limit, held a content type outside the allow-list, or the caller is already at their per-account storage quota (`ATTACHMENT_MAX_BYTES_PER_USER`) — the message never reveals another account's usage, only the caller's own. */
+            /** @description The body was not multipart, carried no `file` part, exceeded the size limit, held a content type outside the allow-list, the caller is already at their per-account storage quota (`ATTACHMENT_MAX_BYTES_PER_USER`) — the message never reveals another account's usage, only the caller's own — or the target task already carries 50 attachments. */
             400: {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
@@ -1764,6 +2255,229 @@ export interface operations {
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalServerError"];
             503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listLinks: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of links to return. */
+                limit?: number;
+                /** @description An opaque cursor from a previous response's `X-Next-Cursor` header. Omit for the first page. */
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. The array is empty (`[]`) if the caller has no links. */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    /** @description Present only when another page exists. Pass its value back as `?after=` to continue. */
+                    "X-Next-Cursor"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Link"][];
+                };
+            };
+            /** @description `limit` is present but not an integer in `[1, 100]`. */
+            400: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Link shortening is disabled (`LINK_SHORTENING_ENABLED` unset). */
+            404: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    createLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateLinkRequest"];
+            };
+        };
+        responses: {
+            /** @description Link created successfully. */
+            201: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "code": "aZ3kQ9",
+                     *       "short_url": "https://s.example.com/aZ3kQ9",
+                     *       "url": "https://example.com/a-very-long-path",
+                     *       "vanity": false,
+                     *       "created_at": "2026-08-08T12:00:00Z"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["Link"];
+                };
+            };
+            /** @description Malformed JSON body. */
+            400: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "invalid request body"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Link shortening is disabled (`LINK_SHORTENING_ENABLED` unset). */
+            404: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested `vanity_code` is already taken. */
+            409: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "code already exists"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The destination was rejected — outside the allowed scheme, carrying userinfo, resolving to a private/internal/own-domain address, too long, or containing a control character — or `vanity_code` is reserved or collides with the generated code length. `reason` is a stable, machine-readable enum (cairn's own `RejectReason`); never treat the human message as the contract. */
+            422: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    revokeLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The link's short code. */
+                code: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Link revoked successfully. No response body. */
+            204: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description No link with this code owned by the caller — covering a code that names nothing, one belonging to somebody else, an invalid code, or one already expired or revoked — or link shortening is disabled. */
+            404: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "link not found"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    resolveLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                code: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the link's destination. */
+            302: {
+                headers: {
+                    Location?: string;
+                    "Cache-Control"?: "no-store";
+                    "Referrer-Policy"?: "no-referrer";
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown, invalid, expired or revoked code — or link shortening is disabled. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "link not found"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The link store could not be reached. Never a redirect — failing open here would mean serving a stale or unvalidated destination. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     getDebugVars: {

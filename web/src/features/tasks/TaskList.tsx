@@ -1,10 +1,15 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { apiFetch } from '../../api/client'
+import { classifyError } from '../../api/errors'
 import { Button } from '../../components/Button'
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
+  DownloadIcon,
   FilterIcon,
   PlusIcon,
+  PrinterIcon,
   RefreshIcon,
 } from '../../components/icons'
 import type { MenuItem } from '../../components/Menu'
@@ -18,11 +23,14 @@ import { TaskForm } from './TaskForm'
 import { TaskItem } from './TaskItem'
 import { TaskStats } from './TaskStats'
 import type { Task } from './useTasks'
+import { splitFilter } from './useTasks'
 import { useTasks } from './useTasks'
 
 const SKELETON_ROWS = 5
 
-const PRIORITY_LABELS: Record<Task['priority'], string> = {
+// Exported so ReportPage.tsx labels the same priority values the same
+// way, instead of a second copy of this map drifting from this one.
+export const PRIORITY_LABELS: Record<Task['priority'], string> = {
   low: 'Low',
   medium: 'Medium',
   high: 'High',
@@ -36,6 +44,25 @@ const ALL_PRIORITIES: Task['priority'][] = ['high', 'medium', 'low']
 // partly made of things nobody is going to work on. It is one click
 // away, and the filter says so when it is on.
 const DEFAULT_STATUSES: Task['status'][] = ['pending', 'in_progress', 'done']
+
+// The fallback name a malformed or missing header would leave the
+// download with — unreachable in practice (the server always sets this
+// header via mime.FormatMediaType, see internal/task/csv_export.go),
+// kept only so a download can never come out completely unnamed.
+const FALLBACK_EXPORT_FILENAME = 'tasks.csv'
+
+/**
+ * Pulls the filename out of a Content-Disposition value shaped like
+ * `attachment; filename="tasks-2026-09-08.csv"` — the exact form
+ * mime.FormatMediaType produces server-side. A browser downloading a
+ * plain <a href> would do this itself; going through apiFetch + blob
+ * (see handleExport's own comment for why) means this app has to do it
+ * instead.
+ */
+function filenameFromContentDisposition(header: string | null): string {
+  const match = header?.match(/filename="?([^";]+)"?/)
+  return match?.[1] ?? FALLBACK_EXPORT_FILENAME
+}
 
 /**
  * "Everything is selected" and "nothing is selected" would send the same
@@ -73,6 +100,7 @@ function filterLabel(
  * building its own.
  */
 export function TaskList() {
+  const navigate = useNavigate()
   const [statuses, setStatuses] = useState<Task['status'][]>(DEFAULT_STATUSES)
   const [priorities, setPriorities] = useState<Task['priority'][]>(ALL_PRIORITIES)
   // Joined here rather than inside useTasks: the hook needs a primitive
@@ -84,6 +112,8 @@ export function TaskList() {
     tasks,
     error,
     page,
+    totalPages,
+    total,
     hasNextPage,
     hasPreviousPage,
     isPaging,
@@ -96,6 +126,8 @@ export function TaskList() {
   } = useTasks(statusFilter, priorityFilter)
   const [creating, setCreating] = useState(false)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
   // "Narrowed by the user", not "any filter is active": the default
   // itself excludes cancelled, so a plain `statusFilter !== ''` would
   // greet someone with no tasks at all with "no tasks match this
@@ -146,6 +178,60 @@ export function TaskList() {
     setSuccessMessage('Task deleted.')
   }
 
+  // GET, so it never touches the CSRF gate — but it still needs the
+  // session cookie, and it needs to inspect the response before
+  // deciding what to do with it (show an error via the same
+  // classifyError every other action uses, or hand the body to the
+  // browser as a file). A plain <a href> can do neither: a failed
+  // request just downloads the JSON error body as if it were the CSV,
+  // and there is no hook to show a loading state or a Toast. apiFetch +
+  // blob is what AttachmentList's own <a href> download does not need
+  // (that one only ever succeeds or 404s, both fine to hand straight to
+  // the browser) but this one does.
+  async function handleExport() {
+    setExportError(null)
+    setExporting(true)
+    try {
+      const params = new URLSearchParams()
+      for (const status of splitFilter(statusFilter)) params.append('status', status)
+      for (const priority of splitFilter(priorityFilter)) params.append('priority', priority)
+
+      const response = await apiFetch(`/v1/tasks/export?${params.toString()}`)
+      if (!response.ok) {
+        const classified = await classifyError(response)
+        setExportError(
+          classified.kind === 'invalid_input'
+            ? classified.message
+            : 'Could not export tasks. Please try again.',
+        )
+        return
+      }
+
+      const blob = await response.blob()
+      const filename = filenameFromContentDisposition(response.headers.get('Content-Disposition'))
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      link.click()
+      URL.revokeObjectURL(url)
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  // Opens the report route with the current filter carried in the URL
+  // (issue #246) — ReportPage does its own fetch from there rather than
+  // this component handing it data directly, so the report is a real,
+  // shareable/bookmarkable address, and reloading it re-fetches instead
+  // of showing whatever was on screen when the button was clicked.
+  function handlePrint() {
+    const params = new URLSearchParams()
+    for (const status of splitFilter(statusFilter)) params.append('status', status)
+    for (const priority of splitFilter(priorityFilter)) params.append('priority', priority)
+    navigate(`/report?${params.toString()}`)
+  }
+
   return (
     <div className={styles.container}>
       {successMessage && (
@@ -154,6 +240,10 @@ export function TaskList() {
           variant="success"
           onDismiss={() => setSuccessMessage(null)}
         />
+      )}
+
+      {exportError && (
+        <Toast message={exportError} variant="error" onDismiss={() => setExportError(null)} />
       )}
 
       {/* One line: the two filters, the counts button, then create. The
@@ -180,7 +270,22 @@ export function TaskList() {
           />
         </div>
 
-        <TaskStats tasks={tasks} isFiltered={isNarrowed} />
+        <TaskStats
+          total={total}
+          statusFilter={statusFilter}
+          priorityFilter={priorityFilter}
+          isFiltered={isNarrowed}
+        />
+
+        <Button variant="secondary" loading={exporting} onClick={() => void handleExport()}>
+          <DownloadIcon />
+          Export
+        </Button>
+
+        <Button variant="secondary" onClick={handlePrint}>
+          <PrinterIcon />
+          Print
+        </Button>
 
         <Button onClick={() => setCreating(true)}>
           <PlusIcon />
@@ -245,11 +350,11 @@ export function TaskList() {
             ))}
           </ul>
 
-          {/* A page number and two directions, and nothing the API can't
-              tell this client: GET /v1/tasks returns no total, so there
-              is no "of 12" to render and no last-page jump to offer.
-              Next is enabled only when the extra row this page asked
-              for actually came back — see useTasks. */}
+          {/* Page N of M, from GET /v1/tasks's own X-Total-Count (issue
+              #237) — see useTasks.tsx. hasNextPage/totalPages are
+              derived from the total directly now, not from asking for
+              one extra row the way this used to work before that header
+              existed. */}
           {(hasPreviousPage || hasNextPage) && (
             <nav className={styles.pager} aria-label="Task pages">
               <Button
@@ -261,7 +366,7 @@ export function TaskList() {
                 Previous
               </Button>
               <span className={styles.pageNumber} aria-live="polite">
-                Page {page}
+                Page {page} of {totalPages}
               </span>
               <Button variant="secondary" onClick={nextPage} disabled={!hasNextPage || isPaging}>
                 Next

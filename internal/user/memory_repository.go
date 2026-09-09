@@ -206,6 +206,28 @@ func (r *memoryRepository) FindSessionByTokenHash(ctx context.Context, tokenHash
 	return s, nil
 }
 
+// FindSessionsForUser returns every session belonging to userID, newest
+// first — matches postgresRepository's ORDER BY created_at DESC.
+func (r *memoryRepository) FindSessionsForUser(ctx context.Context, userID string) ([]Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	sessions := make([]Session, 0)
+	for _, s := range r.sessions {
+		if s.UserID == userID {
+			sessions = append(sessions, s)
+		}
+	}
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
+	})
+	return sessions, nil
+}
+
 // DeleteSession removes the session with the given token hash. Deleting an
 // absent session is not an error — Service.Logout and expired-session
 // cleanup both call this without caring whether it was already gone.

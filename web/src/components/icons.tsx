@@ -191,3 +191,42 @@ export function FilterIcon() {
     </svg>
   )
 }
+
+/** Check mark — a satisfied requirement. */
+export function CheckIcon() {
+  return (
+    <svg {...SHARED_PROPS}>
+      <path d="M3.25 8.5l3 3 6.5-7" />
+    </svg>
+  )
+}
+
+/** Open circle — an unmet requirement, not yet a mistake. */
+export function CircleIcon() {
+  return (
+    <svg {...SHARED_PROPS}>
+      <circle cx="8" cy="8" r="5.25" />
+    </svg>
+  )
+}
+
+/** Arrow into a tray — export/download the current list as a file. */
+export function DownloadIcon() {
+  return (
+    <svg {...SHARED_PROPS}>
+      <path d="M8 2v7.5M5 7l3 3 3-3" />
+      <path d="M2.75 11v1.5a.75.75 0 00.75.75h9a.75.75 0 00.75-.75V11" />
+    </svg>
+  )
+}
+
+/** Printer body with paper above and below it — open the print report. */
+export function PrinterIcon() {
+  return (
+    <svg {...SHARED_PROPS}>
+      <path d="M4.5 5.5V2.75a.75.75 0 01.75-.75h5.5a.75.75 0 01.75.75V5.5" />
+      <rect x="2" y="5.5" width="12" height="5.5" rx="1" />
+      <path d="M4.5 10.5v2.75a.75.75 0 00.75.75h5.5a.75.75 0 00.75-.75V10.5" />
+    </svg>
+  )
+}

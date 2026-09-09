@@ -17,6 +17,7 @@ checked with `errors.Is`, never with `==` and never by string matching.
 | `internal/task` | `ErrNotFound`, `ErrInvalidInput`, `ErrAlreadyExists`, `ErrConflict`, `ErrInvalidTransition` |
 | `internal/user` | `ErrNotFound`, `ErrInvalidInput`, `ErrAlreadyExists`, `ErrInvalidCredentials` |
 | `internal/attachment` | `ErrNotFound`, `ErrTaskNotFound`, `ErrInvalidInput`, `ErrAlreadyExists`, `ErrTooLarge` |
+| `internal/link` | `ErrNotOwner` (its only own sentinel) plus every `cairn.Err*` sentinel, used directly — see go-layering.md's `internal/link` note for why this package does not wrap them in a second layer |
 
 ## Rules
 

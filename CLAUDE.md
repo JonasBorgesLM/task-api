@@ -2,6 +2,12 @@
 
 Guidance for Claude Code (or any agent) working in this repository. Read this before making changes — it captures conventions and constraints that aren't obvious from the code alone.
 
+The general engineering rules — effort proportional to the task, architecture
+discipline, clean code, testing, review, security, git hygiene, verification —
+are in `~/.claude/CLAUDE.md` and are already loaded. **This file carries only
+what is true of task-api**, and where it repeats a global rule it is because
+this repository is stricter.
+
 ## What this is
 
 A small, production-shaped Go REST API for multi-user task management, with a swappable `Repository` (in-memory or PostgreSQL) behind one interface per domain. It's a reference project: the functional surface is intentionally minimal — the point is the layering, testing discipline, and operational details (config, migrations, graceful shutdown, health checks). Full narrative in [README.md](README.md); full rationale/architecture in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); the decisions behind the non-obvious choices in [docs/DECISIONS.md](docs/DECISIONS.md); full API contract in [docs/openapi.yaml](docs/openapi.yaml).
@@ -47,6 +53,75 @@ they are worth loading whole. Dispatch them in parallel:
 Proportionality is built in: a typo needs no pipeline, a contained fix needs only
 `/change-plan`, and the full sequence is for changes that touch the contract, the
 schema, a dependency, or an invariant recorded here.
+
+## Global tooling, and which layer wins here
+
+The environment carries a global workflow plugin (Superpowers) and a code
+knowledge graph (Graphify). Both are useful; neither outranks what is already
+in `.claude/`.
+
+**The `/change-*` pipeline wins over Superpowers, in this repository.** They do
+the same job — brainstorm, plan, execute — and running both is how a change
+acquires two sets of planning artifacts that disagree. The local one wins
+because it is the one that is actually wired to this project: it triages
+against `docs/DECISIONS.md`, it writes to `docs/changes/<slug>/`, and its
+proportionality rule is already stated above. Superpowers' `brainstorming` and
+`writing-plans` are for a repository that has no pipeline of its own.
+
+What is still worth taking from it: **`systematic-debugging`**, when a failure's
+cause is genuinely unknown. There is no local equivalent, and the failures this
+codebase produces — an ordering bug between blob bytes and the metadata row, a
+filter that silently drops a value — are exactly the kind that guessing gets
+wrong twice before getting right.
+
+## Graphify in this repository
+
+The largest graph in the ecosystem: 2175 nodes, 5227 edges, **9% `INFERRED`**.
+Rebuild with `graphify update .` before trusting it after edits.
+
+**It checks the layering invariant directly.** "Architecture — do not violate
+this" says `Service` and `Handler` must stay completely unaware that PostgreSQL
+exists. That is a reachability question:
+
+```bash
+graphify query "pgx postgres driver"
+# Today this returns postgresRepository, cmd/api's integration tests and
+# config -- all layers that are ALLOWED to know. No handler, no service.
+# A handler appearing in that answer is the violation, visible in one command.
+
+graphify affected "Repository"      # both implementations, before you drift one
+graphify god-nodes                  # where coupling actually concentrates
+```
+
+Use it as a fast pre-check, not as the authority. `make check` and the
+`.claude/rules/go-layering` rule are what decide, because they read the code
+rather than a parsed approximation of it.
+
+**It does not replace the readers.** `.claude/agents/*` distil prose —
+`DECISIONS.md`, `ARCHITECTURE.md`, the 1600-line `openapi.yaml`. Graphify
+traverses structure. A question about *why* a boundary exists goes to a reader;
+a question about *whether* it is still intact goes to the graph.
+
+## Frontend tooling — this is the repository where it applies
+
+`web/` is a real Vite + TypeScript frontend, so the design skills are in scope
+here in a way they are not in the Go libraries:
+
+- **`/impeccable audit`** for accessibility and contrast, **`/impeccable
+  critique`** for layout and hierarchy. This is the tool with WCAG checks.
+- **Emil Kowalski's `animate`, `review-animations`, `apple-design`** for
+  micro-interactions and transitions. Motion needs a purpose — feedback,
+  continuity, or directing attention. Anything else makes the interface slower.
+
+**On Playwright: this repository already has a suite.** `web/playwright.config.ts`
+and `web/e2e/` are the real thing, run with `npm run test:e2e`, and they are
+what CI trusts. The Playwright *MCP* drives a browser interactively and leaves
+nothing behind.
+
+The split: if a flow should be checked forever, extend `web/e2e/` — that is a
+test. If you are verifying one thing once while building it, use the MCP. Do
+not use the MCP as a substitute for adding the test, and do not treat a
+successful MCP click-through as evidence the flow is covered.
 
 ## Commands
 
@@ -117,7 +192,7 @@ Requesting a task's current status again is always a no-op success, independent 
 - **Tests use fakes, not mocking frameworks** — see `fakeRepository`/`fakeService` in each package's `*_test.go`. Keep it that way; don't introduce a mocking library.
 - **Unit vs. integration tests are strictly separated by build tag**, never by convention alone: each package's `postgres_repository_test.go` starts with `//go:build integration` and is excluded from a plain `go test ./...`. Any new PostgreSQL-dependent test goes in a file with that same tag. `internal/task/integration_test.go` (no tag) is a *different* thing — a full-stack HTTP test against the real `memoryRepository` (both task and user), with zero external dependencies; don't confuse the two or rename either in a way that blurs the distinction.
 - **Concurrency-sensitive code gets a real concurrent test**, driven by actual goroutines racing each other and run under `-race` (see `TestConcurrentUpdate_LosersGetErrConflict` and its PostgreSQL counterpart) — not just sequential calls asserting the same thing.
-- **`gofmt`, `go vet` (both default and `-tags=integration`), `staticcheck` (both) and `govulncheck` must be clean before you're done.** `govulncheck` runs once, default tags only — unlike vet/staticcheck, a second integration-tagged run would only surface vulnerabilities reachable from test helpers, which are not deployed. It fails the build only on a *reachable* vulnerability (its own default); an advisory on something in the dependency graph that nothing calls exits 0. See `docs/DECISIONS.md`. `make check` runs all of it except the PostgreSQL integration tests. CI enforces the same set — see `.github/workflows/ci.yml`.
+- **`gofmt`, `go vet` (both default and `-tags=integration`), `staticcheck` (both), `govulncheck` and `gosec` (both) must be clean before you're done.** `govulncheck` runs once, default tags only — unlike vet/staticcheck/gosec, a second integration-tagged run would only surface vulnerabilities reachable from test helpers, which are not deployed. It fails the build only on a *reachable* vulnerability (its own default); an advisory on something in the dependency graph that nothing calls exits 0. See `docs/DECISIONS.md`. `gosec` excludes G104 (unhandled errors) wholesale — this codebase's own idiom for a best-effort cleanup call — and runs without `-tests`, since every hit `-tests` added was a test fixture, never a real defect; a handful of specific false positives on production code are silenced individually with `#nosec` and a reason, never blanket. See `make gosec`'s comment in the `Makefile` before adding another exclusion. `make check` runs all of it except the PostgreSQL integration tests. CI enforces the same set, plus a weekly `govulncheck` run independent of any push and, on pull requests, a dependency review that fails on a new dependency with a known vulnerability or an incompatible license — see `.github/workflows/ci.yml`.
 
 ## Kubernetes
 
@@ -142,6 +217,6 @@ Requesting a task's current status again is always a no-op success, independent 
 - **Never key a rate limiter on `X-Forwarded-For` (or `X-Real-IP`) without checking the peer first.** The client writes those headers, so an unconditional read gives every request a fresh bucket — which does not look like a bug, it looks like a limiter that never fires. `TRUSTED_PROXIES` is the only thing that makes a forwarded header usable, and `moat/realip` then walks it right to left (the end your own proxy appended). The list names *your proxies*, never your clients, and the default route is rejected at startup.
 - **`Strict-Transport-Security` is sent unconditionally, and must never carry `includeSubDomains` or `preload`.** The unconditional part reversed an earlier decision here, so don't "restore" the old opt-in shape: withholding the header, or deciding per request from `r.TLS`, disables HSTS behind the TLS-terminating proxy it exists for, because `r.TLS` is nil there even for requests the client made over HTTPS. `HSTS_MAX_AGE=0` is the documented opt-out and omits the header (never sends `max-age=0`, which tells browsers to forget an existing policy). `includeSubDomains`/`preload` stay off because both reach past this service to hosts it knows nothing about and `preload` is effectively irreversible. Full reasoning in `docs/ARCHITECTURE.md`'s Operational Behavior.
 - **Don't loosen the Content-Security-Policy to `moat`'s default.** `secureheaders.DefaultCSP` is `default-src 'self'`; this API passes `WithCSP` with `default-src 'none'` plus explicit `base-uri`/`form-action`/`frame-ancestors`, which is strictly tighter and correct for a JSON-only API that serves no documents. Adopting the library default would be a silent regression.
-- Don't add a dependency lightly. The direct runtime dependencies are `github.com/jackc/pgx/v5` (PostgreSQL), `golang.org/x/crypto` (bcrypt), `github.com/JonasBorgesLM/moat` (rate limiting, response security headers, sanitize/validate, pathguard, realip) and `github.com/minio/minio-go/v7` (S3-compatible attachment storage — see `docs/DECISIONS.md` § "Cliente de object storage: minio-go" for why this one over `aws-sdk-go-v2`, and what was accepted to bring it in). Together with their own transitive requirements they are 28 third-party modules total (`go list -deps -f '{{if not .Standard}}{{.Module}}{{end}}' ./cmd/api | sort -u` is the exact, current count — cross-check it before citing a number here, since it changes independently of this file). What actually has to stay true is narrower than a module count: **every one of them is pure Go, no cgo** — that's what lets `Dockerfile` build a static binary into `scratch`, and it's the one property a new dependency must preserve. Prefer `moat`'s zero-dependency packages over its separate store modules unless a shared backend is actually needed. `github.com/JonasBorgesLM/crier/{core,exporters/otlp}` (see `cmd/api/crier.go`) is opt-in the same way the S3 attachment backend is: compiled into every binary, but functionally inert — no exporter constructed, nothing imported at runtime beyond the package init — unless `CRIER_OTLP_ENDPOINT` is set. It adds exactly 4 modules to the graph (`crier/core`, `crier/exporters/otlp`, `go.opentelemetry.io/proto/slim/otlp`, `google.golang.org/protobuf`), all pure Go — the `slim` OTel proto variant exists specifically to avoid pulling in the full collector/gRPC dependency tree. See `docs/DECISIONS.md`'s Fase 11 section for the full accounting.
+- Don't add a dependency lightly. The direct runtime dependencies are `github.com/jackc/pgx/v5` (PostgreSQL), `golang.org/x/crypto` (bcrypt), `github.com/JonasBorgesLM/moat` (rate limiting, response security headers, sanitize/validate, pathguard, realip), `github.com/minio/minio-go/v7` (S3-compatible attachment storage — see `docs/DECISIONS.md` § "Cliente de object storage: minio-go" for why this one over `aws-sdk-go-v2`, and what was accepted to bring it in), and `github.com/JonasBorgesLM/cairn` (short links, opt-in behind `LINK_SHORTENING_ENABLED` — see `docs/DECISIONS.md` § "Encurtador de links" for the integration decisions and why it adds only itself to the module graph: its own one dependency is `moat`, already present). Together with their own transitive requirements they are 31 third-party modules total (`go list -deps -f '{{if not .Standard}}{{.Module}}{{end}}' ./cmd/api | sort -u` is the exact, current count — cross-check it before citing a number here, since it changes independently of this file). What actually has to stay true is narrower than a module count: **every one of them is pure Go, no cgo** — that's what lets `Dockerfile` build a static binary into `scratch`, and it's the one property a new dependency must preserve. Prefer `moat`'s zero-dependency packages over its separate store modules unless a shared backend is actually needed. `github.com/JonasBorgesLM/crier/{core,exporters/otlp}` (see `cmd/api/crier.go`) is opt-in the same way the S3 attachment backend is: compiled into every binary, but functionally inert — no exporter constructed, nothing imported at runtime beyond the package init — unless `CRIER_OTLP_ENDPOINT` is set. It adds exactly 4 modules to the graph (`crier/core`, `crier/exporters/otlp`, `go.opentelemetry.io/proto/slim/otlp`, `google.golang.org/protobuf`), all pure Go — the `slim` OTel proto variant exists specifically to avoid pulling in the full collector/gRPC dependency tree. See `docs/DECISIONS.md`'s Fase 11 section for the full accounting.
 - Don't skip or weaken CI checks (`--no-verify`, disabling a lint rule, `-short` skips) to make something pass — fix the underlying issue.
 - Don't commit `.env` (it's real local config, gitignored) — only `.env.example` with placeholder values is tracked.

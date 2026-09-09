@@ -20,6 +20,17 @@ const (
 	maxDescriptionLen = 2000
 )
 
+// maxFilterValues bounds how many raw occurrences of "status" or
+// "priority" validateStatusFilters/validatePriorityFilters will walk
+// before rejecting the request outright, ahead of validation or
+// de-duplication. Both fields have a handful of legal values (four and
+// three respectively) and repeating one has no additional effect (see
+// docs/openapi.yaml), so a legitimate caller never approaches this; it
+// exists so a query string carrying thousands of repeated occurrences
+// of the parameter is rejected with a clear 400 instead of being walked
+// in full first.
+const maxFilterValues = 50
+
 // legalTransitions is the complete set of allowed Status transitions,
 // keyed by the task's current status. Requesting the task's current
 // status again is always allowed as a no-op, independently of this table
@@ -185,7 +196,104 @@ func (s *Service) GetTask(ctx context.Context, userID, id string) (Task, error) 
 // apply ORDER BY/LIMIT/OFFSET in the query instead of fetching every row
 // into the process on every call just to discard most of them. The
 // status/priority filters follow the same reasoning — see FindAll.
-func (s *Service) ListTasks(ctx context.Context, userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
+//
+// total is how many tasks match statuses/priorities across the caller's
+// *entire* set, not just the page returned — GET /v1/tasks' X-Total-Count
+// header (issue #237). A second query (Repository.CountAll), not derived
+// from len(tasks): the page can be shorter than the full match count for
+// every reason pagination exists at all. See docs/DECISIONS.md § "Total
+// real na listagem" for why a second query on every call was measured
+// and judged cheap enough to always run, rather than gating it behind an
+// opt-in parameter.
+func (s *Service) ListTasks(ctx context.Context, userID string, limit, offset int, statuses, priorities []string) (tasks []Task, total int, err error) {
+	st, err := validateStatusFilters(statuses)
+	if err != nil {
+		return nil, 0, err
+	}
+	p, err := validatePriorityFilters(priorities)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	tasks, err = s.repo.FindAll(ctx, userID, limit, offset, st, p)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list tasks: %w", err)
+	}
+
+	total, err = s.repo.CountAll(ctx, userID, st, p)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list tasks: count: %w", err)
+	}
+
+	return tasks, total, nil
+}
+
+// TaskStats is what GET /v1/tasks/stats (issue #238) returns: counts
+// over userID's *entire* filtered set, grouped by status and separately
+// by priority. Total is the sum of ByStatus's values (every task falls
+// into exactly one status), computed here rather than with a third
+// query — the two are consistent by construction, not by coincidence.
+type TaskStats struct {
+	Total      int
+	ByStatus   map[Status]int
+	ByPriority map[Priority]int
+}
+
+// TaskStats computes userID's task counts, respecting the same
+// status/priority filters GET /v1/tasks itself accepts — the same
+// validation ListTasks applies, so an unrecognized value is rejected
+// identically on both routes. Grouping happens in Repository
+// (GROUP BY in postgresRepository), never by fetching every matching
+// row to tally in Go — see Repository.CountByStatusAndPriority's doc
+// comment.
+func (s *Service) TaskStats(ctx context.Context, userID string, statuses, priorities []string) (TaskStats, error) {
+	st, err := validateStatusFilters(statuses)
+	if err != nil {
+		return TaskStats{}, err
+	}
+	p, err := validatePriorityFilters(priorities)
+	if err != nil {
+		return TaskStats{}, err
+	}
+
+	byStatus, byPriority, err := s.repo.CountByStatusAndPriority(ctx, userID, st, p)
+	if err != nil {
+		return TaskStats{}, fmt.Errorf("task stats: %w", err)
+	}
+
+	total := 0
+	for _, count := range byStatus {
+		total += count
+	}
+
+	return TaskStats{Total: total, ByStatus: byStatus, ByPriority: byPriority}, nil
+}
+
+// maxExportRows bounds how many tasks a single CSV export (issue #240,
+// GET /tasks/export) may return. Unlike maxTaskListLimit, this is not a
+// page size — an export exists specifically to return the caller's
+// *entire* filtered set, so there is no smaller page to ask for instead.
+// The cap exists because the response is streamed under the server's
+// ordinary WriteTimeout: a caller whose filter matches more rows than
+// can be written out honestly in that time gets rejected up front with
+// ErrInvalidInput, rather than receiving a response that starts
+// streaming and then cuts off mid-file, which produces a file that
+// looks complete and isn't. See docs/DECISIONS.md § "Teto do export
+// CSV" for the measurement behind this specific number.
+const maxExportRows = 10_000
+
+// ExportTasks returns every one of userID's tasks matching the
+// status/priority filter, for CSV export (issue #240) — never windowed
+// by limit/offset, unlike ListTasks. Validates and de-duplicates
+// statuses/priorities identically to ListTasks/TaskStats, so the three
+// operations can never disagree on what a given filter means.
+//
+// The total is checked against maxExportRows via Repository.CountAll
+// *before* FindAll is ever called — rejecting an over-limit request up
+// front, with nothing fetched or written, rather than letting Handler
+// discover the problem mid-stream after bytes have already reached the
+// client.
+func (s *Service) ExportTasks(ctx context.Context, userID string, statuses, priorities []string) ([]Task, error) {
 	st, err := validateStatusFilters(statuses)
 	if err != nil {
 		return nil, err
@@ -195,11 +303,18 @@ func (s *Service) ListTasks(ctx context.Context, userID string, limit, offset in
 		return nil, err
 	}
 
-	tasks, err := s.repo.FindAll(ctx, userID, limit, offset, st, p)
+	total, err := s.repo.CountAll(ctx, userID, st, p)
 	if err != nil {
-		return nil, fmt.Errorf("list tasks: %w", err)
+		return nil, fmt.Errorf("export tasks: count: %w", err)
+	}
+	if total > maxExportRows {
+		return nil, fmt.Errorf("%w: %d tasks match this filter, more than the %d-row export limit; narrow the filter", ErrInvalidInput, total, maxExportRows)
 	}
 
+	tasks, err := s.repo.FindAll(ctx, userID, -1, 0, st, p)
+	if err != nil {
+		return nil, fmt.Errorf("export tasks: %w", err)
+	}
 	return tasks, nil
 }
 
@@ -415,6 +530,9 @@ func validatePriority(priority string, fallback Priority) (Priority, error) {
 // empty filter stays empty, it does not default to some particular
 // status.
 func validateStatusFilters(statuses []string) ([]Status, error) {
+	if len(statuses) > maxFilterValues {
+		return nil, fmt.Errorf("%w: too many status values", ErrInvalidInput)
+	}
 	var out []Status
 	seen := make(map[Status]bool, len(statuses))
 	for _, raw := range statuses {
@@ -444,6 +562,9 @@ func validateStatusFilters(statuses []string) ([]Status, error) {
 // (medium on create, the existing value on update) — semantics that
 // don't apply to "no filter on this field".
 func validatePriorityFilters(priorities []string) ([]Priority, error) {
+	if len(priorities) > maxFilterValues {
+		return nil, fmt.Errorf("%w: too many priority values", ErrInvalidInput)
+	}
 	var out []Priority
 	seen := make(map[Priority]bool, len(priorities))
 	for _, raw := range priorities {

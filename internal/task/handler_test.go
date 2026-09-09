@@ -21,7 +21,9 @@ import (
 type fakeService struct {
 	createTaskFn       func(userID, title, description, priority string) (Task, error)
 	getTaskFn          func(userID, id string) (Task, error)
-	listTasksFn        func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error)
+	listTasksFn        func(userID string, limit, offset int, statuses, priorities []string) ([]Task, int, error)
+	taskStatsFn        func(userID string, statuses, priorities []string) (TaskStats, error)
+	exportTasksFn      func(userID string, statuses, priorities []string) ([]Task, error)
 	updateTaskFn       func(userID, id, title, description, priority string) (Task, error)
 	deleteTaskFn       func(userID, id string) error
 	completeTaskFn     func(userID, id string) (Task, error)
@@ -51,7 +53,7 @@ func (f *fakeService) GetTask(_ context.Context, userID, id string) (Task, error
 	return Task{}, nil
 }
 
-func (f *fakeService) ListTasks(_ context.Context, userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
+func (f *fakeService) ListTasks(_ context.Context, userID string, limit, offset int, statuses, priorities []string) ([]Task, int, error) {
 	// Joined rather than stored as slices: [5]any is compared with ==,
 	// which panics on a slice. The separator is a character no status or
 	// priority contains, so "pending,done" is unambiguous.
@@ -59,7 +61,7 @@ func (f *fakeService) ListTasks(_ context.Context, userID string, limit, offset 
 	if f.listTasksFn != nil {
 		return f.listTasksFn(userID, limit, offset, statuses, priorities)
 	}
-	return []Task{}, nil
+	return []Task{}, 0, nil
 }
 
 func (f *fakeService) UpdateTask(_ context.Context, userID, id, title, description, priority string) (Task, error) {
@@ -92,6 +94,20 @@ func (f *fakeService) TransitionStatus(_ context.Context, userID, id string, tar
 		return f.transitionStatusFn(userID, id, target)
 	}
 	return Task{}, nil
+}
+
+func (f *fakeService) TaskStats(_ context.Context, userID string, statuses, priorities []string) (TaskStats, error) {
+	if f.taskStatsFn != nil {
+		return f.taskStatsFn(userID, statuses, priorities)
+	}
+	return TaskStats{}, nil
+}
+
+func (f *fakeService) ExportTasks(_ context.Context, userID string, statuses, priorities []string) ([]Task, error) {
+	if f.exportTasksFn != nil {
+		return f.exportTasksFn(userID, statuses, priorities)
+	}
+	return []Task{}, nil
 }
 
 // sampleTask returns a Task with predictable values for use in handler tests.
@@ -146,6 +162,19 @@ func do(t *testing.T, handler http.HandlerFunc, method, target, body string) *ht
 	t.Helper()
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.ContextWithUserID(req.Context(), testUserID))
+	w := httptest.NewRecorder()
+	handler(w, req)
+	return w
+}
+
+// doWithIfNoneMatch mirrors do(), adding an If-None-Match header — do()
+// itself takes no headers parameter, and every other test's needs are
+// met by that simpler shape.
+func doWithIfNoneMatch(t *testing.T, handler http.HandlerFunc, method, target, ifNoneMatch string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, target, nil)
+	req.Header.Set("If-None-Match", ifNoneMatch)
 	req = req.WithContext(middleware.ContextWithUserID(req.Context(), testUserID))
 	w := httptest.NewRecorder()
 	handler(w, req)
@@ -263,8 +292,8 @@ func TestCreateTask_Handler_IgnoresProtectedFields(t *testing.T) {
 func TestListTasks_Handler_ReturnsOK(t *testing.T) {
 	tasks := []Task{sampleTask(), sampleTask()}
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
-			return tasks, nil
+		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, int, error) {
+			return tasks, len(tasks), nil
 		},
 	}
 	h := newHandlerWithFake(svc)
@@ -284,7 +313,9 @@ func TestListTasks_Handler_ReturnsOK(t *testing.T) {
 
 func TestListTasks_Handler_EmptyIsArray(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error) { return nil, nil },
+		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, int, error) {
+			return nil, 0, nil
+		},
 	}
 	h := newHandlerWithFake(svc)
 
@@ -317,8 +348,8 @@ func TestListTasks_Handler_EmptyIsArray(t *testing.T) {
 // memory_repository_test.go and their PostgreSQL counterparts.
 func TestListTasks_Handler_PassesUserIDLimitOffsetFiltersToService(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
-			return []Task{}, nil
+		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, int, error) {
+			return []Task{}, 0, nil
 		},
 	}
 	h := newHandlerWithFake(svc)
@@ -336,6 +367,7 @@ func TestListTasks_Handler_PassesUserIDLimitOffsetFiltersToService(t *testing.T)
 		{"offset only", "?offset=3", -1, 3, "", ""},
 		{"limit and offset", "?limit=2&offset=1", 2, 1, "", ""},
 		{"limit zero", "?limit=0", 0, 0, "", ""},
+		{"limit at the cap is accepted", "?limit=100", 100, 0, "", ""},
 		{"status only", "?status=pending", -1, 0, "pending", ""},
 		{"priority only", "?priority=high", -1, 0, "", "high"},
 		{"status and priority combined", "?status=done&priority=low", -1, 0, "done", "low"},
@@ -374,8 +406,8 @@ func TestListTasks_Handler_PassesUserIDLimitOffsetFiltersToService(t *testing.T)
 
 func TestListTasks_Handler_InvalidPaginationParams(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
-			return []Task{{ID: "1"}}, nil
+		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, int, error) {
+			return []Task{{ID: "1"}}, 1, nil
 		},
 	}
 	h := newHandlerWithFake(svc)
@@ -385,6 +417,7 @@ func TestListTasks_Handler_InvalidPaginationParams(t *testing.T) {
 		"?limit=-1",
 		"?offset=not-a-number",
 		"?offset=-1",
+		"?limit=101", // one past maxTaskListLimit
 	}
 
 	for _, query := range cases {
@@ -407,8 +440,8 @@ func TestListTasks_Handler_InvalidPaginationParams(t *testing.T) {
 // this only confirms the handler's wiring passes the error through.
 func TestListTasks_Handler_InvalidFilterIs400(t *testing.T) {
 	svc := &fakeService{
-		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
-			return nil, fmt.Errorf("%w: status must be one of pending, in_progress, done, cancelled", ErrInvalidInput)
+		listTasksFn: func(userID string, limit, offset int, statuses, priorities []string) ([]Task, int, error) {
+			return nil, 0, fmt.Errorf("%w: status must be one of pending, in_progress, done, cancelled", ErrInvalidInput)
 		},
 	}
 	h := newHandlerWithFake(svc)
@@ -417,6 +450,58 @@ func TestListTasks_Handler_InvalidFilterIs400(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("listTasks with invalid status filter = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// --- GET /tasks/stats ---
+
+func TestTaskStats_Handler_ReturnsOK(t *testing.T) {
+	svc := &fakeService{
+		taskStatsFn: func(_ string, _, _ []string) (TaskStats, error) {
+			return TaskStats{
+				Total:      4,
+				ByStatus:   map[Status]int{StatusPending: 1, StatusInProgress: 1, StatusDone: 2, StatusCancelled: 0},
+				ByPriority: map[Priority]int{PriorityLow: 1, PriorityMedium: 1, PriorityHigh: 2},
+			}, nil
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(t, h.taskStats, http.MethodGet, "/tasks/stats", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("taskStats status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var got taskStatsResponse
+	decodeBody(t, w, &got)
+	if got.Total != 4 {
+		t.Errorf("taskStats body Total = %d, want 4", got.Total)
+	}
+	if got.ByStatus[StatusDone] != 2 {
+		t.Errorf("taskStats body ByStatus[done] = %d, want 2", got.ByStatus[StatusDone])
+	}
+	if got.ByPriority[PriorityHigh] != 2 {
+		t.Errorf("taskStats body ByPriority[high] = %d, want 2", got.ByPriority[PriorityHigh])
+	}
+}
+
+// TestTaskStats_Handler_InvalidFilterIs400 mirrors
+// TestListTasks_Handler_InvalidFilterIs400: Service.TaskStats validates
+// status/priority filters the same way Service.ListTasks does, and this
+// only confirms the handler's wiring passes that error through.
+func TestTaskStats_Handler_InvalidFilterIs400(t *testing.T) {
+	svc := &fakeService{
+		taskStatsFn: func(_ string, _, _ []string) (TaskStats, error) {
+			return TaskStats{}, fmt.Errorf("%w: status must be one of pending, in_progress, done, cancelled", ErrInvalidInput)
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(t, h.taskStats, http.MethodGet, "/tasks/stats?status=archived", "")
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("taskStats with invalid status filter = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }
 
@@ -452,6 +537,58 @@ func TestGetTask_Handler_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("getTask not found status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+// 15.D2: ETag / If-None-Match.
+
+func TestGetTask_Handler_SetsETagFromIDAndVersion(t *testing.T) {
+	task := sampleTask()
+	task.Version = 3
+	svc := &fakeService{getTaskFn: func(_, _ string) (Task, error) { return task, nil }}
+	h := newHandlerWithFake(svc)
+
+	w := do(t, h.getTask, http.MethodGet, "/tasks/abc-123", "")
+
+	if want, got := `"abc-123:3"`, w.Header().Get("ETag"); got != want {
+		t.Errorf("ETag = %q, want %q", got, want)
+	}
+}
+
+func TestGetTask_Handler_IfNoneMatchHit_Returns304NoBody(t *testing.T) {
+	task := sampleTask()
+	task.Version = 3
+	svc := &fakeService{getTaskFn: func(_, _ string) (Task, error) { return task, nil }}
+	h := newHandlerWithFake(svc)
+
+	w := doWithIfNoneMatch(t, h.getTask, http.MethodGet, "/tasks/abc-123", `"abc-123:3"`)
+
+	if w.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotModified)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("304 body = %q, want empty", w.Body.String())
+	}
+}
+
+// TestGetTask_Handler_IfNoneMatchStale_Returns200WithBody is
+// IfNoneMatchHit's negative case: a client whose cached copy really is
+// out of date (its own ETag names an older Version) still gets the
+// current representation, not a 304 that would leave it displaying
+// stale data forever.
+func TestGetTask_Handler_IfNoneMatchStale_Returns200WithBody(t *testing.T) {
+	task := sampleTask()
+	task.Version = 3
+	svc := &fakeService{getTaskFn: func(_, _ string) (Task, error) { return task, nil }}
+	h := newHandlerWithFake(svc)
+
+	w := doWithIfNoneMatch(t, h.getTask, http.MethodGet, "/tasks/abc-123", `"abc-123:2"`)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Body.Len() == 0 {
+		t.Error("200 response has an empty body, want the task")
 	}
 }
 
@@ -884,7 +1021,7 @@ func TestLoggingStrategy_NotFound_ProducesOnlyAccessLog(t *testing.T) {
 func TestRegisterRoutes(t *testing.T) {
 	svc := &fakeService{
 		createTaskFn:       func(_, _, _, _ string) (Task, error) { return sampleTask(), nil },
-		listTasksFn:        func(_ string, _, _ int, _, _ []string) ([]Task, error) { return []Task{sampleTask()}, nil },
+		listTasksFn:        func(_ string, _, _ int, _, _ []string) ([]Task, int, error) { return []Task{sampleTask()}, 1, nil },
 		getTaskFn:          func(_, _ string) (Task, error) { return sampleTask(), nil },
 		updateTaskFn:       func(_, _, _, _, _ string) (Task, error) { return sampleTask(), nil },
 		completeTaskFn:     func(_, _ string) (Task, error) { return sampleTask(), nil },
@@ -918,6 +1055,207 @@ func TestRegisterRoutes(t *testing.T) {
 			if w.Code != tc.want {
 				t.Errorf("RegisterRoutes %s %s status = %d, want %d",
 					tc.method, tc.path, w.Code, tc.want)
+			}
+		})
+	}
+}
+
+// TestTaskStats_Handler_RoutedCorrectly drives GET /tasks/stats through
+// the real http.ServeMux built by RegisterRoutes — not by calling
+// h.taskStats directly — to empirically confirm the literal segment
+// "stats" is never shadowed by the GET /tasks/{id} wildcard registered
+// right after it (issue #238; see RegisterRoutes' doc comment on this
+// route). A regression here would misroute this request into getTask,
+// which would treat "stats" as a task id and 404 or 500 instead of
+// answering with stats.
+func TestTaskStats_Handler_RoutedCorrectly(t *testing.T) {
+	var routedToStats, routedToGetByID bool
+	svc := &fakeService{
+		taskStatsFn: func(_ string, _, _ []string) (TaskStats, error) {
+			routedToStats = true
+			return TaskStats{}, nil
+		},
+		getTaskFn: func(_, id string) (Task, error) {
+			routedToGetByID = true
+			return Task{}, ErrNotFound
+		},
+	}
+	h := newHandlerWithFake(svc)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux, passthroughAuth)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/stats", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("GET /tasks/stats status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !routedToStats {
+		t.Error("GET /tasks/stats did not reach taskStats")
+	}
+	if routedToGetByID {
+		t.Error("GET /tasks/stats was routed to getTask instead of taskStats — \"stats\" was treated as a task id")
+	}
+}
+
+// --- 15.D2: pageETag / ifNoneMatchHits ---
+
+func TestPageETag_ChangesWhenARowVersionChanges(t *testing.T) {
+	a := sampleTask()
+	a.ID, a.Version = "1", 1
+	b := a
+	b.Version = 2
+
+	if pageETag([]Task{a}) == pageETag([]Task{b}) {
+		t.Error("pageETag() did not change when the only row's Version changed")
+	}
+}
+
+func TestPageETag_ChangesWhenWindowCompositionChanges(t *testing.T) {
+	a := sampleTask()
+	a.ID = "1"
+	c := sampleTask()
+	c.ID = "2"
+
+	if pageETag([]Task{a}) == pageETag([]Task{a, c}) {
+		t.Error("pageETag() did not change when a row entered the window")
+	}
+}
+
+func TestPageETag_StableForIdenticalInput(t *testing.T) {
+	a := sampleTask()
+	a.ID, a.Version = "1", 1
+
+	first := pageETag([]Task{a})
+	second := pageETag([]Task{a})
+	if first != second {
+		t.Error("pageETag() is not deterministic for identical input")
+	}
+}
+
+func TestPageETag_EmptyPage_IsStable(t *testing.T) {
+	if pageETag(nil) != pageETag([]Task{}) {
+		t.Error("pageETag() differs between a nil slice and an empty one")
+	}
+}
+
+func TestListTasks_Handler_SetsETagAndHonorsIfNoneMatch(t *testing.T) {
+	task := sampleTask()
+	task.ID, task.Version = "1", 5
+	svc := &fakeService{
+		listTasksFn: func(_ string, _, _ int, _, _ []string) ([]Task, int, error) {
+			return []Task{task}, 1, nil
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	first := do(t, h.listTasks, http.MethodGet, "/tasks", "")
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("ETag is missing on GET /tasks")
+	}
+
+	second := doWithIfNoneMatch(t, h.listTasks, http.MethodGet, "/tasks", etag)
+	if second.Code != http.StatusNotModified {
+		t.Errorf("status with matching If-None-Match = %d, want %d", second.Code, http.StatusNotModified)
+	}
+	if second.Body.Len() != 0 {
+		t.Errorf("304 body = %q, want empty", second.Body.String())
+	}
+}
+
+// TestListTasks_Handler_IfNoneMatchStale_Returns200 is
+// TestListTasks_Handler_SetsETagAndHonorsIfNoneMatch's negative case: a
+// list that genuinely changed (a row's Version moved) must not be
+// served a 304 just because the client sent an If-None-Match at all —
+// only a match against the *current* ETag should short-circuit.
+func TestListTasks_Handler_IfNoneMatchStale_Returns200(t *testing.T) {
+	task := sampleTask()
+	task.ID, task.Version = "1", 5
+	svc := &fakeService{
+		listTasksFn: func(_ string, _, _ int, _, _ []string) ([]Task, int, error) {
+			return []Task{task}, 1, nil
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	w := doWithIfNoneMatch(t, h.listTasks, http.MethodGet, "/tasks", `"1:4"`)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if w.Body.Len() == 0 {
+		t.Error("200 response has an empty body, want the task list")
+	}
+}
+
+// TestListTasks_Handler_SetsXTotalCountHeader pins issue #237: the
+// header reflects Service.ListTasks' total (every task matching the
+// filter), not len() of the page actually returned.
+func TestListTasks_Handler_SetsXTotalCountHeader(t *testing.T) {
+	svc := &fakeService{
+		listTasksFn: func(_ string, _, _ int, _, _ []string) ([]Task, int, error) {
+			return []Task{sampleTask()}, 42, nil // a 1-task page, of 42 total matches
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(t, h.listTasks, http.MethodGet, "/tasks", "")
+
+	if got := w.Header().Get("X-Total-Count"); got != "42" {
+		t.Errorf("X-Total-Count = %q, want %q", got, "42")
+	}
+}
+
+// TestListTasks_Handler_XTotalCountSurvivesNotModified pins that
+// X-Total-Count is set before the ETag/If-None-Match check, so it is
+// still sent on a 304 — a 304 must not serve a stale total just because
+// the page's own rows didn't change (a task added on another page moves
+// the total without moving this page's ETag).
+func TestListTasks_Handler_XTotalCountSurvivesNotModified(t *testing.T) {
+	task := sampleTask()
+	task.ID, task.Version = "1", 5
+	svc := &fakeService{
+		listTasksFn: func(_ string, _, _ int, _, _ []string) ([]Task, int, error) {
+			return []Task{task}, 42, nil
+		},
+	}
+	h := newHandlerWithFake(svc)
+
+	first := do(t, h.listTasks, http.MethodGet, "/tasks", "")
+	etag := first.Header().Get("ETag")
+
+	second := doWithIfNoneMatch(t, h.listTasks, http.MethodGet, "/tasks", etag)
+	if second.Code != http.StatusNotModified {
+		t.Fatalf("status with matching If-None-Match = %d, want %d", second.Code, http.StatusNotModified)
+	}
+	if got := second.Header().Get("X-Total-Count"); got != "42" {
+		t.Errorf("X-Total-Count on 304 = %q, want %q", got, "42")
+	}
+}
+
+func TestIfNoneMatchHits(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		etag   string
+		want   bool
+	}{
+		{"no header", "", `"a"`, false},
+		{"wildcard", "*", `"a"`, true},
+		{"exact single value", `"a"`, `"a"`, true},
+		{"mismatch", `"b"`, `"a"`, false},
+		{"one of several, with spacing", `"x", "a"`, `"a"`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/tasks/1", nil)
+			if tc.header != "" {
+				req.Header.Set("If-None-Match", tc.header)
+			}
+			if got := ifNoneMatchHits(req, tc.etag); got != tc.want {
+				t.Errorf("ifNoneMatchHits() = %v, want %v", got, tc.want)
 			}
 		})
 	}

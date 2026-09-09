@@ -24,6 +24,14 @@ import (
 // on the column.
 const maxOriginalFilenameLen = 255
 
+// maxAttachmentsPerTask bounds how many attachments a single task may
+// carry. maxBytesPerUser already bounds the abuse case (total storage);
+// this exists purely so a task's attachment list stays practical to
+// fetch and render — hygiene, not a security boundary, so a fixed
+// constant rather than a configurable, per-deployment setting like
+// ATTACHMENT_MAX_BYTES_PER_USER.
+const maxAttachmentsPerTask = 50
+
 // sniffLen is how many leading bytes http.DetectContentType examines. It
 // reads at most this many and ignores the rest, so buffering more would
 // change nothing.
@@ -173,6 +181,15 @@ func (s *Service) Upload(ctx context.Context, userID, taskID, declaredFilename s
 	if total >= s.maxBytesPerUser {
 		return Attachment{}, fmt.Errorf("%w: attachment quota exceeded (%d/%d bytes used)",
 			ErrInvalidInput, total, s.maxBytesPerUser)
+	}
+
+	count, err := s.repo.CountByTask(ctx, taskID, userID)
+	if err != nil {
+		return Attachment{}, fmt.Errorf("upload attachment: %w", err)
+	}
+	if count >= maxAttachmentsPerTask {
+		return Attachment{}, fmt.Errorf("%w: task already has %d attachments (max %d)",
+			ErrInvalidInput, count, maxAttachmentsPerTask)
 	}
 
 	filename, err := normalizeFilename(declaredFilename)

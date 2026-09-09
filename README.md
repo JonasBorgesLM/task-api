@@ -32,7 +32,7 @@ For AI agents (or new contributors) working in this codebase, see **[CLAUDE.md](
 - **Go 1.26+**, matching `go.mod`.
 - **No external service needed for the core application or the in-memory store** — the entire unit test suite runs without one. Of the four runtime dependencies, [`pgx/v5`](https://github.com/jackc/pgx) matters only once `DATABASE_URL` is configured, [`minio-go`](https://github.com/minio/minio-go) only once `ATTACHMENT_S3_ENDPOINT` is, [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) only when a password is hashed, and [`moat`](https://github.com/JonasBorgesLM/moat) is in the request path but talks to nothing outside the process.
 - **[Docker](https://www.docker.com/) and Docker Compose** (optional) — to run PostgreSQL locally without installing it directly.
-- **Nothing to install for linting.** `make lint` and `make vulncheck` invoke [`staticcheck`](https://staticcheck.dev/) and [`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) through `go run <pkg>@<version>`, at versions pinned in the `Makefile` (`STATICCHECK_VERSION`, `GOVULNCHECK_VERSION`). CI calls the same targets, so a local run and the pipeline cannot drift onto different linter versions.
+- **Nothing to install for linting.** `make lint`, `make vulncheck` and `make gosec` invoke [`staticcheck`](https://staticcheck.dev/), [`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) and [`gosec`](https://github.com/securego/gosec) through `go run <pkg>@<version>`, at versions pinned in the `Makefile` (`STATICCHECK_VERSION`, `GOVULNCHECK_VERSION`, `GOSEC_VERSION`). CI calls the same targets, so a local run and the pipeline cannot drift onto different tool versions.
 
 ## Configuration
 
@@ -77,6 +77,8 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `ATTACHMENT_S3_BUCKET` / `..._ACCESS_KEY` / `..._SECRET_KEY` | Required when the endpoint is set. The bucket must already exist | *(unset)* |
 | `ATTACHMENT_S3_REGION` / `ATTACHMENT_S3_USE_SSL` | Optional; SSL defaults to on (turn it off for the local MinIO) | — / `true` |
 | `CRIER_OTLP_ENDPOINT` | Mirrors every log record to this OTLP/HTTP collector (e.g. SigNoz), alongside — never instead of — the stdout JSON log. Full URL with scheme; use the collector's OTLP/HTTP port (`4318`), not gRPC's `4317`. Unset disables it entirely | *(unset)* |
+| `LINK_SHORTENING_ENABLED` | Mounts the short-link subsystem (`POST/GET /v1/links`, `DELETE /v1/links/{code}`, the public `GET /{code}`). Unset ⇒ none of it exists (404, not "present and rejecting") — see `docs/DECISIONS.md` § "Encurtador de links" | `false` |
+| `LINK_PUBLIC_BASE_URL` | Where short links resolve, e.g. `https://s.example.com` — no trailing slash. Builds the `short_url` a caller gets back, and names this deployment's own domain so it can never be shortened as a destination. Required (an absolute `http(s)` URL) when `LINK_SHORTENING_ENABLED=true`, ignored otherwise | *(unset)* |
 
 `config.Load()` returns an error (and the process refuses to start) if a timeout/TTL/max-age isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
@@ -163,9 +165,11 @@ being fully exercised. `make coverage-full` measures both together
 
 Concurrency-sensitive paths (optimistic-concurrency conflicts) are exercised with real concurrent goroutines under `-race`, both against the in-memory store and against real PostgreSQL.
 
-`make check` is the local gate — `gofmt`, `go mod tidy -diff`, `go vet` (default and integration tags), `staticcheck` (both), `govulncheck` and the race-tested unit suite. It is the static half of CI: the pipeline additionally runs the fuzz target, the PostgreSQL/MinIO integration suite, and a build plus smoke test of the production image.
+`make check` is the local gate — `gofmt`, `go mod tidy -diff`, `go vet` (default and integration tags), `staticcheck` (both), `govulncheck`, `gosec` (both) and the race-tested unit suite. It is the static half of CI: the pipeline additionally runs the fuzz target, the PostgreSQL/MinIO integration suite, a build plus smoke test of the production image, and — pull requests only — a dependency review that fails on a new dependency carrying a known vulnerability or a copyleft license this project's MIT terms cannot absorb.
 
-**`govulncheck` fails the build on a vulnerability the code can actually reach.** That is its own default rather than a setting here: an advisory against something present in the dependency graph but never called exits `0`, and only a reachable one exits non-zero. The trade accepted with that choice is that an advisory against the standard library can block merges until a Go release fixes it — see `docs/DECISIONS.md`. It is worth what it costs: the four standard-library advisories this project carried before Go 1.26.6 were found by running the tool by hand, because nothing in the pipeline was looking.
+**`govulncheck` fails the build on a vulnerability the code can actually reach.** That is its own default rather than a setting here: an advisory against something present in the dependency graph but never called exits `0`, and only a reachable one exits non-zero. The trade accepted with that choice is that an advisory against the standard library can block merges until a Go release fixes it — see `docs/DECISIONS.md`. It is worth what it costs: the four standard-library advisories this project carried before Go 1.26.6 were found by running the tool by hand, because nothing in the pipeline was looking. The same command also runs on its own weekly schedule (`scheduled-vulncheck` in CI), independent of any push, so an advisory published against an already-merged dependency doesn't wait for the next PR to be noticed.
+
+**`gosec` scans for insecure patterns in code we wrote ourselves** — SQL built by concatenation, a path opened from a variable, a cookie missing an attribute — a different question from `govulncheck`'s (known CVEs in dependencies) or `staticcheck`'s (correctness bugs). G104 (unhandled errors) is excluded wholesale rather than triaged: a bare `.Close()` on a best-effort cleanup call is this codebase's own idiom, and it accounts for nearly every hit that rule produces here. A handful of specific, real false positives on production code are silenced individually with `#nosec` and the reasoning next to each — see `make gosec`'s own comment in the `Makefile`.
 
 ## Kubernetes
 
@@ -233,8 +237,12 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `POST` | `/v1/auth/logout-all` | required | Invalidate every session for the account, including the one making the call |
 | `GET` | `/v1/auth/me` | required | Get the authenticated user |
 | `DELETE` | `/v1/auth/me` | required | Permanently delete the account — sessions, tasks, attachments, immediately, no grace period |
+| `GET` | `/v1/auth/sessions` | required | List every active session for the account, newest first |
+| `DELETE` | `/v1/auth/sessions/{id}` | required | Revoke one session by its opaque id from `GET /v1/auth/sessions` |
 | `POST` | `/v1/tasks` | required | Create a task |
-| `GET` | `/v1/tasks` | required | List the caller's tasks, oldest first (`?limit=`, `?offset=`, `?status=`, `?priority=`; `status`/`priority` may repeat, e.g. `?status=pending&status=done`, matching any of the given values) |
+| `GET` | `/v1/tasks` | required | List the caller's tasks, oldest first (`?limit=`, `?offset=`, `?status=`, `?priority=`; `status`/`priority` may repeat, e.g. `?status=pending&status=done`, matching any of the given values); response carries an `X-Total-Count` header — the total matching the filter, independent of `limit`/`offset` |
+| `GET` | `/v1/tasks/stats` | required | Count the caller's tasks by status and by priority, across the whole filtered set (same `?status=`/`?priority=` as above) |
+| `GET` | `/v1/tasks/export` | required | Export the caller's whole filtered task set as RFC 4180 CSV (same `?status=`/`?priority=`; capped at 10,000 rows, rejected with `400` above that) |
 | `GET` | `/v1/tasks/{id}` | required | Get a task by ID |
 | `PUT` | `/v1/tasks/{id}` | required | Update title/description/priority |
 | `PATCH` | `/v1/tasks/{id}/status` | required | Move a task to a new status (`pending`/`in_progress`/`done`/`cancelled`) |
@@ -244,6 +252,10 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `GET` | `/v1/tasks/{id}/attachments` | required | List a task's attachments |
 | `GET` | `/v1/files/{key}` | required | Download an attachment by its `storage_key` |
 | `DELETE` | `/v1/files/{key}` | required | Delete an attachment by its `storage_key` — removes the metadata row and the blob in the same request |
+| `POST` | `/v1/links` | required | Shorten a URL, owned by the caller — present only when `LINK_SHORTENING_ENABLED=true` |
+| `GET` | `/v1/links` | required | List the caller's own links, oldest first (`?limit=`, `?after=` cursor pagination) |
+| `DELETE` | `/v1/links/{code}` | required | Revoke one of the caller's own links |
+| `GET` | `/{code}` | — | Resolve a short code and redirect to its destination — public, unauthenticated, deliberately outside `/v1` |
 | `GET` | `/health` | — | Liveness — always `200` while the process runs |
 | `GET` | `/health/ready` | — | Readiness — `200` if the database is reachable, `503` if not |
 | `GET` | `/debug/vars` | required | Runtime stats (`expvar`) plus `version`/`commit` for the running build — authenticated, unlike the health routes |

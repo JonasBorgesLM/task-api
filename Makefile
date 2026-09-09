@@ -1,6 +1,6 @@
 .PHONY: help run build tidy clean \
         test test-race test-integration test-integration-race coverage coverage-full fuzz \
-        fmt fmt-check vet lint vulncheck tidy-check check \
+        fmt fmt-check vet lint vulncheck gosec tidy-check check \
         docker-build docker-up docker-down db-up storage-up \
         migrate-up migrate-down seed seed-reset db-reset \
         signoz-dashboard \
@@ -20,6 +20,7 @@
 # segundo lugar para desalinhar.
 STATICCHECK_VERSION ?= v0.8.1
 GOVULNCHECK_VERSION ?= v1.7.0
+GOSEC_VERSION        ?= v2.28.0
 
 # Connection string used by the local PostgreSQL instance started via
 # `make db-up` / `make docker-up` (see docker-compose.yml). Override on
@@ -156,6 +157,27 @@ lint: ## Run staticcheck at the pinned version (see STATICCHECK_VERSION)
 vulncheck: ## Run govulncheck at the pinned version (see GOVULNCHECK_VERSION)
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
+# G104 (unhandled errors) is excluded wholesale, not triaged line by line: a
+# bare `.Close()` on a limiter, a listener, or a response body — this
+# repository's own idiom for a best-effort cleanup whose failure has nowhere
+# useful to go — is what nearly all of gosec's G104 hits here are (68 of 101
+# on the run that added this target). Annotating each would need as many
+# `#nosec` comments that say nothing beyond restating this rule's existence.
+#
+# `-tests` is deliberately NOT passed: every finding it added over a plain
+# `./...` run was in test fixtures — a fake password in a connection string
+# literal, a bare `http.Cookie`/`http.Server` built to test one narrow thing
+# — and none of them was a real defect. What's still checked, on production
+# code: G701/G202 (SQL injection / string-built queries), G304/G703 (path
+# traversal), G401/G402 (weak crypto/TLS), and the rest of gosec's rule set.
+# A handful of specific, real false positives on production code are silenced
+# individually where they occur (search `#nosec` in internal/ and cmd/) with
+# the reasoning next to each — the same discipline the govulncheck target
+# below already applies to the one advisory it accepts.
+gosec: ## Run gosec at the pinned version (see GOSEC_VERSION)
+	go run github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION) -exclude-generated -exclude=G104 ./...
+	go run github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION) -exclude-generated -exclude=G104 -tags=integration ./...
+
 tidy-check: ## Fail if go.mod/go.sum are not tidy (matches CI; fix with `make tidy`)
 	@if ! go mod tidy -diff; then \
 		echo ""; \
@@ -164,7 +186,7 @@ tidy-check: ## Fail if go.mod/go.sum are not tidy (matches CI; fix with `make ti
 	fi
 	go mod verify
 
-check: fmt-check tidy-check vet lint vulncheck test-race ## Run the CI static gate + race-tested unit tests (no PostgreSQL/MinIO; CI also runs fuzz and the integration suite)
+check: fmt-check tidy-check vet lint vulncheck gosec test-race ## Run the CI static gate + race-tested unit tests (no PostgreSQL/MinIO; CI also runs fuzz and the integration suite)
 
 ##@ Docker
 

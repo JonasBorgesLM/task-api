@@ -29,13 +29,22 @@ type fakeRepository struct {
 	updateErr    error
 	deleteErr    error
 
+	countAllResult int
+	countAllErr    error
+
+	countByStatusAndPriorityByStatus   map[Status]int
+	countByStatusAndPriorityByPriority map[Priority]int
+	countByStatusAndPriorityErr        error
+
 	// Call recording.
-	findByIDCalled    bool
-	updateCalled      bool
-	deleteCalled      bool
-	savedTask         Task
-	updatedTask       Task
-	findAllCalledWith [5]any // [userID, limit, offset, statuses, priorities]
+	findByIDCalled                     bool
+	updateCalled                       bool
+	deleteCalled                       bool
+	savedTask                          Task
+	updatedTask                        Task
+	findAllCalledWith                  [5]any // [userID, limit, offset, statuses, priorities]
+	countAllCalledWith                 [3]any // [userID, statuses, priorities]
+	countByStatusAndPriorityCalledWith [3]any // [userID, statuses, priorities]
 }
 
 func (f *fakeRepository) Create(_ context.Context, task Task) error {
@@ -64,6 +73,16 @@ func (f *fakeRepository) Update(_ context.Context, task Task) error {
 func (f *fakeRepository) Delete(_ context.Context, _, _ string) error {
 	f.deleteCalled = true
 	return f.deleteErr
+}
+
+func (f *fakeRepository) CountAll(_ context.Context, userID string, statuses []Status, priorities []Priority) (int, error) {
+	f.countAllCalledWith = [3]any{userID, joinStatuses(statuses), joinPriorities(priorities)}
+	return f.countAllResult, f.countAllErr
+}
+
+func (f *fakeRepository) CountByStatusAndPriority(_ context.Context, userID string, statuses []Status, priorities []Priority) (map[Status]int, map[Priority]int, error) {
+	f.countByStatusAndPriorityCalledWith = [3]any{userID, joinStatuses(statuses), joinPriorities(priorities)}
+	return f.countByStatusAndPriorityByStatus, f.countByStatusAndPriorityByPriority, f.countByStatusAndPriorityErr
 }
 
 // newFakeTask returns a Task owned by testUserID with predictable values
@@ -323,7 +342,7 @@ func TestListTasks_Delegates(t *testing.T) {
 	tasks := []Task{newFakeTask(StatusPending), newFakeTask(StatusDone)}
 	svc := NewService(&fakeRepository{findAllTasks: tasks})
 
-	got, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, nil)
+	got, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
@@ -343,7 +362,7 @@ func TestListTasks_PassesUserIDLimitOffsetFiltersToRepository(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	if _, err := svc.ListTasks(context.Background(), testUserID, 10, 5, []string{"pending"}, []string{"high"}); err != nil {
+	if _, _, err := svc.ListTasks(context.Background(), testUserID, 10, 5, []string{"pending"}, []string{"high"}); err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
 	if want := [5]any{testUserID, 10, 5, "pending", "high"}; repo.findAllCalledWith != want {
@@ -358,7 +377,7 @@ func TestListTasks_EmptyFiltersReachRepositoryAsEmpty(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	if _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, nil); err != nil {
+	if _, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, nil); err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
 	if want := [5]any{testUserID, -1, 0, "", ""}; repo.findAllCalledWith != want {
@@ -370,9 +389,243 @@ func TestListTasks_RepositoryError(t *testing.T) {
 	repoErr := errors.New("storage failure")
 	svc := NewService(&fakeRepository{findAllErr: repoErr})
 
-	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, nil)
+	_, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, nil)
 	if !errors.Is(err, repoErr) {
 		t.Errorf("ListTasks() repository error = %v, want %v", err, repoErr)
+	}
+}
+
+// TestListTasks_ReturnsTotalFromCountAll pins that total (issue #237)
+// comes from Repository.CountAll, independent of the page FindAll
+// returns — a filtered page can be far shorter than the full match
+// count for every reason pagination exists at all, so total must never
+// be derived from len(tasks).
+func TestListTasks_ReturnsTotalFromCountAll(t *testing.T) {
+	repo := &fakeRepository{
+		findAllTasks:   []Task{newFakeTask(StatusPending), newFakeTask(StatusDone)}, // a 2-task page
+		countAllResult: 47,                                                          // of 47 total matches
+	}
+	svc := NewService(repo)
+
+	tasks, total, err := svc.ListTasks(context.Background(), testUserID, 2, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("ListTasks() unexpected error: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("ListTasks() returned %d tasks, want 2", len(tasks))
+	}
+	if total != 47 {
+		t.Errorf("ListTasks() total = %d, want 47 (from CountAll, not len(tasks))", total)
+	}
+}
+
+// TestListTasks_CountAllReceivesTheSameValidatedFilters pins that
+// CountAll is called with the exact same userID/statuses/priorities
+// FindAll is — the two queries must agree on what "matches the filter"
+// means, or X-Total-Count could describe a different set than the page
+// itself does.
+func TestListTasks_CountAllReceivesTheSameValidatedFilters(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	if _, _, err := svc.ListTasks(context.Background(), testUserID, 10, 0, []string{"pending", "done"}, []string{"high"}); err != nil {
+		t.Fatalf("ListTasks() unexpected error: %v", err)
+	}
+
+	want := [3]any{testUserID, "pending,done", "high"}
+	if repo.countAllCalledWith != want {
+		t.Errorf("ListTasks() called Repository.CountAll with (userID, statuses, priorities) = %v, want %v", repo.countAllCalledWith, want)
+	}
+}
+
+func TestListTasks_CountAllError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	svc := NewService(&fakeRepository{countAllErr: repoErr})
+
+	_, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, nil)
+	if !errors.Is(err, repoErr) {
+		t.Errorf("ListTasks() CountAll error = %v, want %v", err, repoErr)
+	}
+}
+
+// TestTaskStats_Delegates verifies TaskStats returns Repository's
+// grouped counts and computes Total as their sum — issue #238.
+func TestTaskStats_Delegates(t *testing.T) {
+	repo := &fakeRepository{
+		countByStatusAndPriorityByStatus:   map[Status]int{StatusPending: 3, StatusInProgress: 1, StatusDone: 5, StatusCancelled: 0},
+		countByStatusAndPriorityByPriority: map[Priority]int{PriorityLow: 2, PriorityMedium: 4, PriorityHigh: 3},
+	}
+	svc := NewService(repo)
+
+	stats, err := svc.TaskStats(context.Background(), testUserID, nil, nil)
+	if err != nil {
+		t.Fatalf("TaskStats() unexpected error: %v", err)
+	}
+	if stats.Total != 9 {
+		t.Errorf("TaskStats() Total = %d, want 9 (sum of ByStatus)", stats.Total)
+	}
+	if stats.ByStatus[StatusDone] != 5 {
+		t.Errorf("TaskStats() ByStatus[done] = %d, want 5", stats.ByStatus[StatusDone])
+	}
+	if stats.ByPriority[PriorityMedium] != 4 {
+		t.Errorf("TaskStats() ByPriority[medium] = %d, want 4", stats.ByPriority[PriorityMedium])
+	}
+}
+
+// TestTaskStats_PassesValidatedDedupedFiltersToRepository pins that
+// CountByStatusAndPriority receives the same validated/deduped filters
+// every other Repository call does — Service must not apply a different
+// filter-handling rule for stats than it does for ListTasks.
+func TestTaskStats_PassesValidatedDedupedFiltersToRepository(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	if _, err := svc.TaskStats(context.Background(), testUserID, []string{"pending", "pending", "done"}, []string{"high"}); err != nil {
+		t.Fatalf("TaskStats() unexpected error: %v", err)
+	}
+
+	want := [3]any{testUserID, "pending,done", "high"}
+	if repo.countByStatusAndPriorityCalledWith != want {
+		t.Errorf("TaskStats() called Repository.CountByStatusAndPriority with (userID, statuses, priorities) = %v, want %v", repo.countByStatusAndPriorityCalledWith, want)
+	}
+}
+
+func TestTaskStats_UnknownStatusFilterIsInvalidInput(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	_, err := svc.TaskStats(context.Background(), testUserID, []string{"bogus"}, nil)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("TaskStats() error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestTaskStats_RepositoryError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	svc := NewService(&fakeRepository{countByStatusAndPriorityErr: repoErr})
+
+	_, err := svc.TaskStats(context.Background(), testUserID, nil, nil)
+	if !errors.Is(err, repoErr) {
+		t.Errorf("TaskStats() error = %v, want %v", err, repoErr)
+	}
+}
+
+// TestExportTasks_Delegates verifies ExportTasks returns Repository's
+// full result — a CSV export exists specifically to return the entire
+// matching set, so unlike ListTasks it never windows the result.
+func TestExportTasks_Delegates(t *testing.T) {
+	want := []Task{newFakeTask(StatusPending), newFakeTask(StatusDone)}
+	repo := &fakeRepository{findAllTasks: want, countAllResult: 2}
+	svc := NewService(repo)
+
+	got, err := svc.ExportTasks(context.Background(), testUserID, nil, nil)
+	if err != nil {
+		t.Fatalf("ExportTasks() unexpected error: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ExportTasks() returned %d tasks, want %d", len(got), len(want))
+	}
+}
+
+// TestExportTasks_FetchesWithNoLimit pins that ExportTasks passes -1
+// (no limit) and offset 0 to Repository.FindAll — an export by
+// definition returns the whole filtered set, never a windowed page.
+func TestExportTasks_FetchesWithNoLimit(t *testing.T) {
+	repo := &fakeRepository{countAllResult: 0}
+	svc := NewService(repo)
+
+	if _, err := svc.ExportTasks(context.Background(), testUserID, nil, nil); err != nil {
+		t.Fatalf("ExportTasks() unexpected error: %v", err)
+	}
+
+	want := [5]any{testUserID, -1, 0, "", ""}
+	if repo.findAllCalledWith != want {
+		t.Errorf("ExportTasks() called Repository.FindAll with %v, want %v", repo.findAllCalledWith, want)
+	}
+}
+
+// TestExportTasks_PassesValidatedDedupedFiltersToRepository pins that
+// both CountAll and FindAll receive the exact same validated/deduped
+// filters — the cap check and the actual fetch must agree on what
+// "matches the filter" means, or a request could be rejected (or
+// allowed) based on a count of a different set than what gets fetched.
+func TestExportTasks_PassesValidatedDedupedFiltersToRepository(t *testing.T) {
+	repo := &fakeRepository{countAllResult: 0}
+	svc := NewService(repo)
+
+	if _, err := svc.ExportTasks(context.Background(), testUserID, []string{"pending", "pending", "done"}, []string{"high"}); err != nil {
+		t.Fatalf("ExportTasks() unexpected error: %v", err)
+	}
+
+	wantCountAll := [3]any{testUserID, "pending,done", "high"}
+	if repo.countAllCalledWith != wantCountAll {
+		t.Errorf("ExportTasks() called Repository.CountAll with %v, want %v", repo.countAllCalledWith, wantCountAll)
+	}
+	wantFindAll := [5]any{testUserID, -1, 0, "pending,done", "high"}
+	if repo.findAllCalledWith != wantFindAll {
+		t.Errorf("ExportTasks() called Repository.FindAll with %v, want %v", repo.findAllCalledWith, wantFindAll)
+	}
+}
+
+// TestExportTasks_AtCapIsAllowed pins the boundary: a filtered total
+// exactly equal to maxExportRows is still exported in full, not
+// rejected — the limit is "more than maxExportRows", not "maxExportRows
+// or more".
+func TestExportTasks_AtCapIsAllowed(t *testing.T) {
+	repo := &fakeRepository{countAllResult: maxExportRows}
+	svc := NewService(repo)
+
+	if _, err := svc.ExportTasks(context.Background(), testUserID, nil, nil); err != nil {
+		t.Errorf("ExportTasks() at exactly maxExportRows unexpected error: %v", err)
+	}
+}
+
+// TestExportTasks_RejectsAboveCap pins issue #243 (15.F5): a filtered
+// total over maxExportRows is rejected with ErrInvalidInput before
+// Repository.FindAll is ever called — never a response that starts
+// streaming and gets cut off partway through by the server's
+// WriteTimeout, which would produce a file that looks complete and
+// isn't.
+func TestExportTasks_RejectsAboveCap(t *testing.T) {
+	repo := &fakeRepository{countAllResult: maxExportRows + 1}
+	svc := NewService(repo)
+
+	_, err := svc.ExportTasks(context.Background(), testUserID, nil, nil)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("ExportTasks() over cap error = %v, want ErrInvalidInput", err)
+	}
+	if repo.findAllCalledWith != ([5]any{}) {
+		t.Error("ExportTasks() over cap called Repository.FindAll — it must reject before fetching anything")
+	}
+}
+
+func TestExportTasks_UnknownStatusFilterIsInvalidInput(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	_, err := svc.ExportTasks(context.Background(), testUserID, []string{"archived"}, nil)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("ExportTasks() error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestExportTasks_CountAllError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	svc := NewService(&fakeRepository{countAllErr: repoErr})
+
+	_, err := svc.ExportTasks(context.Background(), testUserID, nil, nil)
+	if !errors.Is(err, repoErr) {
+		t.Errorf("ExportTasks() error = %v, want %v", err, repoErr)
+	}
+}
+
+func TestExportTasks_FindAllError(t *testing.T) {
+	repoErr := errors.New("storage failure")
+	svc := NewService(&fakeRepository{countAllResult: 1, findAllErr: repoErr})
+
+	_, err := svc.ExportTasks(context.Background(), testUserID, nil, nil)
+	if !errors.Is(err, repoErr) {
+		t.Errorf("ExportTasks() error = %v, want %v", err, repoErr)
 	}
 }
 
@@ -384,7 +637,7 @@ func TestListTasks_UnknownStatusFilterIsInvalidInput(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, []string{"archived"}, nil)
+	_, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, []string{"archived"}, nil)
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("ListTasks() with unknown status filter error = %v, want ErrInvalidInput", err)
 	}
@@ -399,12 +652,55 @@ func TestListTasks_UnknownPriorityFilterIsInvalidInput(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, []string{"urgent"})
+	_, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, []string{"urgent"})
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("ListTasks() with unknown priority filter error = %v, want ErrInvalidInput", err)
 	}
 	if repo.findAllCalledWith != ([5]any{}) {
 		t.Errorf("ListTasks() must not call Repository.FindAll for an invalid filter, called with %v", repo.findAllCalledWith)
+	}
+}
+
+// TestListTasks_TooManyStatusValuesIsInvalidInput verifies that a status
+// filter carrying more than maxFilterValues raw occurrences is rejected
+// before Repository is ever reached, regardless of whether the values
+// themselves are valid or repeated — the check exists to bound how much
+// of the query string gets walked at all, ahead of validation.
+func TestListTasks_TooManyStatusValuesIsInvalidInput(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	statuses := make([]string, maxFilterValues+1)
+	for i := range statuses {
+		statuses[i] = "pending"
+	}
+
+	_, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, statuses, nil)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("ListTasks() with too many status values error = %v, want ErrInvalidInput", err)
+	}
+	if repo.findAllCalledWith != ([5]any{}) {
+		t.Errorf("ListTasks() must not call Repository.FindAll with too many status values, called with %v", repo.findAllCalledWith)
+	}
+}
+
+// TestListTasks_TooManyPriorityValuesIsInvalidInput mirrors
+// TestListTasks_TooManyStatusValuesIsInvalidInput for priority.
+func TestListTasks_TooManyPriorityValuesIsInvalidInput(t *testing.T) {
+	repo := &fakeRepository{}
+	svc := NewService(repo)
+
+	priorities := make([]string, maxFilterValues+1)
+	for i := range priorities {
+		priorities[i] = "high"
+	}
+
+	_, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, nil, priorities)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("ListTasks() with too many priority values error = %v, want ErrInvalidInput", err)
+	}
+	if repo.findAllCalledWith != ([5]any{}) {
+		t.Errorf("ListTasks() must not call Repository.FindAll with too many priority values, called with %v", repo.findAllCalledWith)
 	}
 }
 
@@ -418,7 +714,7 @@ func TestListTasks_MultipleFiltersReachRepository(t *testing.T) {
 
 	statuses := []string{"pending", "in_progress", "done"}
 	priorities := []string{"high", "medium"}
-	if _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, statuses, priorities); err != nil {
+	if _, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, statuses, priorities); err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
 
@@ -437,7 +733,7 @@ func TestListTasks_DuplicateFiltersAreCollapsed(t *testing.T) {
 	svc := NewService(repo)
 
 	statuses := []string{"done", "pending", "done", "pending", "done"}
-	if _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, statuses, nil); err != nil {
+	if _, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, statuses, nil); err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
 
@@ -455,7 +751,7 @@ func TestListTasks_EmptyFilterValuesAreDropped(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	if _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, []string{"", "done", ""}, []string{""}); err != nil {
+	if _, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, []string{"", "done", ""}, []string{""}); err != nil {
 		t.Fatalf("ListTasks() unexpected error: %v", err)
 	}
 
@@ -474,7 +770,7 @@ func TestListTasks_OneBadValueRejectsTheWholeFilter(t *testing.T) {
 	repo := &fakeRepository{}
 	svc := NewService(repo)
 
-	_, err := svc.ListTasks(context.Background(), testUserID, -1, 0, []string{"pending", "archived"}, nil)
+	_, _, err := svc.ListTasks(context.Background(), testUserID, -1, 0, []string{"pending", "archived"}, nil)
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("ListTasks() with one unknown status among valid ones = %v, want ErrInvalidInput", err)
 	}

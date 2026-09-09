@@ -560,6 +560,177 @@ func TestFindAll_FiltersByStatusAndPriority(t *testing.T) {
 	}
 }
 
+// TestCountAll_MatchesFindAllFiltering reuses TestFindAll_
+// FiltersByStatusAndPriority's exact seed and filter combinations,
+// asserting count == len(FindAll's own result) for each — CountAll must
+// apply the identical WHERE semantics FindAll does (issue #237), not a
+// second, independently-written notion of "matches the filter".
+func TestCountAll_MatchesFindAllFiltering(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	seed := []struct {
+		id       string
+		status   Status
+		priority Priority
+	}{
+		{"1", StatusPending, PriorityLow},
+		{"2", StatusPending, PriorityHigh},
+		{"3", StatusDone, PriorityLow},
+		{"4", StatusDone, PriorityHigh},
+	}
+	base := time.Now()
+	for i, s := range seed {
+		task := newTestTask(s.id, "Task "+s.id)
+		task.Status = s.status
+		task.Priority = s.priority
+		task.CreatedAt = base.Add(time.Duration(i) * time.Second)
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name       string
+		statuses   []Status
+		priorities []Priority
+		wantCount  int
+	}{
+		{"no filter", nil, nil, 4},
+		{"status only", []Status{StatusDone}, nil, 2},
+		{"priority only", nil, []Priority{PriorityHigh}, 2},
+		{"status and priority combined (AND)", []Status{StatusDone}, []Priority{PriorityHigh}, 1},
+		{"filter matches nothing", []Status{StatusCancelled}, nil, 0},
+		{"two statuses (OR)", []Status{StatusPending, StatusDone}, nil, 4},
+		{"two priorities (OR)", nil, []Priority{PriorityLow, PriorityHigh}, 4},
+		{
+			"several of each: OR within, AND across",
+			[]Status{StatusPending, StatusDone},
+			[]Priority{PriorityHigh},
+			2,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repo.CountAll(context.Background(), testUserID, tc.statuses, tc.priorities)
+			if err != nil {
+				t.Fatalf("CountAll() unexpected error: %v", err)
+			}
+			if got != tc.wantCount {
+				t.Errorf("CountAll() = %d, want %d", got, tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestCountAll_ScopedToUser(t *testing.T) {
+	repo := NewMemoryRepository()
+	other := newTestTask("other", "Other user's task")
+	other.UserID = "different-user"
+	if err := repo.Create(context.Background(), newTestTask("1", "Mine")); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+	if err := repo.Create(context.Background(), other); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	got, err := repo.CountAll(context.Background(), testUserID, nil, nil)
+	if err != nil {
+		t.Fatalf("CountAll() unexpected error: %v", err)
+	}
+	if got != 1 {
+		t.Errorf("CountAll() = %d, want 1 (must not count another user's task)", got)
+	}
+}
+
+// TestCountByStatusAndPriority_GroupsCorrectly pins the same "every key
+// present, including at zero" contract Repository's doc comment states —
+// StatusCancelled and every Priority except PriorityHigh have no
+// matching task in this seed, and must still appear as 0, not be absent
+// from the map.
+func TestCountByStatusAndPriority_GroupsCorrectly(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	seed := []struct {
+		id       string
+		status   Status
+		priority Priority
+	}{
+		{"1", StatusPending, PriorityHigh},
+		{"2", StatusPending, PriorityHigh},
+		{"3", StatusDone, PriorityHigh},
+	}
+	for _, s := range seed {
+		task := newTestTask(s.id, "Task "+s.id)
+		task.Status = s.status
+		task.Priority = s.priority
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	byStatus, byPriority, err := repo.CountByStatusAndPriority(context.Background(), testUserID, nil, nil)
+	if err != nil {
+		t.Fatalf("CountByStatusAndPriority() unexpected error: %v", err)
+	}
+
+	wantByStatus := map[Status]int{
+		StatusPending:    2,
+		StatusInProgress: 0,
+		StatusDone:       1,
+		StatusCancelled:  0,
+	}
+	for status, want := range wantByStatus {
+		if got := byStatus[status]; got != want {
+			t.Errorf("byStatus[%q] = %d, want %d", status, got, want)
+		}
+	}
+	if len(byStatus) != len(wantByStatus) {
+		t.Errorf("byStatus has %d keys, want %d (every status must be present, none absent)", len(byStatus), len(wantByStatus))
+	}
+
+	wantByPriority := map[Priority]int{
+		PriorityLow:    0,
+		PriorityMedium: 0,
+		PriorityHigh:   3,
+	}
+	for priority, want := range wantByPriority {
+		if got := byPriority[priority]; got != want {
+			t.Errorf("byPriority[%q] = %d, want %d", priority, got, want)
+		}
+	}
+	if len(byPriority) != len(wantByPriority) {
+		t.Errorf("byPriority has %d keys, want %d (every priority must be present, none absent)", len(byPriority), len(wantByPriority))
+	}
+}
+
+func TestCountByStatusAndPriority_RespectsFilter(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	pending := newTestTask("1", "Pending high")
+	pending.Status, pending.Priority = StatusPending, PriorityHigh
+	done := newTestTask("2", "Done low")
+	done.Status, done.Priority = StatusDone, PriorityLow
+	for _, task := range []Task{pending, done} {
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	// Filtering to priority=high narrows the universe before grouping —
+	// the done/low task must not appear in either map at all.
+	byStatus, byPriority, err := repo.CountByStatusAndPriority(context.Background(), testUserID, nil, []Priority{PriorityHigh})
+	if err != nil {
+		t.Fatalf("CountByStatusAndPriority() unexpected error: %v", err)
+	}
+	if byStatus[StatusPending] != 1 || byStatus[StatusDone] != 0 {
+		t.Errorf("byStatus = %+v, want pending=1 done=0 (priority filter should exclude the done/low task)", byStatus)
+	}
+	if byPriority[PriorityHigh] != 1 || byPriority[PriorityLow] != 0 {
+		t.Errorf("byPriority = %+v, want high=1 low=0", byPriority)
+	}
+}
+
 // TestFindAll_FilterThenPaginate verifies that limit/offset window the
 // already-filtered set, not the full table — a filtered page must behave
 // the same way a SQL WHERE-then-LIMIT would, not "paginate everything,

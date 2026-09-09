@@ -17,6 +17,17 @@ import (
 // request bodies.
 const maxRequestBodyBytes = 1 << 20 // 1 MiB
 
+// Audit event types (issue #223) — see logAuditEvent's doc comment for
+// what each one records and docs/DECISIONS.md § "Trilha de auditoria"
+// for the full reasoning.
+const (
+	auditEventLoginSuccess    = "login_success"
+	auditEventLoginFailure    = "login_failure"
+	auditEventLogoutAll       = "logout_all"
+	auditEventPasswordChanged = "password_changed"
+	auditEventAccountDeleted  = "account_deleted"
+)
+
 // userService is the interface Handler depends on, so it can be tested
 // with a fake — the same pattern as task/handler.go's taskService.
 type userService interface {
@@ -29,6 +40,8 @@ type userService interface {
 	Logout(ctx context.Context, token string) error
 	LogoutAll(ctx context.Context, userID string) error
 	GetUser(ctx context.Context, id string) (User, error)
+	ListSessions(ctx context.Context, userID, currentToken string) ([]SessionInfo, error)
+	RevokeSession(ctx context.Context, userID, sessionID string) error
 }
 
 // AccountCascadeFunc deletes everything belonging to userID that this
@@ -101,6 +114,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth, rateLimit midd
 	mux.Handle("POST /auth/logout-all", requireAuth(http.HandlerFunc(h.logoutAll)))
 	mux.Handle("GET /auth/me", requireAuth(http.HandlerFunc(h.me)))
 	mux.Handle("DELETE /auth/me", requireAuth(http.HandlerFunc(h.deleteAccount)))
+	mux.Handle("GET /auth/sessions", requireAuth(http.HandlerFunc(h.listSessions)))
+	mux.Handle("DELETE /auth/sessions/{id}", requireAuth(http.HandlerFunc(h.revokeSession)))
 }
 
 type registerRequest struct {
@@ -154,11 +169,17 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	normalizedEmail := normalizeEmail(req.Email)
+
 	u, err := h.svc.Authenticate(r.Context(), req.Email, req.Password)
 	if err != nil {
+		if errors.Is(err, ErrInvalidCredentials) {
+			h.logAuditEvent(r, auditEventLoginFailure, normalizedEmail)
+		}
 		h.handleServiceError(w, r, err)
 		return
 	}
+	h.logAuditEvent(r, auditEventLoginSuccess, normalizedEmail)
 
 	// Rotate replaces the CSRF cookie's value, so a token computed
 	// against whatever value it held before this login (e.g. one an
@@ -206,6 +227,10 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 // separately-configured duration: the cookie must never outlive, or
 // undercut, the credential it carries.
 func setSessionCookie(w http.ResponseWriter, token string, expiresAt time.Time, insecure bool) {
+	// #nosec G124 -- HttpOnly, Secure and SameSite are all set below; gosec
+	// flags this because Secure is `!insecure` rather than a literal `true`
+	// (insecure is CookieInsecure, dev-only — see config.Config), not
+	// because any attribute is actually missing.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
@@ -227,6 +252,8 @@ func setSessionCookie(w http.ResponseWriter, token string, expiresAt time.Time, 
 // must match what setSessionCookie wrote, or the browser treats this as
 // a different cookie and leaves the real one untouched.
 func clearSessionCookie(w http.ResponseWriter, insecure bool) {
+	// #nosec G124 -- same false positive as setSessionCookie above: every
+	// attribute is set, gosec just doesn't credit `!insecure` as "Secure".
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
@@ -276,6 +303,7 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 		h.handleServiceError(w, r, err)
 		return
 	}
+	h.logAuditEvent(r, auditEventPasswordChanged, userID)
 
 	h.writeJSON(w, r, http.StatusOK, struct{}{})
 }
@@ -310,6 +338,7 @@ func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
 		h.handleServiceError(w, r, err)
 		return
 	}
+	h.logAuditEvent(r, auditEventLogoutAll, userID)
 
 	clearSessionCookie(w, h.cookieInsecure)
 	w.WriteHeader(http.StatusNoContent)
@@ -431,9 +460,101 @@ func (h *Handler) deleteAccount(w http.ResponseWriter, r *http.Request) {
 		h.handleServiceError(w, r, err)
 		return
 	}
+	h.logAuditEvent(r, auditEventAccountDeleted, userID)
 
 	clearSessionCookie(w, h.cookieInsecure)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// sessionResponse is one entry in GET /auth/sessions' array — never
+// TokenHash, never the raw token; ID is the opaque value
+// Service.deriveSessionID computes (see its own doc comment).
+type sessionResponse struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	IsCurrent bool      `json:"is_current"`
+}
+
+// listSessions handles GET /auth/sessions (issue #224) — every session
+// belonging to the caller, newest first, with IsCurrent marking the one
+// that authenticated this very request.
+func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
+	userID, _ := middleware.UserIDFromContext(r.Context())
+	token, _ := middleware.SessionTokenFromContext(r.Context())
+
+	sessions, err := h.svc.ListSessions(r.Context(), userID, token)
+	if err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
+	// []sessionResponse{}, not a nil slice: an empty result must still
+	// serialize as JSON [], never null — see go-http-handlers.md.
+	resp := make([]sessionResponse, len(sessions))
+	for i, s := range sessions {
+		// sessionResponse's fields deliberately mirror SessionInfo's
+		// exactly (same names, same order, same types) so this
+		// conversion stays valid — if the two ever need to diverge,
+		// switch back to an explicit field-by-field literal then.
+		resp[i] = sessionResponse(s)
+	}
+	h.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// revokeSession handles DELETE /auth/sessions/{id} (issue #224) — the
+// gap between POST /auth/logout (this session only) and
+// POST /auth/logout-all (every session): revoke exactly one other
+// session by the opaque id GET /auth/sessions listed it under.
+// Revoking the caller's own current session this way is not special-
+// cased — see Service.RevokeSession's doc comment for why.
+func (h *Handler) revokeSession(w http.ResponseWriter, r *http.Request) {
+	userID, _ := middleware.UserIDFromContext(r.Context())
+	sessionID := r.PathValue("id")
+
+	if err := h.svc.RevokeSession(r.Context(), userID, sessionID); err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// logAuditEvent emits a structured Info-level log line for a security-
+// relevant account event (issue #223) — login, login failure, logout-all,
+// password change, account deletion. This is a deliberate exception to
+// handleServiceError's "routine outcomes aren't logged here" rule right
+// below: that rule is about not duplicating what the access log already
+// records for every request, while this is a distinct, purpose-built
+// trail meant to answer "from where, and when" after an incident —
+// something a generic access log line, keyed by path and status rather
+// than by account, doesn't give a reviewer without cross-referencing.
+//
+// Nothing new is wired to emit it anywhere: this reuses h.logger exactly
+// as every other call site in this file does, so crierTeeHandler (see
+// cmd/api/crier.go) mirrors it to the configured OTLP collector the same
+// way it already mirrors every other log record, with no dedicated audit
+// sink to build or maintain.
+//
+// account identifies who the event is about — the authenticated user ID
+// for logout-all/password-changed/account_deleted (already known from
+// context by then), or the normalized email attempted for
+// login_success/login_failure (Authenticate deliberately never tells its
+// caller which internal case a failure was — see its own doc comment —
+// so the email actually submitted is the only identifier available for a
+// failed attempt, and is used for a successful one too so both event
+// types share one field's meaning instead of two incompatible ones).
+//
+// Never logs a password, a session token, or a token hash — the issue's
+// own explicit never-list.
+func (h *Handler) logAuditEvent(r *http.Request, eventType, account string) {
+	requestID, _ := middleware.RequestIDFromContext(r.Context())
+	h.logger.Info("audit event",
+		"event_type", eventType,
+		"account", account,
+		"source_ip", middleware.RealIPFromContext(r.Context()),
+		"request_id", requestID,
+	)
 }
 
 // handleServiceError maps known domain errors to HTTP status codes,

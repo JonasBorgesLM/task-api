@@ -48,6 +48,9 @@ Then check whether the same change also moves:
 | Missing/expired/malformed bearer token | `401` |
 | Session lookup itself failed (database down) | `503` — never `401` |
 | Rate limit | `429` |
+| `If-None-Match` matches the current `ETag` (`GET /tasks`, `GET /tasks/{id}`) | `304`, no body |
+| Well-formed input rejected by a business/policy rule, with a `reason` (link destination rejected by policy or a vanity-code constraint) | `422` |
+| Public resolve, `GET /{code}`, succeeds | `302`, `Location` + `Cache-Control: no-store` + `Referrer-Policy: no-referrer` |
 
 Do not invent a new code for a condition already in this table.
 

@@ -355,6 +355,140 @@ concreto na mão do que construir o mecanismo antes de existir o problema.
 
 ---
 
+## gosec no CI: G104 excluído por inteiro, sem `-tests`
+
+O `gosec` roda no gate com `-exclude=G104` e sem `-tests`. Os achados
+específicos que restam em código de produção são suprimidos um a um com
+`#nosec` e o motivo ao lado — nunca em bloco.
+
+**Por quê:** medido neste repositório antes de decidir, não presumido.
+Rodando `-tests` sobre o código inteiro: 101 achados. 68 eram G104 (erro
+não checado) — quase todos `.Close()` de melhor esforço, o idioma que
+este código já usa de propósito para uma limpeza cuja falha não tem para
+onde ir. Os ~12 que só apareciam com `-tests` estavam em fixtures de
+teste (senha falsa numa string de conexão, um `http.Cookie`/`http.Server`
+bare construído para testar uma coisa estreita) — nenhum era defeito
+real. Os 7 que restaram em código de produção foram lidos um a um antes
+de decidir: SQL parametrizada que o `gosec` lê como concatenação por
+causa dos números de placeholder (`internal/task/postgres_repository.go`),
+um path de `.env` que vem de configuração do operador e nunca de
+requisição (`internal/config/dotenv.go`), um `os.Remove` que já passou
+pelo `pathguard.Guard` (`internal/attachment/storage.go`), e os dois
+`SetCookie` que já setam `HttpOnly`/`Secure`/`SameSite` corretamente
+(`internal/user/handler.go`).
+
+**Trade-off aceito:** excluir uma regra inteira é mais largo que suprimir
+linha a linha, e um `.Close()` genuinamente perigoso — um cujo erro
+devesse propagar — passa despercebido pelo `gosec` daqui em diante.
+Aceito porque o padrão já é resultado de decisão deste projeto, não
+descuido: tratar cleanup de melhor esforço como não-crítico já é como
+este código é escrito em toda parte, e sinalizar 68 ocorrências do mesmo
+padrão não muda esse fato — só produz ruído que treina quem revisa a
+ignorar o achado seguinte.
+
+**O que continua ativo:** G701/G202 (SQL injection, string concatenada),
+G304/G703 (travessia de caminho), G401 (MD5/SHA1), G402 (TLS mal
+configurado) e o resto do conjunto de regras do `gosec` — em código de
+produção e de teste igualmente, já que só `-tests` foi omitido, não uma
+categoria de arquivo.
+
+---
+
+## `GET /v1/tasks`'s `limit`: teto no valor explícito, não no ausente
+
+Um `limit` acima de 100 é rejeitado com `400`. Um `limit` **ausente**
+continua significando "sem limite", exatamente como
+`docs/openapi.yaml` já documentava antes desta mudança.
+
+**Por quê a assimetria.** `docs/DECISIONS.md` § "Versionamento" e
+`.claude/rules/api-contract.md` já registram a regra: uma mudança que
+quebra o contrato é um `/v2` novo, nunca uma edição do que `/v1` já
+promete. `limit` ausente devolver tudo é uma promessa publicada
+("omitting every one of them returns every task the caller owns");
+mudar isso agora seria editar `/v1`, não corrigi-lo. Um valor
+**explícito** acima do teto não tem essa mesma promessa — nada em
+`docs/openapi.yaml` jamais disse que `?limit=999999` funcionaria — então
+recusá-lo fecha a metade do problema que não contradiz nada já escrito.
+
+**O que fica em aberto, deliberadamente.** Um cliente que nunca manda
+`limit` continua podendo pedir a lista inteira de uma vez. Fechar isso
+por completo exigiria mudar o que `/v1` significa, o que este projeto
+reserva para um `/v2` — não para uma issue de endurecimento.
+
+**Por que 400 e não grampear ao teto.** `parsePagination` já rejeita
+`limit`/`offset` negativos com `400` em vez de arredondar para zero;
+grampear um valor grande demais introduziria uma segunda forma de lidar
+com "valor fora do aceitável" no mesmo par de parâmetros. `400` com uma
+mensagem que nomeia o teto é descobrível — um cliente que lê a resposta
+sabe exatamente o que pedir a seguir (paginar com `offset`, não repetir
+a mesma requisição esperando resultado diferente).
+
+---
+
+## Cache-Control em `/v1`: `no-store` no auth, `no-cache` no resto
+
+Toda resposta sob `/v1` carrega `Cache-Control`. `/v1/auth/*` recebe
+`private, no-store`; o resto recebe `private, no-cache`. Nenhuma
+resposta autenticada emitia esse header antes desta mudança.
+
+**Por quê dois valores, não um só.** Um `Set-Cookie` de login e uma
+resposta de logout carregam ou afetam diretamente a credencial de
+sessão — nada sobre essas trocas deveria sobreviver em disco ou memória
+além da própria resposta, o que é exatamente o que `no-store` promete.
+O resto das rotas (`/v1/tasks`, `/v1/tasks/{id}`, `/v1/auth/me`) não tem
+esse mesmo risco, e permitir revalidação condicional (`no-cache`, não
+`no-store`) é o que deixa uma futura resposta `304` com `ETag` ser
+possível sem reabrir esta decisão.
+
+**Por quê `private` nos dois casos, sempre.** Sem `private`, um cache
+compartilhado (CDN, proxy corporativo) na frente desta API poderia
+servir a resposta de um usuário para outro que passe pelo mesmo
+intermediário — a API não tem como saber se existe um na frente dela,
+então a garantia tem que valer incondicionalmente.
+
+**O que isto não cobre.** O middleware decide pelo prefixo do caminho
+(`/auth/`), não por o que o handler realmente faz — uma rota futura sob
+`/v1/auth/` que não carregue nada sensível ainda herda `no-store`, o
+lado mais conservador de errar. `/health`, `/health/ready` e
+`/debug/vars` ficam fora de `/v1` e fora desta regra, a mesma exceção
+que já vale para o versionamento.
+
+---
+
+## ETag de `GET /v1/tasks`: hash de `(id, version)` da própria página, não do corpo inteiro
+
+`GET /v1/tasks/{id}` e `GET /v1/tasks` respondem `ETag`, e aceitam
+`If-None-Match` para devolver `304` sem corpo. No detalhe, o validador é
+direto — `"<id>:<version>"`, reaproveitando o contador de concorrência
+otimista que `Repository` já mantém. Na listagem não há uma única
+`Version` para reaproveitar, então `pageETag` deriva uma a partir de
+`(id, version)` de cada linha efetivamente devolvida, em ordem, e faz o
+hash disso — nunca o corpo JSON inteiro.
+
+**Por que não o corpo inteiro.** Geraria o mesmo resultado prático (um
+hash que muda quando o conteúdo muda), mas obrigaria serializar a
+resposta antes de decidir se ela precisa ser enviada — exatamente o
+trabalho que o `304` existe para evitar. Hash de `(id, version)` é
+suficiente porque `version` já muda exatamente quando a linha muda
+(Update/status transition incrementam), e `id` é o que torna a
+composição da janela — quem entrou, quem saiu, quem trocou de posição —
+parte do hash sem precisar comparar ordem explicitamente.
+
+**Por que isso não lê nada além do que a página já leu.** A issue
+(15.D2) pedia um validador "sem ler tudo para calcular". `pageETag`
+roda sobre as linhas que `Repository.FindAll` já trouxe para montar o
+corpo da resposta — nenhuma consulta adicional, nenhum full-scan da
+tabela do usuário.
+
+**Comparação estrita, sem `W/`.** Este servidor nunca emite um
+validador fraco, então `ifNoneMatchHits` compara por igualdade exata
+(depois de aceitar múltiplos valores separados por vírgula e o
+curinga `*`, como o cabeçalho HTTP permite) — não há necessidade de
+implementar a semântica de comparação fraca que RFC 9110 §8.8.3.2
+define para quando ela existe.
+
+---
+
 ## Drain antes do shutdown: o processo espera, não o orquestrador
 
 O processo continua servindo por `HTTP_PRE_SHUTDOWN_DELAY` depois do
@@ -847,6 +981,36 @@ chamada; nunca há outro usuário para vazar.
 
 ---
 
+## Teto de anexos por task: 50, fixo — não substitui a quota por usuário acima
+
+`Service.Upload` também recusa a 51ª tentativa de anexo numa mesma task
+(`maxAttachmentsPerTask = 50`), independente de quantos bytes ela usa.
+
+**Isto não contradiz a seção acima**, que rejeitou contagem como métrica
+de *abuso de storage* — "poucos arquivos grandes" continua sem solução
+por contagem, e continua sendo `ATTACHMENT_MAX_BYTES_PER_USER`'s
+trabalho. O teto por task resolve um problema diferente: uma task com
+centenas de anexos é impraticável de listar e navegar, mesmo que cada um
+seja pequeno o bastante para nunca acionar a quota de bytes. Uma é
+segurança/custo operacional; a outra é usabilidade da própria lista.
+
+**Por que é uma constante fixa, não uma variável de ambiente como
+`ATTACHMENT_MAX_BYTES_PER_USER`:** não há decisão de operador aqui — o
+número não muda por ambiente, por cliente, ou por tamanho de deploy.
+Virar configurável adicionaria uma variável nova a manter em quatro
+lugares (`.claude/rules/config-env.md` § "Keep four places in sync")
+para um valor que ninguém tem razão para escolher diferente.
+
+**Checado antes de `Create`, não depois:** `Repository.CountByTask` roda
+na mesma posição que `TotalBytesForUser` já ocupa — antes do corpo ser
+lido, e antes da checagem de posse que `Create` faz por conta própria.
+Um `taskID` que não pertence ao chamador conta 0 aqui (ver o próprio
+doc comment de `CountByTask`), não porque a posse não importa, mas
+porque `Create` já é quem reporta isso — checar duas vezes seria
+duplicar uma regra, não reforçá-la.
+
+---
+
 ## Limite de sessões: teto com evicção da mais antiga
 
 `AUTH_MAX_SESSIONS_PER_USER` (default 10) bounds quantas sessões de um
@@ -1144,6 +1308,131 @@ Nenhum item de `docs/changes/web-frontend/plan.md` (`CI-1`–`CI-11`) nem as iss
 
 Consequência direta, não antecipação: `RequireAuth` (`web/src/features/auth/RequireAuth.tsx`) — um guard de rota que redireciona para `/login` quando `useAuth()` não está autenticado — não está na lista de arquivos de `CI-6` em `plan.md`, mas é o que torna a rota `/` protegida possível; sem ele, "URLs reais" e "sessão só sabida via `GET /auth/me`" não se sustentam juntas.
 
+### SPA deployment: um servidor Go próprio, não nginx/Caddy
+
+Issue #229: até esta mudança, `web/`'s build de produção (`npm run build`,
+`dist/`) não tinha nenhum caminho de deploy — só `npm run dev` existia. A
+consequência não era só operacional: a CSP estrita do backend
+(`default-src 'none'`) protege a origem da API, que serve só JSON e nunca
+carrega script — ela nunca poderia ser a origem de onde um XSS rodaria. A
+origem que serve o documento HTML da SPA é onde isso importa, e nada
+emitia CSP, `nosniff`, `Referrer-Policy` ou HSTS ali, porque não existia
+processo nenhum responsável por essa origem.
+
+**A escolha: `cmd/web`, um binário Go próprio, no mesmo módulo de
+`cmd/api`** — não nginx, não Caddy. Três alternativas reais foram
+pesadas:
+
+- **nginx/Caddy** é o padrão de mercado para servir uma SPA, mas
+  introduziria uma tecnologia nova neste repositório — um `nginx.conf`
+  ou `Caddyfile` sem cobertura de teste em Go possível, só smoke test via
+  `curl`. Todo o resto deste projeto é Go, incluindo cada decisão de
+  header de segurança já tomada (`internal/middleware`, `moat/
+  secureheaders`) — escrita, testada e explicada em código, nunca
+  configuração declarativa de terceiros.
+- **Servir a SPA a partir do próprio `cmd/api`** foi rejeitado sem
+  chegar a ser escrito: misturaria uma origem que serve HTML/JS/CSS com
+  uma que existe precisamente para nunca servir nada disso (a CSP
+  `default-src 'none'` do backend é essa promessa), e um processo servindo
+  duas coisas com modelos de ameaça opostos é dois processos escondidos
+  atrás de um.
+- **`cmd/web`, reaproveitando `moat/secureheaders` e
+  `internal/middleware`** — a escolha feita. Mesmo módulo Go de `cmd/api`
+  (não um segundo `go.mod`), mesma imagem `scratch`/`USER 65532:65532`,
+  mesmo padrão de graceful shutdown, e os mesmos pacotes de middleware
+  genéricos (`RequestID`, `Logging`, `Recovery`) — sem duplicar nada que
+  já existe, sem importar conhecimento de domínio (`internal/task`,
+  `internal/user`) que este servidor não precisa.
+
+**Custo aceito:** escrever e testar ~300 linhas de Go (`cmd/web/main.go`
++ testes) em vez de um arquivo de configuração pronto. Aceito porque o
+resultado é testável com a mesma ferramenta (`go test`, `gosec`,
+`govulncheck`) que já cobre o resto do projeto, e porque a CSP que ele
+gera não é uma string fixa — ver o próximo ponto.
+
+**A CSP é computada no startup, não escrita como constante.** `index.html`
+carrega um script inline (a detecção de tema antes do primeiro paint —
+ver o próprio comentário dele em `web/index.html`), e uma CSP restrita
+precisa admiti-lo explicitamente via hash (`script-src 'self'
+'sha256-...'`) — a alternativa, `'unsafe-inline'`, equivaleria a não ter
+política de script nenhuma. `cmd/web` lê o `index.html` que ele
+realmente está servindo e calcula o hash a partir dos bytes reais, uma
+vez, no startup (`buildCSP`/`cspScriptHashes`), em vez de um hash
+hardcoded como constante Go. Um hash fixo ficaria obsoleto em silêncio no
+instante em que o conteúdo do script mudasse — bloqueando a detecção de
+tema em produção sem nada no build ou no deploy para pegar isso. Calculado
+a partir do arquivo real, a política está sempre correta para o que este
+processo de fato está servindo.
+
+**Nonce (`moat/secureheaders.WithNonce`) foi considerado e rejeitado.** A
+biblioteca suporta isso nativamente — nonce por requisição, injetado nos
+`<script>` e lido via `secureheaders.Nonce(r)` — mas exigiria (a)
+re-renderizar `index.html` a cada requisição em vez de servi-lo como
+arquivo estático, injetando o nonce em **todo** `<script>`, inclusive o
+`<script type="module" src="...">` do bundle, e (b) nunca cachear a
+resposta (a própria doc do `WithNonce` avisa: "do not put a shared cache
+in front of nonced HTML"). Nonce existe para conteúdo inline cujo valor
+muda por requisição — não é este caso: `index.html` é um artefato de
+build inteiramente estático, sem nada influenciado por dados da
+requisição, então um hash fixo por conteúdo é estritamente mais simples
+e não abre mão de nenhuma garantia de segurança real.
+
+**`WEB_API_ORIGIN` (runtime) e `VITE_API_BASE_URL` (build-time) são duas
+variáveis, não uma, e têm que concordar.** A primeira é o que este
+servidor permite em `connect-src`; a segunda é o que o bundle já
+carrega embutido para suas próprias chamadas `fetch`. Uma divergência
+entre as duas não falha nem o build nem o startup — falha em silêncio no
+navegador, como violação de CSP no console. Documentado nos dois lugares
+(`web/README.md`, `cmd/web/main.go`'s `loadConfig`) exatamente porque não
+há uma checagem mecânica possível entre um valor embutido em JavaScript
+já compilado e a configuração de um processo Go separado.
+
+### Cache de páginas: revalidação em segundo plano, e o que fazer quando ela falha
+
+`useTasks` (15.D3) guarda em memória cada página já buscada — chave
+`(statusFilter, priorityFilter, pageIndex)` — e a mostra de imediato ao
+revisitar, antes mesmo da requisição de revalidação começar
+(stale-while-revalidate). A revalidação usa `If-None-Match` com o
+`ETag` guardado (15.D2): sem mudança, a resposta é um `304` e nada
+precisa ser atualizado.
+
+**O que acontece quando a revalidação falha — decisão, não obviedade.**
+Se a página já veio do cache e a requisição de revalidação falha (rede
+fora, `503`, o que for), o hook **mantém mostrando os dados do cache**
+em vez de substituí-los por uma tela de erro. Só uma busca sem nada em
+cache ainda transiciona para o estado de erro, exatamente como
+funcionava antes deste cache existir. O raciocínio: os dados que já
+estão na tela continuavam corretos um instante atrás, e a revalidação é
+uma verificação em segundo plano que o usuário nunca pediu
+explicitamente — substituir uma lista boa por uma tela de erro por
+causa dela seria pior do que simplesmente tentar de novo na próxima
+navegação.
+
+**O que isto não cobre:** não há indicação visual de "isto pode estar
+desatualizado" quando uma revalidação falha silenciosamente — o usuário
+não tem como saber que uma tentativa de atualização não funcionou. Aceito
+por ora porque a única forma de disparar isso é já estar navegando entre
+páginas já vistas com a rede instável nesse exato momento; um indicador
+dedicado é trabalho futuro, não algo esta issue pedia.
+
+**Invalidação é por evento, não por tempo — sem TTL.** Criar ou excluir
+uma task limpa o cache inteiro (todas as páginas, todos os filtros),
+não só a página atual: uma linha nova ou removida desloca a composição
+de toda página seguinte à sua, e raciocinar sobre *quais* páginas
+especificamente foram afetadas custaria mais do que só invalidar tudo e
+pagar o preço de algumas buscas refeitas. Uma edição que continua
+batendo com o filtro ativo, ao contrário, só atualiza a própria entrada
+da página atual — inclusive derrubando o `ETag` guardado para `null`,
+porque o hook não tem como calcular qual seria o novo (`Version` nunca
+chega no corpo JSON — ver `internal/task/task.go`), e um `ETag` errado
+que por acaso ainda bate seria pior que nenhum.
+
+**Nunca `localStorage`.** O cache vive só em memória, dentro da mesma
+instância do hook — fecha a aba, perde o cache. A mesma razão da seção
+"Cookie httpOnly, nunca localStorage" acima, estendida por instinto e
+não por o dado em si ser sensível: uma lista de tasks de um usuário não
+tem por que sobreviver ao fechamento da aba só porque é conveniente.
+
 ---
 
 ## crier: ruído de health-check filtrado por severidade, não por amostragem
@@ -1265,3 +1554,955 @@ mesmo cenário de falha.
 para este caso. Levado ao usuário antes de implementar, por ser
 exatamente o caso que `CLAUDE.md` descreve: "se uma issue parecer
 contradizer uma decisão registrada, pare e pergunte antes de prosseguir."
+
+---
+
+## Cache de ValidateToken (issue #232, 15.D1): TTL curto e fixo, invalidação imediata no mesmo processo
+
+`user.Service.ValidateToken` é a chamada mais quente do código: `RequireAuth`
+a executa em toda rota autenticada, e até aqui isso significava uma leitura ao
+banco (`FindSessionByTokenHash`) por requisição, mesmo sabendo que a mesma
+sessão é validada repetidamente em rajadas curtas. `internal/user/token_cache.go`
+guarda o resultado de uma validação bem-sucedida por `tokenCacheTTL = 2 *
+time.Second`, em memória, por processo.
+
+**Por que 2 segundos, e não "sem cache" ou um TTL generoso — as duas
+alternativas rejeitadas:**
+- **Não implementar** eliminaria qualquer risco, mas deixaria a leitura ao
+  banco em praticamente toda requisição autenticada, sem necessidade — a
+  sessão não muda entre uma requisição e a seguinte na esmagadora maioria dos
+  casos.
+- **Um TTL generoso** (dezenas de segundos a minutos) maximizaria o ganho de
+  performance, mas alargaria proporcionalmente a janela em que uma revogação
+  – logout, logout de todas as sessões, troca de senha — pode continuar
+  validando em outro processo. Isso ameaça diretamente a garantia que
+  `POST /v1/auth/password` foi construído para dar (ver issue #196 e a seção
+  "Limite de sessões" acima): trocar a senha porque um token vazou só resolve
+  o problema se sessões antigas pararem de funcionar *logo*.
+- **TTL curto (1–5s)** foi a faixa escolhida pelo usuário (`JonasBorgesLM`)
+  como o ponto de equilíbrio, levada explicitamente porque a issue marcava o
+  trade-off como decisão de produto, não técnica. `2s`, o valor concreto
+  escolhido dentro dessa faixa, elimina a leitura ao banco em qualquer rajada
+  de requisições mais frequente que isso — o caso comum — mantendo o pior
+  cenário de staleness na casa de segundos, não minutos.
+
+**Por que o TTL é fixo (não-deslizante), e não uma janela renovada a cada
+leitura:** uma janela deslizante deixaria uma sessão revogada em outro
+processo continuar validando indefinidamente, desde que as requisições
+chegassem mais rápido que o próprio TTL — exatamente o cenário que este cache
+existe para limitar. Cada entrada expira `tokenCacheTTL` após a última
+confirmação real no `Repository`, ponto final; ler a entrada nunca empurra
+esse prazo pra frente (ver `tokenCache`'s doc comment e
+`TestTokenCache_FixedWindow_NotSlidingOnRead`).
+
+**Por que o risco residual é limitado a um rolling update, não a réplicas em
+regime permanente:** o deploy documentado em "Topologia de deploy" acima roda
+uma única réplica em estado estável — não há dois processos concorrentes
+servindo tráfego ao mesmo tempo fora de uma transição. A única janela real em
+que dois processos existem simultaneamente é a sobreposição breve que o
+próprio Kubernetes cria durante um rolling update (pod novo sobe antes do
+antigo cair, mesmo com `replicas: 1` — já documentado naquela mesma seção). É
+exatamente esse cenário, e não um regime de múltiplas réplicas hipotético,
+que o TTL de 2s foi dimensionado para tolerar.
+
+**Invalidação é imediata no mesmo processo — o TTL nunca é o único
+mecanismo.** `Logout`, `LogoutAll`, `ChangePassword` e `DeleteAccount` cada um
+chama o método correspondente do cache (`delete`/`deleteAllForUser`/
+`deleteAllForUserExcept`) logo após a chamada ao `Repository` ter sucesso, e
+antes de retornar. Isso significa que a única forma de uma sessão revogada
+continuar validando por até `tokenCacheTTL` é ela ter sido cacheada por um
+*processo diferente* daquele que processou a revogação — nunca o mesmo
+processo aceitando de volta algo que ele mesmo acabou de invalidar. Os quatro
+pontos de invalidação têm controle negativo cobrindo justamente essa fiação
+(`TestLogout_InvalidatesCache_*`, `TestLogoutAll_InvalidatesCacheForUser`,
+`TestChangePassword_InvalidatesCacheForOtherSessions_ButKeepsCallers`,
+`TestDeleteAccount_InvalidatesCacheForUser`), e não só a lógica pura de
+`tokenCache` isoladamente.
+
+**Por que só uma validação bem-sucedida é cacheada.** Um token desconhecido ou
+expirado nunca é memoizado como válido — `ValidateToken` só chama
+`tokenCache.set` depois de `Repository` confirmar a sessão e checar a
+expiração. Isso significa que este cache não pode transformar um token
+momentaneamente inválido em validado; o único viés possível é na direção
+oposta (aceitar por mais `tokenCacheTTL` algo que já foi válido e acabou de
+ser revogado em outro processo), que é exatamente o trade-off descrito acima.
+
+**Por que `tokenCacheTTL` é uma constante, não uma variável de ambiente.**
+Expor isso como configuração deixaria um operador alargar silenciosamente a
+janela de atraso de revogação sem que o raciocínio acima fosse revisitado — o
+número embute uma decisão de segurança, não um parâmetro de tuning
+operacional.
+
+---
+
+## Índices para `status`/`priority` em `tasks` (issue #236, 15.D5): medido, não criado
+
+`idx_tasks_user_id_created_at_id (user_id, created_at, id)` é o único índice
+sobre `tasks` além da chave primária. Nenhum cobre `status` ou `priority`
+isoladamente — a issue pedia explicitamente para **medir antes de criar**
+("índice só onde o plano mostrar problema"), não para adicionar um por
+precaução.
+
+**Medição feita:** volume sintético gerado direto via SQL (não por
+`cmd/seed`, cujo único contexto de 30s cobre seu uso normal de demonstração,
+não uma carga de centenas de milhares de linhas) e descartado depois —
+nenhuma linha desta medição ficou no banco. Dois cenários:
+
+1. **50 usuários × 5.000 tasks cada** (~250k linhas) — escala já pesada para
+   um gerenciador de tasks pessoal. `EXPLAIN ANALYZE` em toda combinação
+   relevante de filtro (sem filtro, `status` único, `status`+`priority`
+   combinados) e posição de página (primeira, e uma bem funda —
+   `OFFSET 2000` sobre ~1.280 linhas que casam o filtro) ficou entre
+   **0,15ms e 2,7ms** de tempo de execução real. Nos casos de offset raso o
+   planner caminha direto por `idx_tasks_user_id_created_at_id` (Index Scan);
+   no de offset fundo com filtro seletivo, ele troca para Bitmap Heap Scan +
+   Sort — mais caro que um Index Scan puro, mas ainda irrelevante em termos
+   absolutos.
+2. **Um único usuário com 100.000 tasks** — cenário deliberadamente extremo,
+   bem além do que este produto tem qualquer indício de precisar hoje. O pior
+   caso testado (`status`+`priority` combinados, raros, `OFFSET 5000`) caiu
+   para Parallel Seq Scan + Sort, **~26ms** de execução. Criar um índice
+   candidato `(user_id, status, priority, created_at, id)` e repetir a mesma
+   consulta reduziu para **~11ms** (Bitmap Heap Scan pelo índice novo + Sort
+   — mesmo com o índice, o `OFFSET` ainda força materializar e ordenar as
+   linhas que casam antes de descartar as primeiras `5000`, então não vira um
+   Index Scan puro). Índice e linhas sintéticas foram removidos depois da
+   medição — nada disso ficou no schema ou nos dados.
+
+**Decisão: não criar o índice agora.** Mesmo no cenário 1 (que já representa
+um uso pesado real) o índice existente resolve tudo em menos de 3ms. O
+cenário 2 só aparece com um único usuário acumulando cem vezes mais tasks do
+que o cenário pesado — nada neste produto sugere que isso é uma forma de uso
+esperada — e mesmo ali o resultado (~26ms) está longe de ser um problema
+real: nenhum timeout, nenhuma degradação perceptível numa única requisição.
+Pagar escrita mais lenta em toda mutação de `tasks` (a issue já nomeia esse
+custo) por um ganho que só aparece numa escala hoje hipotética não se
+justifica.
+
+**Quando revisitar — os mesmos gatilhos que a issue já nomeava:** a busca por
+título (15.G2, issue #248) e a ordenação por outro campo (15.G3, issue #249)
+introduzem formas de consulta que esta medição não cobriu (`LIKE`/`ILIKE` ou
+busca textual, e um `ORDER BY` diferente de `created_at, id`) e que mudam o
+plano de consulta de verdade — ao contrário de `status`/`priority`, que só
+adicionam um `Filter` sobre o mesmo índice já existente. Se um desses
+entrar, repetir esta mesma medição (não assumir que o resultado daqui ainda
+vale) contra o índice que aquela consulta específica pedir.
+
+---
+
+## Validação de senha forte (issue #218, 15.B1): regra local, não HIBP
+
+Antes desta issue, `user.validatePassword` checava só `8 <= len(password) <=
+72` bytes — o próprio comentário do `minPasswordLen` já admitia isso como "a
+baseline strength floor, not a full policy". `"12345678"` e `"password"`
+passavam.
+
+**As duas rotas que a issue nomeava, e a escolhida:** uma regra local de
+composição/entropia, sem dependência nova e sem chamada de rede; ou
+verificação de vazamento via HIBP com k-anonimato, que pega exatamente a
+senha que a regra local aprova mas o mundo já conhece, ao custo de uma
+chamada externa síncrona em todo cadastro/troca de senha e de decidir o que
+fazer quando esse serviço está fora do ar (falhar aberto ou fechado).
+**Escolha do usuário (`JonasBorgesLM`)**, levada explicitamente porque a
+issue marcava a escolha como a própria tarefa: regra local — alinhada com a
+preferência já estabelecida deste projeto por checks autocontidos, sem
+serviço externo (a mesma razão, por exemplo, por trás de `dummyPasswordHash`
+nunca depender de nada fora do processo).
+
+**O que a regra local faz — três checks, nenhum é uma exigência de
+composição de caracteres:**
+1. **Lista de senhas conhecidas** (`commonWeakPasswords`,
+   `internal/user/password_strength.go`) — comparação case-insensitive
+   contra ~150 entradas vindas de rankings públicos de senha mais comum
+   (SplashData/NordPass) e suas decorações mais previsíveis. `"Password1!"`
+   está na lista explicitamente: é o exemplo canônico de senha que satisfaz
+   qualquer regra de composição de caracteres e ainda assim é um dos
+   primeiros palpites de qualquer ataque real.
+2. **Rune única repetida** (`isSingleRepeatedRune`) — `"aaaaaaaa"`,
+   `"11111111"`. Cobre qualquer rune, não só ASCII, então não depende de
+   estar numa lista.
+3. **Sequência ascendente/descendente de code points**
+   (`isSequentialRun`) — `"12345678"`, `"abcdefgh"`, `"87654321"`. Genérico
+   por design (compara deltas entre runes adjacentes) em vez de uma tabela
+   de layout de teclado — mais barato e cobre a família inteira de "só
+   digitei os próximos N caracteres" sem enumerar cada caso.
+
+**Deliberadamente sem regra de composição obrigatória** (nunca "precisa ter
+maiúscula E dígito E símbolo"). NIST SP 800-63B recomenda contra isso
+especificamente: empurra o usuário para decorações previsíveis —
+`"Password1!"` é o exemplo padrão citado pelo próprio NIST — sem elevar a
+entropia real. Os três checks acima miram o que de fato torna uma senha
+adivinhável primeiro, não o que só parece complexo.
+
+**O que isto não cobre, por design:** a lista local é de algumas centenas de
+entradas, não as centenas de milhares que um corpus de vazamento real (tipo
+HIBP) teria — pega as senhas que todo mundo já sabe que são fracas, não toda
+senha que já vazou algum dia. Um padrão intercalado como `"12121212"` também
+passa: não está na lista, não é rune única repetida, não é sequência por
+delta constante. Cobrir isso exigiria um estimador de entropia de verdade
+(tipo zxcvbn) — fora do escopo desta issue, que pedia composição/entropia
+local simples, não um motor de análise de senha.
+
+**`"password123"` está deliberadamente fora da lista**, apesar de
+genuinamente pertencer a ela: é a senha de demonstração/teste já
+estabelecida deste projeto — default de `cmd/seed -password`, e usada como
+fixture em dezenas de testes que passam pelo caminho real de
+Register/Login em `internal/user`, `internal/task` e `cmd/api`. Bloqueá-la
+aqui quebraria a ferramenta de seed e boa parte da suíte por uma string que
+já está documentada como "demo only — never reuse" no seu único ponto de
+uso próximo de produção (`cmd/seed/main.go`) — o risco que esta lista existe
+para fechar não se aplica a um valor que nada real deveria autenticar.
+
+**O teto de 72 bytes (não runes) para `maxPasswordLen` não mudou** — é o
+próprio limite do `bcrypt`, e a assimetria proposital com o e-mail (medido em
+runes via `validate.MaxLen`) continua documentada em `validatePassword`'s doc
+comment.
+
+### Frontend (issue #219, 15.B2): checklist ao vivo, não pontuação — e nunca um portão
+
+`web/src/features/auth/RegisterPage.tsx` tinha um único campo de senha e a
+dica estática "At least 8 characters" — um erro de digitação criava uma
+conta cuja senha ninguém sabia, sem forma de recuperar (15.B4 ainda não
+existe). Duas mudanças, ambas exigidas pela issue: confirmação de senha, e
+"medidor de força que espelha a regra do servidor e nunca inventa uma mais
+frouxa".
+
+**Checklist contra os predicados reais do servidor, não uma pontuação
+fraca/média/forte.** Uma pontuação (tipo zxcvbn) é exatamente o tipo de
+coisa que poderia dizer "forte" para uma senha que o servidor ainda
+rejeitaria — o oposto do que a issue pedia. `PasswordRequirements.tsx`
+mostra os três mesmos predicados de `internal/user/password_strength.go`
+(comprimento, não-comum, não-previsível) como itens vivos de uma lista,
+cada um com seu próprio estado atendido/não atendido — nunca um número
+inventado que não corresponde a nenhuma regra real do lado do servidor.
+
+**`web/src/features/auth/passwordStrength.ts` espelha o Go à mão — mesma
+lista, mesmos três checks, mesma exclusão deliberada de `"password123"`
+(ver acima).** Este projeto não tem geração de código entre Go e
+TypeScript para uma regra como esta; manter os dois arquivos sincronizados
+manualmente foi a escolha proporcional ao tamanho do problema (uma lista
+de ~150 strings e três funções puras), não algo que justifique construir
+ferramenta de codegen. Se a lista ou os checks mudarem de um lado, mudam
+do outro na mesma alteração — comentário de topo em ambos os arquivos
+aponta um para o outro.
+
+**Puramente informativo, nunca um portão client-side.** `registerSchema`
+(Zod) só bloqueia envio por comprimento (8–72, espelhando o servidor) e
+por confirmação não bater — nunca por um resultado de
+`isCommonWeakPassword`/`isSingleRepeatedRune`/`isSequentialRun`. Uma senha
+que passa no comprimento mas falha o checklist ainda chega ao servidor e
+recebe o `400` real dele: a alternativa (replicar a rejeição também no
+schema do formulário) duplicaria a decisão de política em dois lugares
+que já são mantidos à mão — e um deles ficaria, mais cedo ou mais tarde,
+desatualizado em relação ao outro sem que ninguém notasse até um usuário
+real esbarrar na divergência.
+
+---
+
+## Atraso progressivo por conta (issue #220, 15.B3): curva, não bloqueio
+
+Os três tiers de rate limit (`cmd/api/main.go`) protegem por endereço
+(`globalLimiter`, `authLimiter`) e por usuário já autenticado
+(`userLimiter`). Nenhum protege uma **conta** ainda não autenticada: um
+atacante distribuído tentando senhas contra um e-mail conhecido, uma
+origem por tentativa, apresenta a cada endereço poucas tentativas —
+exatamente o perfil que `authLimiter` considera normal. O orçamento
+contra uma conta específica era, na prática, ilimitado.
+
+**A curva concreta era uma decisão em aberto que a própria issue não
+fechava** ("contador por identificador de conta, com atraso crescente",
+sem números). Três perfis foram levados ao usuário (`JonasBorgesLM`) —
+moderado, agressivo, ou números especificados por ele — e o **moderado**
+foi escolhido: sem atraso nas 2 primeiras falhas (tolera erro de
+digitação), a partir da 3ª falha `250ms × 2^(falhas-3)` até um teto de
+4s, contador zerado no login bem-sucedido ou após 15 minutos sem
+tentativas contra aquela conta. Números em
+`internal/user/login_backoff.go`'s `loginBackoffThreshold`/
+`loginBackoffBase`/`loginBackoffCap`/`loginBackoffIdleReset`.
+
+**As duas armadilhas que a issue nomeava, e como cada uma foi fechada:**
+
+1. **A resposta precisa continuar indistinguível de "credencial
+   inválida".** Um "conta bloqueada" distinto seria exatamente o oráculo
+   de enumeração que `dummyPasswordHash` já existe para fechar (ver
+   `Authenticate`'s doc comment). `Service.Authenticate` calcula o atraso
+   **antes** de saber o resultado da tentativa atual (com base só no
+   histórico anterior daquela conta) e aplica esse mesmo atraso aos três
+   desfechos possíveis — e-mail desconhecido, senha errada, ou sucesso —
+   nunca só às falhas. Um atraso que só aparecesse em caso de falha seria
+   ele mesmo o vazamento: um observador saberia que a conta está sob
+   contenção só de ver a resposta demorar mais. `TestAuthenticate_
+   DelayAppliesEvenOnSuccess` prova especificamente isso: uma senha
+   *correta* ainda paga o atraso antes de suceder.
+2. **Bloqueio duro é negação de serviço contra o dono legítimo.** Nada
+   aqui jamais recusa uma senha correta — o atraso só cresce até o teto
+   de 4s e depois pára de crescer; quem sabe a senha sempre entra, só
+   espera um pouco mais. `TestAuthenticate_SuccessClearsBackoff` prova
+   que um login bem-sucedido zera o contador — a conta não fica "sob
+   suspeita" indefinidamente por falhas antigas já resolvidas.
+
+**Onde mora o estado: em processo, por réplica — mesma forma de
+`tokenCache` e dos três tiers de `moat/ratelimit` já existentes.** A
+issue já sinalizava que fazer o contador valer o deploy inteiro seria
+"uma mudança arquitetural com discussão própria" — não aberta aqui. Isso
+é consistente com a topologia já documentada (réplica única em regime
+estável — ver "Topologia de deploy"); o único cenário de múltiplos
+processos é a sobreposição breve de um rolling update, e nesse cenário
+o pior caso é um atacante conseguir uma janela de tentativas ligeiramente
+maior que o perfil moderado prevê, não a ausência total de proteção.
+
+**O que isto não cobre, por design:** o mutex de `loginBackoff` protege
+a consistência do mapa, não serializa tentativas concorrentes contra a
+mesma conta ponta-a-ponta. Um atacante enviando várias tentativas em
+paralelo contra o mesmo e-mail pode ver todas lerem o mesmo `delay()`
+(baseado no mesmo estado anterior) antes de qualquer uma delas chamar
+`recordFailure` — na prática, um pequeno lote de tentativas "grátis" a
+cada rajada paralela, em vez de estritamente uma por vez. Fechar isso
+por completo exigiria serializar `Authenticate` inteiro por conta (um
+lock por e-mail mantido durante toda a chamada, não só durante a
+atualização do contador) — mudança real, mas que teria custo de
+concorrência (dispositivos legítimos entrando ao mesmo tempo na mesma
+conta esperariam um pelo outro) desproporcional ao que o perfil moderado
+já pedia resolver. Aceito como lacuna conhecida, não como omissão
+silenciosa.
+
+**Escopo: só `POST /v1/auth/login` (`Service.Authenticate`), não
+`ChangePassword`/`DeleteAccount`'s verificação de senha atual
+(`verifyPassword`).** A issue nomeava especificamente o login como o
+gap — `verifyPassword` já roda atrás de `RequireAuth`, coberto por
+`userLimiter` (por usuário autenticado) de um jeito que `Authenticate`,
+antes de saber quem é o usuário, não pode ser. Estender a mesma curva a
+`verifyPassword` é um escopo maior que esta issue pedia, não uma
+inconsistência desta decisão.
+
+---
+
+## Trilha de auditoria (issue #223, 15.B6): reaproveita o log existente, sem sink dedicado
+
+Login, falha de login, `logout-all`, troca de senha e exclusão de conta
+não deixavam registro dedicado — depois de um incidente não havia como
+responder "de onde e quando" sem cruzar o log de acesso genérico (que
+identifica por rota e status, não por conta) com o que quer que a
+memória de alguém ainda lembrasse.
+
+**Nenhum sink novo — o `crier` já compilado no binário é o caminho de
+saída, o evento é que faltava.** `cmd/api/crier.go`'s `crierTeeHandler`
+já espelha **todo** `slog.Record` que passa por `h.logger` para o
+coletor OTLP configurado (`CRIER_OTLP_ENDPOINT`), sem que o call site
+precise saber que o `crier` existe. Isso significa que fechar esta issue
+não pedia nenhuma infraestrutura nova — só cinco chamadas de log
+estruturado nos pontos certos, mais um jeito de obter o endereço de
+origem sem duplicar a lógica de resolução que o rate limit já tem.
+
+**`Handler.logAuditEvent`** (`internal/user/handler.go`) emite uma linha
+`Info` com `event_type`, `account`, `source_ip` e `request_id` — nunca
+senha, token de sessão ou hash do token, a lista de "nunca registrar" que
+a própria issue nomeava. Cinco call sites, um por evento pedido:
+`login_success`/`login_failure` (`login`), `logout_all` (`logoutAll`),
+`password_changed` (`changePassword`), `account_deleted`
+(`deleteAccount`). Criação/revogação de link (Bloco A) fica de fora
+porque o Bloco A ainda não foi implementado — quando entrar, ganha seu
+próprio call site nesta mesma função, não uma reabertura desta decisão.
+
+**`account` tem dois significados diferentes, e isso é deliberado, não
+inconsistência.** Para `login_success`/`login_failure` é o e-mail
+normalizado submetido; para os outros três é o ID do usuário autenticado
+(já disponível via `middleware.UserIDFromContext`). A razão é estrutural,
+não estilística: `Service.Authenticate` devolve o mesmo
+`ErrInvalidCredentials` tanto para e-mail desconhecido quanto para senha
+errada — de propósito, ver o próprio doc comment de `Authenticate` — o
+que significa que `Handler` **não tem como saber** qual dos dois casos
+ocorreu nem para uso interno de auditoria. O e-mail submetido (já
+disponível no corpo da requisição, antes de qualquer resolução) é o único
+identificador que os dois casos de falha realmente compartilham; forçar
+`account_id` também para login exigiria mudar a assinatura de
+`Authenticate` para vazar internamente uma distinção que o resto do
+sistema foi construído para nunca vazar — mudança maior, e mais arriscada,
+do que esta issue pedia.
+
+**`middleware.RealIP` (novo) resolve o endereço de origem uma vez por
+requisição e o guarda no contexto**, reaproveitando exatamente a mesma
+função (`addressKeyFunc`, já usada pelos tiers de rate limit por
+endereço) que já passa por `realip`/`TRUSTED_PROXIES` — a mesma
+preocupação que a issue nomeava explicitamente: "um `X-Forwarded-For` cru
+numa trilha de auditoria é pior que nenhuma trilha". Isso garante que a
+trilha de auditoria e o rate limit **nunca podem discordar** sobre qual é
+o endereço de um cliente, porque são literalmente a mesma chamada de
+função — uma segunda implementação de "resolver o endereço real" teria
+sido exatamente o tipo de duplicação que pode silenciosamente divergir.
+`internal/middleware` continua sem conhecimento de domínio: `RealIP` só
+sabe resolver e guardar um endereço, não o que é um "evento de
+auditoria" — quem faz essa ponte é `user.Handler`, o lado que tem
+conhecimento de domínio.
+
+**Por que não em `Service`, e sim em `Handler`.** Um evento de auditoria
+é inerentemente uma preocupação de "o que aconteceu nesta requisição
+HTTP" — precisa do endereço de origem e do request ID, nenhum dos dois
+algo que `Service` deveria conhecer (ver `CLAUDE.md`'s regra de
+camadas). `Service` continua retornando só o que já retornava;
+`Handler` decide, a partir do resultado, se e como logar.
+
+---
+
+## Tela de sessões ativas (issue #224, 15.B7): id derivado, sem coluna nova
+
+`POST /v1/auth/logout-all` derruba tudo, inclusive a sessão que está
+chamando — é a operação de "suspeito que vazou, mata tudo", e continua
+correta assim. Mas não havia nada entre "esta sessão" e "todas": o
+usuário não via quantas sessões existiam, de quando, nem conseguia
+derrubar só a suspeita sem derrubar as outras também.
+`AuthMaxSessionsPerUser` (padrão 10) já limitava o total, e
+`idx_sessions_user_id_created_at` já indexava exatamente a consulta que
+faltava expor — só faltavam as duas rotas e a tela.
+
+**"Identificador opaco derivado", não uma coluna nova — decisão levada
+ao usuário (`JonasBorgesLM`) entre as duas formas de fazer isso.**
+`GET /v1/auth/sessions` e `DELETE /v1/auth/sessions/{id}` nunca podem
+expor o token nem seu hash (`sessions.token_hash`, a chave primária da
+tabela) — precisavam de um identificador próprio para endereçar cada
+sessão. Duas rotas possíveis: uma coluna `id` nova (gerada em
+`CreateSession`, lookup `O(1)` por `WHERE id = $1`, mas exige migration
+nova tocando `migrate_test.go` e o schema) ou um id computado sob
+demanda a partir do `token_hash` já existente (sem migration nenhuma,
+ao custo de `ListSessions`/`RevokeSession` recalcularem o id para cada
+linha que `FindSessionsForUser` devolve — no máximo
+`AuthMaxSessionsPerUser`, hoje 10). **Escolhida a segunda** — o ganho de
+performance da primeira é irrelevante nessa escala, e "derivado" era
+literalmente a palavra que a issue já usava.
+
+**`deriveSessionID`** (`internal/user/service.go`) aplica um segundo
+SHA-256 sobre `sessionIDPrefix + tokenHash` — domain-separado do próprio
+`hashToken` (que hashea o token cru, nunca visto aqui) por um prefixo
+fixo, para que as duas finalidades nunca colidam por acidente mesmo
+operando sobre dados relacionados. Não é reversível de volta a
+`tokenHash` — defesa em profundidade, não o requisito real: `tokenHash`
+já é um valor que nada legítimo precisa reconstruir, já que o único
+dado realmente sensível (o token cru) nunca entrou nessa cadeia de
+derivação.
+
+**`RevokeSession` varre as sessões do usuário e compara o id derivado de
+cada uma** com o `id` recebido, em vez de um lookup direto — o custo
+aceito pela escolha acima. Revogar a própria sessão atual por esta rota
+não tem tratamento especial: é exatamente o que `POST /auth/logout` já
+faz por outro endereço, e recusar seria uma inconsistência arbitrária,
+não uma proteção real. Um `id` que não bate com nenhuma sessão do
+usuário — inclusive um que endereça de verdade uma sessão de **outra**
+conta — devolve `ErrNotFound`, a mesma disciplina de nunca confirmar a
+existência de uma linha que não pertence a quem pergunta que todo outro
+lookup de recurso único nesta API já segue.
+
+**`is_current` existe porque o chamador não tem outro jeito de saber
+qual das suas sessões é "esta".** `ListSessions` recebe o token cru que
+autenticou a própria chamada (via
+`middleware.SessionTokenFromContext`), hashea, e compara contra cada
+sessão devolvida — o único lugar onde o token cru e o hash persistido se
+encontram nesta função, e só para comparação, nunca para retorno.
+
+**Frontend: "Manage sessions" no menu de conta, não navegação
+primária** — é a segunda página autenticada, mas continua sendo um
+desvio de configurações alcançado pelo menu, não algo que justifique
+uma segunda aba/link no cabeçalho (ver o próprio comentário de
+`AppShell.tsx`). Revogar a sessão marcada "This device" também não tem
+tratamento especial no frontend, pelo mesmo motivo do backend: a
+próxima chamada à API depois disso recebe `401` e cai no mesmo fluxo de
+`useAuth` que já trata uma sessão invalidada por qualquer outro motivo.
+
+---
+
+## Total real na listagem (issue #237, 15.E1) e `GET /tasks/stats` (issue #238, 15.E2): header aditivo, sempre calculado
+
+`GET /v1/tasks` sempre devolveu só a página pedida — sem `limit`/`offset`
+explícitos, "todas as tasks" já era a página inteira, mas com eles o
+chamador nunca sabia quantas linhas existiam além da página em mãos.
+A issue pedia explicitamente para medir o custo antes de decidir a forma
+da resposta, e as duas issues foram implementadas juntas porque #238
+("Depende de: 15.E1 (mesma decisão de forma de resposta)") reusa a mesma
+pergunta: adicionar um total nunca deve custar uma segunda leitura da
+tabela inteira em Go, tem que ser `COUNT(*)`/`GROUP BY` no próprio banco.
+
+**Forma escolhida: header `X-Total-Count`, não um envelope
+`{data, meta}`.** Um envelope muda o formato de toda resposta de
+`GET /v1/tasks` — quebra qualquer cliente que já faz
+`response.json()` esperando um array diretamente, incompatível com o
+contrato que `/v1` já promete (ver `docs/DECISIONS.md` § "A contract is
+mounted under /v1" em `CLAUDE.md`, e a regra de nunca reinterpretar o
+que `/v1` já significa). Um header é estritamente aditivo: nada que já
+lê o corpo da resposta precisa mudar, e um cliente que quer o total
+passa a ler um header a mais. `X-Total-Count` foi escolhido sobre um
+nome próprio porque é a convenção já estabelecida por várias APIs REST
+para exatamente este propósito.
+
+**Medição feita, mesma metodologia da issue #236 acima (volume
+sintético gerado direto via SQL, descartado depois):**
+
+1. **50 usuários × 5.000 tasks cada** (~350k linhas nesta rodada) —
+   `EXPLAIN ANALYZE` de `SELECT COUNT(*) FROM tasks WHERE user_id = $1
+   [AND status IN (…)] [AND priority IN (…)]` para um usuário típico
+   ficou entre **1ms e 3ms**, servido por Bitmap Heap Scan através de
+   `idx_tasks_user_id_created_at_id` — o mesmo índice que já sustenta
+   `FindAll`, e sem overhead perceptível de rodar como uma segunda
+   consulta ao lado dela.
+2. **Um único usuário com 100.000 tasks** — cenário deliberadamente
+   extremo, o mesmo usado em #236: aqui o usuário passa a dominar a
+   tabela inteira, o planner troca para Seq Scan, e o `COUNT(*)` sobe
+   para **~28ms**. Ainda assim, longe de um problema real — nenhum
+   timeout, nenhuma degradação visível numa única requisição.
+
+**Decisão: sempre incluir o total, em toda chamada — sem parâmetro
+opt-in.** Um parâmetro (`?include_total=true`) evitaria o custo para
+quem não precisa, mas o próprio custo medido (1-3ms no caso pesado
+realista) não justifica a complexidade extra de um comportamento
+condicional documentado, testado e mantido nos dois `Repository`. Se
+`status`/`priority` chegarem a crescer numa direção que mude esse
+número (ver os mesmos gatilhos já nomeados na issue #236 — busca
+textual, ordenação por outro campo), esta medição deve ser repetida
+antes de assumir que ainda vale.
+
+**`X-Total-Count` é calculado antes da checagem de `ETag`/
+`If-None-Match`, e por isso está presente tanto num `200` quanto num
+`304`.** O validador da listagem (`pageETag`) é derivado só das linhas
+da página atual — duas requisições podem carregar o mesmo `ETag` mesmo
+que o total tenha mudado (uma task nova em outra página não move as
+linhas desta, mas move o total). Calcular o header antes do `return`
+do `304` é o que impede essa resposta de servir um total desatualizado
+por engano; a ordem é fixada por
+`TestListTasks_Handler_XTotalCountSurvivesNotModified`, verificado por
+controle negativo (mover o `Set` do header para depois do `if
+ifNoneMatchHits` faz o teste falhar como esperado antes de restaurar a
+ordem correta).
+
+**`GET /v1/tasks/stats` reusa o mesmo filtro `status`/`priority` e a
+mesma validação de `GET /v1/tasks`**, via `buildTaskFilterWhere`
+compartilhado entre `FindAll`, `CountAll` e `CountByStatusAndPriority`
+(`internal/task/postgres_repository.go`) — extraído nesta mudança para
+que as três consultas nunca possam divergir silenciosamente sobre o que
+"casar com o filtro" significa. `by_status`/`by_priority` sempre
+incluem todo valor do enum, mesmo em `0`: `GROUP BY` só devolve grupos
+que existem, e um chamador não deveria ter que distinguir "zero tasks
+neste grupo" de "esta chave simplesmente não apareceu" — os dois
+`Repository` zeram os dois mapas antes de aplicar os resultados da
+consulta/da contagem em memória.
+
+**A rota `GET /tasks/stats` é registrada antes de `GET /tasks/{id}`**
+por legibilidade, mas isso não é o que a protege de ser interpretada
+como um id de task: o `ServeMux` do Go 1.22+ já prefere um segmento
+literal (`stats`) sobre um `{wildcard}` na mesma posição,
+independentemente da ordem de registro. `TestTaskStats_Handler_RoutedCorrectly`
+prova isso na prática, passando pelo `http.ServeMux` real (não chamando
+o handler diretamente) e confirmando que a rota nunca cai em `getTask`
+tratando `"stats"` como um id.
+
+---
+
+## Exportação CSV de tasks (issues #239-#243, 15.F1-15.F5)
+
+Função nova — não existia CSV nem impressão no projeto antes disso. Cinco
+issues, quatro decisões levadas ao usuário (`JonasBorgesLM`) porque cada
+uma é um trade-off real sem resposta universalmente certa; a quinta
+(rota dedicada vs. negociação de `Accept`) foi decidida diretamente
+durante a implementação, com o raciocínio registrado abaixo.
+
+### Quem gera o CSV (issue #239, 15.F1): servidor
+
+**Alternativa rejeitada: gerar no cliente**, paginando o conjunto
+inteiro em JavaScript. Seriam N requisições sem transação, com risco
+real do conjunto mudar no meio de uma exportação — e o filtro/dono/
+ordenação já resolvidos num só lugar no servidor teriam que ser
+reimplementados no cliente, uma segunda cópia da regra livre para
+divergir da primeira.
+
+**Escolhido: servidor**, via uma rota que reusa a mesma autorização e o
+mesmo filtro que `GET /v1/tasks` já aplica, com o corpo transmitido em
+fluxo (`encoding/csv` escrevendo direto no `ResponseWriter`, nunca
+montando a resposta inteira em memória antes de escrever).
+
+**Trade-off aceito:** o servidor paga o custo de gerar e transmitir o
+arquivo inteiro numa única requisição HTTP, sujeita ao `WriteTimeout` já
+existente — daí a necessidade do teto de linhas (15.F5, abaixo).
+
+### Rota dedicada, não negociação por `Accept` (issue #240, 15.F2)
+
+A issue apresentava duas formas igualmente válidas de expor o mesmo
+recurso: uma rota dedicada (`GET /tasks/export`) ou negociar o formato
+de `GET /tasks` existente via `Accept: text/csv`. Decisão tomada durante
+a implementação, não levada ao usuário, porque o próprio código já
+tinha um precedente direto para copiar: `GET /tasks/stats` (issue #238)
+já resolveu exatamente esta pergunta — "uma rota nova por segmento
+literal, nunca sombreada por `/tasks/{id}`" — para uma necessidade com a
+mesma forma (mais uma visão sobre o mesmo conjunto filtrado).
+
+**Alternativa rejeitada: negociação por `Accept`.** Manteria um único
+caminho de filtro/autorização, mas exigiria ramificar `listTasks` por
+tipo de conteúdo — paginação, `ETag`/`X-Total-Count` e o teto de linhas
+do export não fazem sentido nos dois formatos ao mesmo tempo, então a
+ramificação teria que existir de qualquer forma, só que dentro de um
+único handler em vez de dois. Documentar dois comportamentos tão
+diferentes sob um único `operationId` no OpenAPI também ficaria confuso.
+
+**Escolhido: `GET /tasks/export`**, rota própria, mesmo tratamento de
+`ServeMux` que `/tasks/stats` já usa (segmento literal, nunca sombreado
+por `/tasks/{id}` independente da ordem de registro — confirmado por
+`TestExportTasks_Handler_RoutedCorrectly`, o mesmo padrão de
+`TestTaskStats_Handler_RoutedCorrectly`).
+
+### Neutralizar injeção de fórmula no CSV (issue #241, 15.F3)
+
+Um título ou descrição começando com `=`, `+`, `-`, `@`, tab ou CR é
+interpretado como fórmula pelo Excel/Sheets ao abrir o arquivo — a
+mesma classe (CWE-1236) documentada na issue. A defesa
+(`sanitizeCSVCell`, `internal/task/csv_export.go`) prefixa um apóstrofo
+a qualquer célula que comece com um desses caracteres, exatamente onde
+a issue pedia: na escrita do CSV, nunca perto de
+`validateTitleAndDescription` — dentro da aplicação esses caracteres
+são texto legítimo, e o risco só nasce no momento em que o valor vira
+célula de planilha.
+
+**Achado durante a implementação, não previsto pela issue:**
+`encoding/csv.Writer` com `UseCRLF = true` (obrigatório para RFC 4180,
+ver seção seguinte) **descarta silenciosamente um `\r` isolado dentro de
+um campo** — o pacote assume que qualquer `\r` que aparece ali pertence
+a um par `\r\n` na convenção de quebra de linha do próprio texto de
+origem, não ao terminador de linha do escritor. Confirmado
+empiricamente (não assumido) escrevendo o campo `"'\rcmd"` e inspecionando
+os bytes de saída: o `\r` nunca chega ao arquivo, restando `'cmd`. Na
+prática isso significa que o gatilho CR é neutralizado duas vezes de
+forma independente — pelo apóstrofo de `sanitizeCSVCell` e, mesmo sem
+ele, pelo próprio `encoding/csv` — o que só reforça a defesa, nunca a
+enfraquece. `TestExportTasks_Handler_NeutralizesFormulaInjection`
+documenta esse comportamento explicitamente no caso CR em vez de deixar
+um teste falhando parecer um bug.
+
+**Controle negativo aplicado** (mesmo padrão do resto do projeto):
+removida temporariamente a chamada a `sanitizeCSVCell` em
+`exportTasks`, confirmado que
+`TestExportTasks_Handler_NeutralizesFormulaInjection` falha em todo
+caso com gatilho (e continua passando no caso de texto comum, provando
+que a asserção não estava vazia), restaurada a chamada.
+
+### Formato do arquivo (issue #242, 15.F4)
+
+**RFC 4180:** `csv.Writer.UseCRLF = true` — o padrão do
+`encoding/csv` do Go é `\n` puro, não `\r\n`; precisa ser ligado
+explicitamente. Cabeçalho de colunas fixo (`id, title, description,
+status, priority, created_at, updated_at`) tratado como contrato: uma
+coluna nova entra no fim, nunca no meio.
+
+**Nome e `Content-Disposition`:** montado por `mime.FormatMediaType`,
+nunca à mão — o mesmo padrão que `internal/attachment/handler.go` já
+usa para o download de anexos, pela mesma razão (um nome com aspas ou
+acento não pode quebrar o valor do header). Nome inclui a data e, se
+houver filtro, uma indicação dele (`tasks-2026-09-08-status-pending.csv`)
+— um arquivo baixado mais de uma vez, ou comparado com o de outro dia,
+precisa do próprio escopo legível sem abrir o arquivo.
+
+**BOM UTF-8: incluído — decisão levada ao usuário.** Sem BOM, o Excel
+no Windows interpreta mal o byte de acentuação e corrompe título/
+descrição em português, o conteúdo mais comum deste projeto. Com BOM,
+algumas ferramentas de linha de comando leem os três bytes como parte
+da primeira coluna. **Escolhido incluir o BOM** porque o público
+principal deste export (uma pessoa abrindo o arquivo no Excel para ler
+ou imprimir, não um pipeline automatizado) é exatamente o caso que o
+BOM resolve, e é o caso que a ausência dele quebra de forma visível e
+confusa (acentos virando caracteres ilegíveis) — o custo do BOM para
+quem usa uma ferramenta de linha de comando é, na pior hipótese,
+precisar aparar três bytes conhecidos, um problema bem documentado e
+fácil de contornar.
+
+**Trade-off aceito:** um parser de CSV ingênuo que não trata BOM pode
+ler a primeira coluna do cabeçalho como `"﻿id"` em vez de `"id"`.
+
+### Teto do export (issue #243, 15.F5): 10.000 linhas, `400` antes de transmitir — decisão levada ao usuário
+
+O tier por usuário do `moat/ratelimit` já cobre a frequência de chamadas
+(o export fica atrás de `authenticated`, como toda rota de task) — o que
+faltava era um teto de **linhas**, já que o export por definição devolve
+o conjunto inteiro (nunca janelado por `limit`/`offset`, ao contrário de
+`GET /tasks`) sob o `WriteTimeout` de 10s do servidor.
+
+**Truncar em silêncio foi descartado explicitamente** (a própria issue
+já nomeia isso como "a pior saída possível"): produziria um arquivo que
+parece completo e não é, e quem o imprimir não tem como saber. A
+alternativa adotada é responder honestamente antes de começar: `Service.
+ExportTasks` chama `Repository.CountAll` **antes** de `FindAll`, e
+rejeita com `ErrInvalidInput` (`400`) se o total do filtro passar do
+teto — nada é buscado nem escrito nesse caso
+(`TestExportTasks_RejectsAboveCap` confirma que `FindAll` nunca é
+chamado).
+
+**Por que 10.000 e não outro número:** confortável dentro do
+`WriteTimeout` de 10s mesmo numa conexão lenta — cada linha do CSV tem
+algumas centenas de bytes, então mesmo 10k linhas ficam na casa de
+poucos MB, ordens de magnitude abaixo do que um upload lento
+conseguiria saturar em 10s — e bem acima do uso esperado de um
+gerenciador de tasks pessoal (o mesmo raciocínio de escala já usado em
+`docs/DECISIONS.md` § "Índices para status/priority", issue #236: uma
+conta com dezenas de milhares de tasks não é uma forma de uso que este
+produto tem qualquer indício de precisar suportar hoje).
+
+**Mapeamento de erro:** `ErrInvalidInput`, não um sentinel novo — mesmo
+padrão já usado por `attachment.Service.Upload` para o limite de
+tamanho de upload (`ErrTooLarge` da store vira `ErrInvalidInput` no
+Service): "o pedido como está não pode ser atendido, mude o filtro" é
+uma instância do mesmo `400` que qualquer outro filtro inválido já usa,
+não um código novo (`docs/openapi.yaml`'s "Status codes this API has
+already settled" não precisou de uma linha nova).
+
+**Quando revisitar:** se o teto passar a ser atingido com frequência
+real, a resposta certa é um export assíncrono (gerado em background,
+baixado depois pronto) — issue nova, não um remendo neste teto, como a
+própria 15.F5 já nomeia.
+
+---
+
+## Relatório de impressão (issues #245/#246, 15.F7/15.F8): rota `/report`, não `@media print` na lista — decisão levada ao usuário
+
+**Alternativa rejeitada: `@media print` aplicado sobre `web/`'s lista de
+tasks já paginada.** `GET /v1/tasks` devolve no máximo `PAGE_SIZE` (10)
+tarefas por página — imprimir a tela tal como está mostraria só os
+primeiros dez itens, sem qualquer indicação de que existem mais. Um
+documento que mente por omissão é pior que nenhum documento, e quem
+imprime um relatório em geral o imprime para mostrar a outra pessoa —
+o próprio texto da issue #246.
+
+**Escolhida: uma rota `web/`-only, `/report`**, que busca o conjunto
+completo do filtro corrente (nunca janelado) e renderiza para leitura —
+sem menus, sem paginação, sem botões de ação por linha. Custa uma tela
+a mais, mas é a única das duas alternativas que produz um relatório de
+verdade.
+
+**Nenhuma rota nova no backend foi necessária.** `/report` busca via
+`GET /v1/tasks?status=…&priority=…` sem o parâmetro `limit` — o mesmo
+"limite ausente significa sem limite" que `/v1` já promete (ver
+`CLAUDE.md` § "An explicit limit above maxTaskListLimit…") e que
+`cmd/api/main.go`'s `deleteAccountCascade` já usa internamente. Isto é
+deliberadamente diferente de `GET /v1/tasks/export` (issue #239): o CSV
+tem um teto de linhas explícito porque sua resposta é servida como um
+único arquivo transmitido em fluxo sob o `WriteTimeout`; o relatório
+devolve a mesma página JSON que `GET /v1/tasks` sempre devolveu, só que
+sem `limit` — uma capacidade que já existia e já era usada em produção,
+não uma nova.
+
+**O filtro vive na URL** (`/report?status=…&priority=…`), não é passado
+como prop de `TaskList` para `ReportPage` — o endereço existe para ser
+impresso, favoritado ou recarregado sozinho, e essas três ações têm que
+reproduzir o mesmo relatório, não o que `TaskList` tinha em memória no
+momento do clique.
+
+**Cabeçalho do relatório mostra o filtro aplicado e quando foi
+gerado** (issue #245) — um documento impresso sem isso não é auditável
+um mês depois; ninguém sabe mais o que ele mostra. O timestamp é
+congelado uma única vez, no primeiro render (`useState(() => new
+Date())`), para que clicar em "Retry" após um erro não troque
+silenciosamente o que "Generated" diz.
+
+**Contraste em preto e branco para status/priority** (issue #245):
+essas duas colunas usam os mesmos tokens de cor da lista normal em
+tela, mas `@media print` neutraliza o fundo colorido e força a borda/
+texto para `--color-text-primary` — o rótulo de texto passa a carregar
+o significado sozinho, nunca a cor, já que configurações de "imprimir
+plano de fundo" variam por navegador e a conversão para tons de cinza
+não preserva contraste igualmente entre matizes.
+
+**Trade-off aceito:** uma segunda tela/rota, com sua própria busca de
+dados (não reaproveitando `useTasks`, cujo cache/paginação/ETag não têm
+sentido para uma busca única e completa) — mais código do que uma regra
+`@media print`, pelo preço de um relatório que efetivamente relata o
+conjunto inteiro.
+
+---
+
+## Recuperação de senha, verificação de e-mail e segundo fator (issues #221/#222/#225, 15.B4/15.B5/15.B8): adiadas, explicitamente
+
+As três dependem, direta ou indiretamente, de uma capacidade que este
+projeto não tem hoje: enviar e-mail de verdade para um endereço de
+verdade. Nenhuma das três está implementada, e as próprias issues
+nomeiam adiar como resposta legítima — **desde que registrada**, não
+por omissão. Esta seção é esse registro.
+
+**Recuperação de senha (issue #221, 15.B4).** Uma senha esquecida hoje
+é uma conta perdida sem recurso: não há admin (decisão já registrada
+em `docs/DECISIONS.md` e em `CLAUDE.md` § "Things not to do without
+being asked"), e o hash é `bcrypt`, unidirecional por desenho. Fechar
+isso exige escolher um provedor de e-mail, gerenciar suas credenciais,
+desenhar um token de uso único com expiração curta, e tratar a mesma
+superfície de enumeração que `Authenticate` já trata para login — a
+resposta a "esqueci minha senha" tem que ser idêntica para um endereço
+cadastrado e um que não existe, ou o próprio fluxo de recuperação vira
+um jeito de descobrir quais e-mails têm conta.
+
+**Verificação de e-mail no cadastro (issue #222, 15.B5).**
+`user.validateEmail` confirma forma, nunca posse — o próprio comentário
+da função já é honesto sobre isso. Mesma dependência de infraestrutura
+de #221, e mesmo tratamento: não faz sentido decidir uma sem a outra,
+já que ambas nascem do mesmo "este projeto não envia e-mail".
+
+**Segundo fator / TOTP (issue #225, 15.B8).** Ainda mais claramente
+adiável: `CLAUDE.md` já pede discussão antes de adicionar um segundo
+mecanismo de autenticação, e TOTP traz consigo códigos de recuperação
+(onde guardá-los), o que fazer quando o dispositivo se perde, e uma
+interação nova com o rate limit e a criação de sessão. Sem recuperação
+de senha (#221 acima), ativar 2FA hoje **aumentaria** o risco de perda
+definitiva de conta em vez de reduzi-lo — um segundo fator só faz
+sentido depois de existir um caminho de recuperação para o primeiro.
+
+**Por quê adiar, e não recusar como o Bloco A permite para o cairn:**
+diferente do link curto (que pode simplesmente não ter uso neste
+produto), as três aqui são funcionalidades genuinamente esperadas de
+qualquer produto multiusuário com contas reais — a ausência é uma
+lacuna real, não uma feature que não se aplica. "Adiar" aqui significa
+"ainda não", não "nunca".
+
+**Gatilho para revisitar:** o dia em que este projeto ganhar
+infraestrutura de e-mail por qualquer outro motivo (ex.: notificações,
+um convite de compartilhamento se o modelo de autorização algum dia
+mudar), essa mesma infraestrutura destrava #221 e #222 juntas — e #225
+passa a fazer sentido revisitar assim que #221 exista.
+
+**Trade-off aceito:** uma conta com senha esquecida continua
+permanentemente irrecuperável até esta decisão ser revisitada, e um
+cadastro com e-mail de terceiros continua possível.
+
+---
+
+## Encurtador de links (issues #209-#217, 15.A1-15.A9): cairn integrado, atrás de flag, memstore no passo 1
+
+`cairn` (`github.com/JonasBorgesLM/cairn`) nomeia o task-api como seu
+primeiro consumidor real (`cairn/docs/INTEGRATION.md` §4, IR-04). Nove
+issues, cinco decisões reais — as outras quatro (15.A3, 15.A4, 15.A6,
+15.A8) são implementação do que estas decidem, não decisões
+independentes.
+
+### Integrar (issue #209, 15.A1) — decisão levada ao usuário
+
+A própria issue permitia "não integrar" como resposta legítima: tasks
+são privadas, autorização é estritamente por dono, e o produto não tem
+nenhum modelo de compartilhamento hoje — um link curto não tem, à
+primeira vista, um destino óbvio dentro desse modelo. Levada ao usuário
+(`JonasBorgesLM`) apesar da recomendação inicial ser não integrar;
+**decidido integrar**. As perguntas que a própria issue #209 levantava
+("para onde o link aponta, quem pode criar, qual o ciclo de vida, a
+resolução é pública ou exige sessão") ficam respondidas pela forma como
+#211-#217 foram implementadas: qualquer usuário autenticado cria links
+para qualquer destino que passe pela política (não é restrito a
+apontar para uma task ou anexo específico — é um encurtador de URL de
+uso geral, escopado por dono), o ciclo de vida é revogação explícita
+(sem expiração automática por padrão — `ttl_seconds` é opcional por
+chamada), e a resolução (`GET /{code}`) é pública, exatamente como um
+encurtador de link precisa ser para ser útil (o link só serve a quem
+não tem sessão nesta API).
+
+### Backend do `cairn.Store` (issue #210, 15.A2): Redis escolhido — decisão levada ao usuário
+
+A alternativa (implementar `Store` sobre o PostgreSQL já existente,
+3 métodos, "uma tarde de trabalho" segundo a própria ADR-0008 do
+cairn) foi apresentada ao lado da opção Redis, com o custo de cada uma
+nomeado: Redis traz um contrato operacional real e novo para este
+projeto (AOF `appendfsync everysec`, réplica, `maxmemory-policy
+noeviction` verificado no startup, backup já exercitado, índice de
+banco dedicado — nenhum disso existe hoje neste projeto); PostgreSQL
+reusaria a infraestrutura já operacional (migrations, backup/restore)
+ao custo de sair do caminho testado pela própria lib. **Escolhido
+Redis.**
+
+**Esta PR não traz Redis.** O que ela entrega é o passo 1 do rollout de
+quatro passos que a própria issue #217 (15.A9) já define —
+`memstore.Store` atrás de uma flag, sem infraestrutura nova — porque é
+exatamente assim que a integração pôde ser implementada, testada e
+revisada sem antes decidir e provisionar Redis num projeto que hoje não
+tem nenhum. Trocar `memstore` por `redisstore` (o módulo oficial
+`github.com/JonasBorgesLM/cairn/redisstore`) é o passo 2, uma mudança
+própria e futura: acrescentar Redis ao `docker-compose.yml` e ao
+`k8s/`, estender `docs/RUNBOOK-BACKUP-RESTORE.md`, e satisfazer o
+contrato operacional da ADR-0008 antes de apontar `LINK_SHORTENING_ENABLED`
+para produção de verdade.
+
+### `ErrorEncoder` e a distinção 410-vs-404 (issue #213, 15.A5): nunca acionada pelas rotas construídas
+
+`docs/INTEGRATION.md` do cairn recomenda um `ErrorEncoder` que devolve
+`410` para uma requisição autenticada e `404` para uma anônima, quando
+um código resolve para um link expirado ou revogado — o dono aprende
+por que falhou, um scanner não aprende nada.
+
+**Nas quatro rotas que este projeto constrói, essa distinção nunca é
+alcançada — por desenho, não por omissão.** `Service.Revoke` (a única
+chamada autenticada que passa por `Resolve`) usa exatamente o padrão
+que `cairn/docs/integrations/task-api.md` documenta:
+`Resolve` primeiro, comparação de dono só depois. Um código
+expirado/revogado falha em `Resolve` **antes** da posse ser avaliada —
+então mesmo um chamador autenticado que não é dono do link recebe a
+mesma forma uniforme (`404`) que a rota pública já dá, exatamente para
+não vazar "este link de outra pessoa está revogado" a quem não é dono
+dele. `GET /{code}` (a rota pública) nunca é autenticada por desenho.
+Não sobra nenhum caminho onde "autenticado E dono confirmado" e "o link
+acabou de falhar em `Resolve`" coexistem.
+
+**Decisão: `Handler.handleServiceError` nunca opta pelo `410`** — todo
+erro da família "não resolve" (código desconhecido, inválido, expirado,
+revogado, e dono errado) colapsa no mesmo `404`, a mesma disciplina que
+`.claude/rules/go-domain-errors.md` já exige do resto do projeto para
+"recurso de outro dono". Se uma rota futura (ex.: "ver detalhes do meu
+link", que confirmaria posse *antes* de reportar por que ele não
+resolve mais) for adicionada, é ali que o ramo `410` passaria a ter uma
+chamada de verdade — não nas quatro rotas desta PR.
+
+### Política de destino e a fronteira de SSRF (issue #215, 15.A7)
+
+`policy.Default(ownDomains)` do próprio cairn já encadeia
+`BlockPrivateNetworks` (loopback, RFC 1918, link-local, CGNAT, IPv6 ULA,
+IPv4 mapeado, literais não-decimais) com `BlockOwnDomains` — o que
+faltava era só o host informar seu próprio domínio. `cmd/api/main.go`
+extrai o host de `LINK_PUBLIC_BASE_URL` (a mesma configuração que já
+monta a URL curta completa devolvida em `POST /v1/links`) e passa como
+o único domínio próprio bloqueado — sem essa checagem, o encurtador
+vira uma primitiva de lavagem de link contra a própria aplicação: um
+link "confiável" (mesmo domínio da API) que na verdade aponta de volta
+para dentro. Verificado com um controle negativo real: com
+`policy.Default(nil)` (lista vazia), a requisição de teste
+`TestIntegration_LinkShortening_RejectsOwnDomain` ainda falhava com
+`422`, mas com `reason: "host_resolution_failed"` (o domínio de teste
+fictício simplesmente não resolve) em vez de `reason: "own_domain"` —
+a asserção original checava só o código de status e teria passado por
+engano; corrigida para checar o `reason` específico antes de confiar no
+controle negativo.
+
+**Risco residual aceito, não resolvido:** a checagem de destino
+acontece no `create`. O DNS pode responder outra coisa no `resolve` —
+essa janela TOCTOU (T-05 no `THREAT-MODEL.md` do cairn) não fecha
+aqui, e a mitigação completa pertence a quem de fato segue o redirect
+(o navegador do visitante), não a este serviço.
+
+### Rollout (issue #217, 15.A9): uma flag, não quatro implantações separadas
+
+A issue descreve quatro passos operacionais (memstore atrás de flag →
+Redis em staging → criação liberada para um subconjunto → rota pública
+por último, com rate limit dimensionado pelo tráfego medido). Este
+projeto não tem múltiplos ambientes nem uma base de usuários real para
+"liberar para um subconjunto" — **os quatro passos descrevem como um
+operador ligaria a funcionalidade numa implantação real, não uma
+sequência de PRs de código**. Esta PR entrega o código inteiro (as
+quatro rotas, incluindo a pública) atrás de uma única flag
+(`LINK_SHORTENING_ENABLED`, `false` por padrão — ver
+`internal/config`), porque o código não fica menos correto por existir
+antes de ser ligado, e construir tudo de uma vez, revisado como uma
+unidade coesa, é mais barato do que quatro PRs que individualmente não
+compilam ou não testam sem a anterior já mergeada.
+
+**O que continua sendo um passo real, futuro e separado:** trocar
+`memstore` por `redisstore` (ver a seção do 15.A2 acima) — isso sim é
+infraestrutura nova que precisa da sua própria decisão de quando
+provisionar, não algo que faz sentido "já vir pronto atrás da flag"
+sem Redis existir em lugar nenhum do projeto ainda.
+
+### Nenhuma URL crua chega a um log (issue #216, 15.A8)
+
+Auditados os dois únicos pontos de log que `internal/link` introduz
+(`Handler.handleServiceError`'s branch de erro inesperado, e a falha de
+codificação de resposta em `writeJSON`) — nenhum constrói a mensagem a
+partir de `link.Dest`/da URL bruta da requisição; ambos logam apenas o
+próprio `error` (cujas mensagens, verificadas em `cairn/errors.go`,
+nunca embutem a URL) mais `request_id`/`method`/`path`. Nenhum `Hooks`
+do cairn (`OnCreate`, `OnReject`, `OnRetry`, `OnResolve`) está
+configurado nesta PR — sem hooks, não há um terceiro ponto de log a
+auditar. Fiar observabilidade de criação/rejeição em `crier`
+(`docs/INTEGRATION.md` §3 do cairn) fica para quando isso for
+realmente necessário, não construído por antecipação.

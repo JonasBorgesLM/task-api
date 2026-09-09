@@ -544,3 +544,79 @@ func TestPostgres_TotalBytesForUser_ExcludesOtherUsers(t *testing.T) {
 		t.Errorf("TotalBytesForUser() = %d, want 500 (must exclude the stranger's 999999-byte file)", total)
 	}
 }
+
+// --- CountByTask ---
+
+func TestPostgres_CountByTask_CountsOwnedAttachments(t *testing.T) {
+	repo, _, owner, _, taskID := newPostgresTestRepo(t)
+
+	if err := repo.Create(context.Background(), newPostgresAttachment(t, taskID), owner); err != nil {
+		t.Fatalf("Create(1) unexpected error: %v", err)
+	}
+	if err := repo.Create(context.Background(), newPostgresAttachment(t, taskID), owner); err != nil {
+		t.Fatalf("Create(2) unexpected error: %v", err)
+	}
+
+	count, err := repo.CountByTask(context.Background(), taskID, owner)
+	if err != nil {
+		t.Fatalf("CountByTask() unexpected error: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("CountByTask() = %d, want 2", count)
+	}
+}
+
+func TestPostgres_CountByTask_NoAttachments_IsZero(t *testing.T) {
+	repo, _, owner, _, taskID := newPostgresTestRepo(t)
+
+	count, err := repo.CountByTask(context.Background(), taskID, owner)
+	if err != nil {
+		t.Fatalf("CountByTask() unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("CountByTask() = %d, want 0", count)
+	}
+}
+
+// TestPostgres_CountByTask_ExcludesOtherTasks guards the scoping that
+// matters most for this method: an attachment count on one task must
+// never include attachments hanging off a *different* task, even one
+// the same owner also has.
+func TestPostgres_CountByTask_ExcludesOtherTasks(t *testing.T) {
+	repo, db, owner, _, taskID := newPostgresTestRepo(t)
+	secondTaskID := insertTask(t, db, owner)
+
+	if err := repo.Create(context.Background(), newPostgresAttachment(t, taskID), owner); err != nil {
+		t.Fatalf("Create() on taskID unexpected error: %v", err)
+	}
+	if err := repo.Create(context.Background(), newPostgresAttachment(t, secondTaskID), owner); err != nil {
+		t.Fatalf("Create() on secondTaskID unexpected error: %v", err)
+	}
+
+	count, err := repo.CountByTask(context.Background(), taskID, owner)
+	if err != nil {
+		t.Fatalf("CountByTask() unexpected error: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("CountByTask() = %d, want 1 (must exclude the owner's other task)", count)
+	}
+}
+
+// TestPostgres_CountByTask_NotOwner_IsZero mirrors the interface's own
+// contract (see Repository.CountByTask's doc comment): a task the caller
+// does not own answers 0, not an error — the ownership error belongs to
+// Create, reached later in Service.Upload.
+func TestPostgres_CountByTask_NotOwner_IsZero(t *testing.T) {
+	repo, _, owner, stranger, taskID := newPostgresTestRepo(t)
+	if err := repo.Create(context.Background(), newPostgresAttachment(t, taskID), owner); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	count, err := repo.CountByTask(context.Background(), taskID, stranger)
+	if err != nil {
+		t.Fatalf("CountByTask() unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("CountByTask() for a task owned by someone else = %d, want 0", count)
+	}
+}
