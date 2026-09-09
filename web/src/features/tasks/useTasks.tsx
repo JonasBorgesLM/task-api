@@ -44,8 +44,13 @@ export interface UseTasksResult {
 // number duplicated in a test file.
 export const PAGE_SIZE = 10
 
-/** "pending,done" -> ["pending", "done"]; "" -> [] (no filter). */
-function splitFilter(value: string): string[] {
+/**
+ * "pending,done" -> ["pending", "done"]; "" -> [] (no filter). Exported
+ * so any other caller building a query string from the same joined
+ * filter representation (TaskList's export button) reads it identically
+ * to this hook's own fetches, instead of re-deriving the split rule.
+ */
+export function splitFilter(value: string): string[] {
   return value ? value.split(',').filter(Boolean) : []
 }
 
