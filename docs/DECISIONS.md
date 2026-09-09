@@ -2308,3 +2308,56 @@ dados (não reaproveitando `useTasks`, cujo cache/paginação/ETag não têm
 sentido para uma busca única e completa) — mais código do que uma regra
 `@media print`, pelo preço de um relatório que efetivamente relata o
 conjunto inteiro.
+
+---
+
+## Recuperação de senha, verificação de e-mail e segundo fator (issues #221/#222/#225, 15.B4/15.B5/15.B8): adiadas, explicitamente
+
+As três dependem, direta ou indiretamente, de uma capacidade que este
+projeto não tem hoje: enviar e-mail de verdade para um endereço de
+verdade. Nenhuma das três está implementada, e as próprias issues
+nomeiam adiar como resposta legítima — **desde que registrada**, não
+por omissão. Esta seção é esse registro.
+
+**Recuperação de senha (issue #221, 15.B4).** Uma senha esquecida hoje
+é uma conta perdida sem recurso: não há admin (decisão já registrada
+em `docs/DECISIONS.md` e em `CLAUDE.md` § "Things not to do without
+being asked"), e o hash é `bcrypt`, unidirecional por desenho. Fechar
+isso exige escolher um provedor de e-mail, gerenciar suas credenciais,
+desenhar um token de uso único com expiração curta, e tratar a mesma
+superfície de enumeração que `Authenticate` já trata para login — a
+resposta a "esqueci minha senha" tem que ser idêntica para um endereço
+cadastrado e um que não existe, ou o próprio fluxo de recuperação vira
+um jeito de descobrir quais e-mails têm conta.
+
+**Verificação de e-mail no cadastro (issue #222, 15.B5).**
+`user.validateEmail` confirma forma, nunca posse — o próprio comentário
+da função já é honesto sobre isso. Mesma dependência de infraestrutura
+de #221, e mesmo tratamento: não faz sentido decidir uma sem a outra,
+já que ambas nascem do mesmo "este projeto não envia e-mail".
+
+**Segundo fator / TOTP (issue #225, 15.B8).** Ainda mais claramente
+adiável: `CLAUDE.md` já pede discussão antes de adicionar um segundo
+mecanismo de autenticação, e TOTP traz consigo códigos de recuperação
+(onde guardá-los), o que fazer quando o dispositivo se perde, e uma
+interação nova com o rate limit e a criação de sessão. Sem recuperação
+de senha (#221 acima), ativar 2FA hoje **aumentaria** o risco de perda
+definitiva de conta em vez de reduzi-lo — um segundo fator só faz
+sentido depois de existir um caminho de recuperação para o primeiro.
+
+**Por quê adiar, e não recusar como o Bloco A permite para o cairn:**
+diferente do link curto (que pode simplesmente não ter uso neste
+produto), as três aqui são funcionalidades genuinamente esperadas de
+qualquer produto multiusuário com contas reais — a ausência é uma
+lacuna real, não uma feature que não se aplica. "Adiar" aqui significa
+"ainda não", não "nunca".
+
+**Gatilho para revisitar:** o dia em que este projeto ganhar
+infraestrutura de e-mail por qualquer outro motivo (ex.: notificações,
+um convite de compartilhamento se o modelo de autorização algum dia
+mudar), essa mesma infraestrutura destrava #221 e #222 juntas — e #225
+passa a fazer sentido revisitar assim que #221 exista.
+
+**Trade-off aceito:** uma conta com senha esquecida continua
+permanentemente irrecuperável até esta decisão ser revisitada, e um
+cadastro com e-mail de terceiros continua possível.
