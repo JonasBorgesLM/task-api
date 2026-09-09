@@ -13,9 +13,12 @@ export interface UseTasksResult {
   /** The current page's tasks — never an accumulation of the pages before it. */
   tasks: Task[]
   error: ApiError | null
-  /** 1-based, for display. There is no total, so there is no "of N" — see the module doc comment. */
+  /** 1-based, for display. */
   page: number
-  /** True when a page came back with more than PAGE_SIZE items — see the module doc comment. */
+  /** ceil(total / PAGE_SIZE), at least 1 — the page count "Page N of M" needs. */
+  totalPages: number
+  /** The number of tasks matching the current filter, from GET /v1/tasks's own X-Total-Count (issue #237). */
+  total: number
   hasNextPage: boolean
   hasPreviousPage: boolean
   isPaging: boolean
@@ -60,19 +63,13 @@ export function splitFilter(value: string): string[] {
  * this hook shipped with: that one grew without bound, so a long list
  * meant an ever-heavier page and no way to get back to where you were.
  *
- * GET /v1/tasks has no total count in its response — no X-Total-Count
- * header, no envelope (see docs/openapi.yaml: it returns a bare Task[]).
- * There is structurally no way to render "page 3 of 12", and pretending
- * otherwise would be lying about what the API can tell the client. So
- * the pager shows which page you are on and whether another exists, and
- * nothing it cannot know.
- *
- * Whether another exists comes from the "ask for one extra" technique
- * (AM-4, see docs/changes/web-frontend/plan.md's CI-7 entry and
- * validation.md): request `limit + 1`. If `limit + 1` come back, there
- * is at least one more page — render the first `limit` and set
- * hasNextPage; the extra row is discarded, never rendered, and
- * re-requested as row 1 of the next page.
+ * GET /v1/tasks now sets X-Total-Count (issue #237) — the number
+ * matching the current filter, independent of limit/offset. This hook
+ * reads it and derives hasNextPage/totalPages from it directly, which
+ * retired the "ask for one extra" technique (request limit + 1, discard
+ * the spare row) an earlier version of this hook used when no total was
+ * available at all — see issue #247/15.G1. A request now asks for
+ * exactly PAGE_SIZE rows.
  */
 /**
  * statusFilter/priorityFilter mirror GET /v1/tasks's own query params
@@ -91,7 +88,11 @@ export function splitFilter(value: string): string[] {
 // keyed and invalidated.
 interface pageCacheEntry {
   tasks: Task[]
-  hasNextPage: boolean
+  // X-Total-Count as of this fetch (issue #237) — hasNextPage/totalPages
+  // are derived from this and pageIndex, not stored separately, so a
+  // revalidation that changes the total (see the 304 branch in
+  // fetchPage) only ever needs to update this one field.
+  total: number
   // GET /v1/tasks's own ETag (15.D2), or null the first time a page is
   // ever fetched — nothing to send as If-None-Match yet.
   etag: string | null
@@ -105,7 +106,7 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
   const [tasks, setTasks] = useState<Task[]>([])
   const [phase, setPhase] = useState<'loading' | 'loaded' | 'error'>('loading')
   const [error, setError] = useState<ApiError | null>(null)
-  const [hasNextPage, setHasNextPage] = useState(false)
+  const [total, setTotal] = useState(0)
   // 0-based internally, 1-based only where it is shown.
   const [pageIndex, setPageIndex] = useState(0)
 
@@ -146,7 +147,7 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
       const hadCacheHit = Boolean(cached)
       if (cached) {
         setTasks(cached.tasks)
-        setHasNextPage(cached.hasNextPage)
+        setTotal(cached.total)
         setError(null)
         setPhase('loaded')
       } else {
@@ -158,7 +159,7 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
       currentFetch.current = controller
 
       const params = new URLSearchParams({
-        limit: String(PAGE_SIZE + 1),
+        limit: String(PAGE_SIZE),
         offset: String(index * PAGE_SIZE),
       })
       // append, not set: the endpoint reads the parameter as a list.
@@ -207,7 +208,23 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
       // fetch, about to be shown) is confirmed current — Response.ok is
       // false for 304 (it is only true for 2xx), so this has to be
       // checked before the failure branch below, not folded into it.
-      if (response.status === 304) return
+      //
+      // X-Total-Count is still read here, though: the backend sets it
+      // before its own ETag/If-None-Match check specifically so a 304
+      // never carries a stale total (see docs/DECISIONS.md's "Total
+      // real na listagem") — a task added on a different page moves the
+      // total without moving this page's own rows, so this page's ETag
+      // can stay identical while the count the pager shows still needs
+      // to change.
+      if (response.status === 304) {
+        const totalHeader = response.headers.get('X-Total-Count')
+        if (totalHeader !== null) {
+          const revalidatedTotal = Number(totalHeader)
+          setTotal(revalidatedTotal)
+          if (cached) cacheRef.current.set(cacheKey, { ...cached, total: revalidatedTotal })
+        }
+        return
+      }
 
       if (!response.ok) {
         // Same reasoning as the catch block above: a page already shown
@@ -221,7 +238,7 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
       const page = (await response.json()) as Task[]
       if (controller.signal.aborted) return
 
-      const more = page.length > PAGE_SIZE
+      const pageTotal = Number(response.headers.get('X-Total-Count') ?? 0)
 
       // Deleting the last row of the last page leaves you standing on a
       // page that no longer exists. Step back rather than showing an
@@ -231,15 +248,14 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
         return
       }
 
-      const shown = more ? page.slice(0, PAGE_SIZE) : page
-      setTasks(shown)
-      setHasNextPage(more)
+      setTasks(page)
+      setTotal(pageTotal)
       setError(null)
       setPhase('loaded')
 
       cacheRef.current.set(cacheKey, {
-        tasks: shown,
-        hasNextPage: more,
+        tasks: page,
+        total: pageTotal,
         etag: response.headers.get('ETag'),
       })
     },
@@ -288,6 +304,13 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
   // linter rightly complains about — and a second source of truth for
   // something `phase` already knows.
   const isPaging = phase === 'loading'
+
+  // Derived from total (issue #237's X-Total-Count) and pageIndex,
+  // never tracked as its own state — the same reasoning isPaging's own
+  // comment gives, and what keeps this and totalPages from ever
+  // disagreeing with total after a revalidated 304 changes it.
+  const hasNextPage = (pageIndex + 1) * PAGE_SIZE < total
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   const nextPage = useCallback(() => {
     if (!hasNextPage) return
@@ -368,7 +391,7 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
       if (cached) {
         cacheRef.current.set(cacheKey, {
           tasks: cached.tasks.map((t) => (t.id === task.id ? task : t)),
-          hasNextPage: cached.hasNextPage,
+          total: cached.total,
           etag: null,
         })
       }
@@ -402,6 +425,8 @@ export function useTasks(statusFilter = '', priorityFilter = ''): UseTasksResult
     tasks,
     error,
     page: pageIndex + 1,
+    totalPages,
+    total,
     hasNextPage,
     hasPreviousPage: pageIndex > 0,
     isPaging,

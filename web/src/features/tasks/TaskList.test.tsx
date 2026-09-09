@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -65,6 +65,8 @@ function mockTasksResult(overrides: Partial<ReturnType<typeof useTasks>>) {
     tasks: [],
     error: null,
     page: 1,
+    totalPages: 1,
+    total: 0,
     hasNextPage: false,
     hasPreviousPage: false,
     isPaging: false,
@@ -156,27 +158,44 @@ describe('TaskList', () => {
   // The page title and its always-visible count were dropped in the
   // design review: the title named the only screen this app has, and
   // the count now lives one glyph away, in the counts panel.
-  it('the counts button names how many are on the page, without opening anything', () => {
-    mockTasksResult({ status: 'success', tasks: [makeTask(), makeTask({ id: 't2' })] })
+  //
+  // Issue #247/15.G1: the count is the filtered set's total (from
+  // X-Total-Count), not the page on screen — a page can hold 2 tasks
+  // while the total is much larger.
+  it('the counts button names the total across the filtered set, without opening anything', () => {
+    mockTasksResult({ status: 'success', tasks: [makeTask(), makeTask({ id: 't2' })], total: 2 })
     renderTaskList()
 
-    expect(screen.getByRole('button', { name: 'Task counts (2 on this page)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Task counts (2)' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Tasks' })).not.toBeInTheDocument()
   })
 
-  // The panel counts the page on screen and says so. It never implies a
-  // total, because GET /v1/tasks does not return one.
-  it('the counts panel describes the page on screen, not a total', async () => {
-    mockTasksResult({ status: 'success', tasks: [makeTask()], hasNextPage: true })
+  // The panel now shows the whole filtered set's total (free — it rides
+  // on useTasks' own X-Total-Count), not the page on screen. A page
+  // holding 1 task while the total is 5 proves the two are no longer
+  // the same number.
+  it('the counts panel shows the total across the filtered set, not just the page on screen', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { by_status: {}, by_priority: {} }))
+    mockTasksResult({ status: 'success', tasks: [makeTask()], total: 5 })
     const user = userEvent.setup()
     renderTaskList()
 
-    await user.click(screen.getByRole('button', { name: 'Task counts (1 on this page)' }))
+    await user.click(screen.getByRole('button', { name: 'Task counts (5)' }))
 
-    expect(screen.getByText('on this page')).toBeInTheDocument()
+    expect(screen.getByText('5')).toBeInTheDocument()
+    expect(screen.getByText('total')).toBeInTheDocument()
+    expect(screen.queryByText(/on this page/)).not.toBeInTheDocument()
   })
 
   it('the counts panel breaks the loaded tasks down by status and priority', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        by_status: { pending: 2, in_progress: 0, done: 1, cancelled: 0 },
+        by_priority: { high: 2, medium: 0, low: 1 },
+      }),
+    )
     mockTasksResult({
       status: 'success',
       tasks: [
@@ -184,11 +203,16 @@ describe('TaskList', () => {
         makeTask({ id: 't2', status: 'done', priority: 'high' }),
         makeTask({ id: 't3', status: 'pending', priority: 'low' }),
       ],
+      total: 3,
     })
     const user = userEvent.setup()
     renderTaskList()
 
     await user.click(screen.getByRole('button', { name: /^Task counts/ }))
+    // The breakdown loads from GET /v1/tasks/stats after the panel
+    // opens (issue #247/15.G1) — wait past the loading placeholders
+    // before reading values.
+    await waitFor(() => expect(screen.queryAllByText('—')).toHaveLength(0))
 
     // Scoped to each group: "Pending"/"High" are also filter options.
     const byStatus = within(screen.getByText('By status').parentElement!.querySelector('dl')!)
@@ -314,13 +338,14 @@ describe('TaskList', () => {
       status: 'success',
       tasks: [makeTask()],
       page: 3,
+      totalPages: 3,
       hasPreviousPage: true,
       previousPage,
     })
     const user = userEvent.setup()
     renderTaskList()
 
-    expect(screen.getByText('Page 3')).toBeInTheDocument()
+    expect(screen.getByText('Page 3 of 3')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Previous' }))
 
     expect(previousPage).toHaveBeenCalledOnce()

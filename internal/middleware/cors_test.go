@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -215,6 +216,60 @@ func TestCORS_Disabled_NoAllowCredentials(t *testing.T) {
 
 	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "" {
 		t.Errorf("disabled CORS set Access-Control-Allow-Credentials = %q, want none", got)
+	}
+}
+
+// --- Access-Control-Expose-Headers ---
+//
+// Without this, X-Total-Count and ETag are on the wire but invisible to a
+// cross-origin browser client's fetch — CORS's "safelisted response
+// headers" restriction hides any response header not explicitly exposed.
+// This pins a real bug: web/src/features/tasks/useTasks.tsx reads both
+// via response.headers.get() and this codebase's own documented
+// deployment shape (docker-compose.yml's VITE_API_BASE_URL/
+// CORS_ALLOWED_ORIGINS pairing) is cross-origin, so the total silently
+// read as 0 and revalidation never cache-hit until this was added.
+
+func TestCORS_Enabled_AllowedOrigin_ExposesTotalCountAndETag(t *testing.T) {
+	next, _ := newCORSTestHandler()
+	handler := CORS([]string{"http://localhost:8082"})(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set("Origin", "http://localhost:8082")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	got := w.Header().Get("Access-Control-Expose-Headers")
+	if !strings.Contains(got, "X-Total-Count") || !strings.Contains(got, "ETag") {
+		t.Errorf("Access-Control-Expose-Headers = %q, want it to contain both X-Total-Count and ETag", got)
+	}
+}
+
+func TestCORS_Enabled_DisallowedOrigin_NoExposeHeaders(t *testing.T) {
+	next, _ := newCORSTestHandler()
+	handler := CORS([]string{"http://localhost:8082"})(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "" {
+		t.Errorf("disallowed origin got Access-Control-Expose-Headers = %q, want none", got)
+	}
+}
+
+func TestCORS_Disabled_NoExposeHeaders(t *testing.T) {
+	next, _ := newCORSTestHandler()
+	handler := CORS(nil)(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	req.Header.Set("Origin", "http://localhost:8082")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "" {
+		t.Errorf("disabled CORS set Access-Control-Expose-Headers = %q, want none", got)
 	}
 }
 
