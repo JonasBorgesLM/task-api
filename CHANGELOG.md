@@ -124,6 +124,20 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   só o rótulo de texto e a borda. Botão "Print" ao lado de "Export" abre
   a rota com o filtro corrente da tela. Ver `docs/DECISIONS.md` §
   "Relatório de impressão".
+- Encurtador de links (issues #209-#217), opt-in via
+  `LINK_SHORTENING_ENABLED` (padrão `false` — sem ela, nenhuma rota
+  existe, nunca "existe e recusa"): `POST /v1/links` encurta uma URL
+  própria do chamador, `GET /v1/links` lista as próprias, `DELETE
+  /v1/links/{code}` revoga uma própria (dono errado devolve `404`,
+  nunca `403` — mesma regra do resto do projeto), e `GET /{code}`
+  resolve e redireciona, pública e deliberadamente fora de `/v1`. A
+  política de destino recusa endereços privados/internos (padrão do
+  `cairn`) e o próprio domínio configurado desta implantação
+  (`LINK_PUBLIC_BASE_URL`), fechando um caminho de SSRF específico de
+  ser um encurtador. Nesta versão o armazenamento é em memória
+  (`memstore`) — o primeiro passo deliberado de um rollout em direção a
+  Redis, não a implantação final. Ver `docs/DECISIONS.md` §
+  "Encurtador de links".
 
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em

@@ -101,6 +101,13 @@ tags:
       File attachments on a task. Present only when
       ATTACHMENT_STORAGE_DIR is configured; otherwise these routes
       return 404.
+  - name: Links
+    description: >
+      Short links (github.com/JonasBorgesLM/cairn). Present only when
+      LINK_SHORTENING_ENABLED is set; otherwise every route on this tag,
+      including the public GET /{code}, returns 404. Every route but the
+      public resolve is scoped to the authenticated caller's own links,
+      the same rule Tasks follows.
   - name: Health
     description: Liveness and readiness checks, for process supervisors and load balancers
   - name: Observability
@@ -1751,6 +1758,294 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /v1/links:
+    post:
+      tags: [Links]
+      operationId: createLink
+      summary: Shorten a URL
+      description: >
+        Creates a short link owned by the authenticated caller. The
+        destination is validated and evaluated against this
+        deployment's policy before anything is stored — SR-05 through
+        SR-10 in the cairn module's own requirements, plus this
+        deployment's own-domain block (see `422` below and
+        `docs/DECISIONS.md`'s "Encurtador de links" section).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLinkRequest'
+            examples:
+              generated:
+                summary: Generated code
+                value:
+                  url: https://example.com/a-very-long-path
+              vanity:
+                summary: Caller-chosen code
+                value:
+                  url: https://example.com/a-very-long-path
+                  vanity_code: my-link
+      responses:
+        '201':
+          description: Link created successfully.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Link'
+              example:
+                code: aZ3kQ9
+                short_url: https://s.example.com/aZ3kQ9
+                url: https://example.com/a-very-long-path
+                vanity: false
+                created_at: "2026-08-08T12:00:00Z"
+        '400':
+          description: Malformed JSON body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: invalid request body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Link shortening is disabled (`LINK_SHORTENING_ENABLED` unset).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+        '409':
+          description: The requested `vanity_code` is already taken.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: code already exists
+        '422':
+          description: >
+            The destination was rejected — outside the allowed scheme,
+            carrying userinfo, resolving to a private/internal/own-domain
+            address, too long, or containing a control character — or
+            `vanity_code` is reserved or collides with the generated
+            code length. `reason` is a stable, machine-readable enum
+            (cairn's own `RejectReason`); never treat the human message
+            as the contract.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                privateAddress:
+                  summary: Destination resolves to a private/internal address
+                  value:
+                    error: destination rejected
+                    reason: private_or_internal_host
+                ownDomain:
+                  summary: Destination is this deployment's own domain
+                  value:
+                    error: destination rejected
+                    reason: own_domain
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+    get:
+      tags: [Links]
+      operationId: listLinks
+      summary: List the authenticated caller's links
+      description: >
+        Returns the caller's own links, oldest first, windowed by
+        `limit`/`after` — cairn's own cursor pagination (never an
+        offset), continued by passing back the `X-Next-Cursor` response
+        header's value as the next request's `after`.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of links to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: after
+          in: query
+          required: false
+          description: >
+            An opaque cursor from a previous response's `X-Next-Cursor`
+            header. Omit for the first page.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: >
+            Success. The array is empty (`[]`) if the caller has no
+            links.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+            X-Next-Cursor:
+              description: >
+                Present only when another page exists. Pass its value
+                back as `?after=` to continue.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Link'
+        '400':
+          description: '`limit` is present but not an integer in `[1, 100]`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Link shortening is disabled (`LINK_SHORTENING_ENABLED` unset).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/links/{code}:
+    delete:
+      tags: [Links]
+      operationId: revokeLink
+      summary: Revoke one of the authenticated caller's links
+      description: >
+        Revoking keeps the record (so the code stays distinguishable
+        from one that never existed) but makes it stop resolving.
+        Immediate: there is no cache in front of the store to
+        invalidate. A code that does not exist, or that exists but
+        belongs to another caller, both answer `404` — identically, the
+        same rule every other resource in this API follows for a
+        resource that isn't yours (never `403`, which would itself
+        confirm the code exists).
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: The link's short code.
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Link revoked successfully. No response body.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >
+            No link with this code owned by the caller — covering a
+            code that names nothing, one belonging to somebody else, an
+            invalid code, or one already expired or revoked — or link
+            shortening is disabled.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: link not found
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /{code}:
+    get:
+      tags: [Links]
+      operationId: resolveLink
+      summary: Resolve a short code and redirect to its destination
+      description: >
+        Public — no authentication required or checked, by design
+        (cairn's own ADR-0010: a read has no owner to scope against).
+        Deliberately **outside `/v1`**: a short link's own address is
+        meant to be handed out and clicked, and should not carry this
+        API's version prefix — see `docs/DECISIONS.md`'s "Encurtador de
+        links" section. Not found, invalid, expired and revoked all
+        answer the identical `404` shape (cairn's SR-03): distinguishing
+        them would help a legitimate visitor but is also a free oracle
+        for anyone scanning the code space, so this API does not opt
+        into distinguishing them on this anonymous route (contrast
+        `DELETE /v1/links/{code}`'s own `404`, which is
+        indistinguishable for a different, ownership-shaped reason).
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to the link's destination.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+            Referrer-Policy:
+              schema:
+                type: string
+                enum: [no-referrer]
+        '404':
+          description: >
+            Unknown, invalid, expired or revoked code — or link
+            shortening is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: link not found
+        '503':
+          description: >
+            The link store could not be reached. Never a redirect —
+            failing open here would mean serving a stale or unvalidated
+            destination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /debug/vars:
     get:
       tags: [Observability]
@@ -2284,6 +2579,71 @@ components:
         - total
         - by_status
         - by_priority
+
+    CreateLinkRequest:
+      type: object
+      description: Request body for POST /v1/links.
+      properties:
+        url:
+          type: string
+          format: uri
+          description: The destination to shorten.
+        vanity_code:
+          type: string
+          description: >
+            A caller-chosen code instead of a generated one. Omit for a
+            generated code. Any code is accepted except one colliding
+            with the generated code length, or one on the reserved list
+            (`admin`, `api`, `health`, `login`, `static`, `assets`,
+            `robots.txt`, `favicon.ico`, `.well-known`).
+        ttl_seconds:
+          type: integer
+          minimum: 1
+          description: >
+            This link's time-to-live in seconds. Omit or `0` for this
+            deployment's default (which itself defaults to "never
+            expires").
+      required:
+        - url
+
+    Link:
+      type: object
+      description: >
+        The persisted representation of a short link, as returned by
+        `POST /v1/links` and `GET /v1/links`. The owning user's id is
+        deliberately not included — every link a client can ever
+        retrieve already belongs to it, the same convention `Task`
+        follows.
+      properties:
+        code:
+          type: string
+          description: The short code.
+          example: aZ3kQ9
+        short_url:
+          type: string
+          format: uri
+          description: '`LINK_PUBLIC_BASE_URL` joined with `code` — ready to hand out or click.'
+          example: https://s.example.com/aZ3kQ9
+        url:
+          type: string
+          format: uri
+          description: The destination this code resolves to.
+        vanity:
+          type: boolean
+          description: Whether `code` was chosen by the caller rather than generated.
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: Absent when the link never expires.
+      required:
+        - code
+        - short_url
+        - url
+        - vanity
+        - created_at
 
     Task:
       type: object

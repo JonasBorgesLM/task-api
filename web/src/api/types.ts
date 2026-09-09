@@ -399,6 +399,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the authenticated caller's links
+         * @description Returns the caller's own links, oldest first, windowed by `limit`/`after` — cairn's own cursor pagination (never an offset), continued by passing back the `X-Next-Cursor` response header's value as the next request's `after`.
+         */
+        get: operations["listLinks"];
+        put?: never;
+        /**
+         * Shorten a URL
+         * @description Creates a short link owned by the authenticated caller. The destination is validated and evaluated against this deployment's policy before anything is stored — SR-05 through SR-10 in the cairn module's own requirements, plus this deployment's own-domain block (see `422` below and `docs/DECISIONS.md`'s "Encurtador de links" section).
+         */
+        post: operations["createLink"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/links/{code}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke one of the authenticated caller's links
+         * @description Revoking keeps the record (so the code stays distinguishable from one that never existed) but makes it stop resolving. Immediate: there is no cache in front of the store to invalidate. A code that does not exist, or that exists but belongs to another caller, both answer `404` — identically, the same rule every other resource in this API follows for a resource that isn't yours (never `403`, which would itself confirm the code exists).
+         */
+        delete: operations["revokeLink"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/{code}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Resolve a short code and redirect to its destination
+         * @description Public — no authentication required or checked, by design (cairn's own ADR-0010: a read has no owner to scope against). Deliberately **outside `/v1`**: a short link's own address is meant to be handed out and clicked, and should not carry this API's version prefix — see `docs/DECISIONS.md`'s "Encurtador de links" section. Not found, invalid, expired and revoked all answer the identical `404` shape (cairn's SR-03): distinguishing them would help a legitimate visitor but is also a free oracle for anyone scanning the code space, so this API does not opt into distinguishing them on this anonymous route (contrast `DELETE /v1/links/{code}`'s own `404`, which is indistinguishable for a different, ownership-shaped reason).
+         */
+        get: operations["resolveLink"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/debug/vars": {
         parameters: {
             query?: never;
@@ -635,6 +699,46 @@ export interface components {
             by_priority: {
                 [key: string]: number;
             };
+        };
+        /** @description Request body for POST /v1/links. */
+        CreateLinkRequest: {
+            /**
+             * Format: uri
+             * @description The destination to shorten.
+             */
+            url: string;
+            /** @description A caller-chosen code instead of a generated one. Omit for a generated code. Any code is accepted except one colliding with the generated code length, or one on the reserved list (`admin`, `api`, `health`, `login`, `static`, `assets`, `robots.txt`, `favicon.ico`, `.well-known`). */
+            vanity_code?: string;
+            /** @description This link's time-to-live in seconds. Omit or `0` for this deployment's default (which itself defaults to "never expires"). */
+            ttl_seconds?: number;
+        };
+        /** @description The persisted representation of a short link, as returned by `POST /v1/links` and `GET /v1/links`. The owning user's id is deliberately not included — every link a client can ever retrieve already belongs to it, the same convention `Task` follows. */
+        Link: {
+            /**
+             * @description The short code.
+             * @example aZ3kQ9
+             */
+            code: string;
+            /**
+             * Format: uri
+             * @description `LINK_PUBLIC_BASE_URL` joined with `code` — ready to hand out or click.
+             * @example https://s.example.com/aZ3kQ9
+             */
+            short_url: string;
+            /**
+             * Format: uri
+             * @description The destination this code resolves to.
+             */
+            url: string;
+            /** @description Whether `code` was chosen by the caller rather than generated. */
+            vanity: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: date-time
+             * @description Absent when the link never expires.
+             */
+            expires_at?: string;
         };
         /** @description The persisted representation of a task, as returned by every endpoint that returns a task body. Field order and JSON keys match the `json` struct tags on task.Task exactly (snake_case). The owning user's id is deliberately not included — every task a client can ever retrieve already belongs to it. */
         Task: {
@@ -2151,6 +2255,229 @@ export interface operations {
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalServerError"];
             503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listLinks: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of links to return. */
+                limit?: number;
+                /** @description An opaque cursor from a previous response's `X-Next-Cursor` header. Omit for the first page. */
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. The array is empty (`[]`) if the caller has no links. */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    /** @description Present only when another page exists. Pass its value back as `?after=` to continue. */
+                    "X-Next-Cursor"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Link"][];
+                };
+            };
+            /** @description `limit` is present but not an integer in `[1, 100]`. */
+            400: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Link shortening is disabled (`LINK_SHORTENING_ENABLED` unset). */
+            404: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    createLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateLinkRequest"];
+            };
+        };
+        responses: {
+            /** @description Link created successfully. */
+            201: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "code": "aZ3kQ9",
+                     *       "short_url": "https://s.example.com/aZ3kQ9",
+                     *       "url": "https://example.com/a-very-long-path",
+                     *       "vanity": false,
+                     *       "created_at": "2026-08-08T12:00:00Z"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["Link"];
+                };
+            };
+            /** @description Malformed JSON body. */
+            400: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "invalid request body"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Link shortening is disabled (`LINK_SHORTENING_ENABLED` unset). */
+            404: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested `vanity_code` is already taken. */
+            409: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "code already exists"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The destination was rejected — outside the allowed scheme, carrying userinfo, resolving to a private/internal/own-domain address, too long, or containing a control character — or `vanity_code` is reserved or collides with the generated code length. `reason` is a stable, machine-readable enum (cairn's own `RejectReason`); never treat the human message as the contract. */
+            422: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    revokeLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The link's short code. */
+                code: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Link revoked successfully. No response body. */
+            204: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description No link with this code owned by the caller — covering a code that names nothing, one belonging to somebody else, an invalid code, or one already expired or revoked — or link shortening is disabled. */
+            404: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "link not found"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    resolveLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                code: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the link's destination. */
+            302: {
+                headers: {
+                    Location?: string;
+                    "Cache-Control"?: "no-store";
+                    "Referrer-Policy"?: "no-referrer";
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown, invalid, expired or revoked code — or link shortening is disabled. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "link not found"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The link store could not be reached. Never a redirect — failing open here would mean serving a stale or unvalidated destination. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     getDebugVars: {
