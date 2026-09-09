@@ -12,6 +12,19 @@ directly below it, and only through an interface. This holds **identically** in
 `internal/task`, `internal/user` and `internal/attachment` — there is no
 "original" package with more privileges than the others.
 
+`internal/link` (issues #209-#217) is the one deliberate exception to
+"Repository (interface)," not a fourth copy of the same shape: it wraps
+`*cairn.Shortener`, and cairn itself — not `internal/link`'s own
+`Service` — is the Service-layer domain logic here, with its own
+storage (`cairn.Store`, currently `memstore`; see `docs/DECISIONS.md` §
+"Encurtador de links"). `link.Service`'s entire job is the one thing
+cairn deliberately does not do: the ownership check on `Revoke`
+(cairn's own ADR-0010). `link.Handler` still never touches
+`*cairn.Shortener` directly — same rule, enforced through `Service` the
+same way it is everywhere else — and cairn's own sentinel errors
+(`cairn.ErrCodeNotFound`, etc.) are this package's domain-error
+taxonomy; it does not wrap them in a second, redundant sentinel layer.
+
 ## What may import a database
 
 - `Service` and `Handler` in every domain package must stay **completely

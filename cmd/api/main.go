@@ -10,12 +10,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/JonasBorgesLM/cairn"
+	"github.com/JonasBorgesLM/cairn/memstore"
+	"github.com/JonasBorgesLM/cairn/policy"
 	core "github.com/JonasBorgesLM/crier/core"
 
 	"github.com/JonasBorgesLM/moat/csrf"
@@ -26,6 +30,7 @@ import (
 
 	"github.com/JonasBorgesLM/task-api/internal/attachment"
 	"github.com/JonasBorgesLM/task-api/internal/config"
+	"github.com/JonasBorgesLM/task-api/internal/link"
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 	"github.com/JonasBorgesLM/task-api/internal/platform/migrate"
 	"github.com/JonasBorgesLM/task-api/internal/task"
@@ -530,6 +535,71 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 		collectOrphans = func(ctx context.Context) (int, error) {
 			return attachmentSvc.CollectOrphans(ctx, cfg.AttachmentOrphanMinAge)
 		}
+	}
+
+	// Link shortening (issues #209-#217, 15.A1-15.A9) is opt-in and, with
+	// LinkShorteningEnabled false (the default), none of this runs: no
+	// routes registered, no cairn.Shortener built at all — not "built but
+	// idle." See docs/DECISIONS.md's "Encurtador de links" section for
+	// the four-step rollout this flag is step 1 of: memstore.Store here,
+	// never Redis yet, is deliberate — swapping in redisstore is its own
+	// later change, made once this step has actually been exercised.
+	//
+	// POST /links needs no dedicated rate-limit tier of its own: it is
+	// wrapped in `authenticated`, the same per-user moat/ratelimit tier
+	// every other mutating route already goes through — cairn carries no
+	// request counter of its own by design (docs/INTEGRATION.md §2.2),
+	// and this is the layer the library's own threat model assumes closes
+	// that gap (T-10).
+	if cfg.LinkShorteningEnabled {
+		linkBaseURL, err := url.Parse(cfg.LinkPublicBaseURL)
+		if err != nil {
+			// Unreachable in practice: config.Load already validated this
+			// as an absolute http(s) URL before Config ever left it. Not
+			// worth a panic over, but also not worth a bespoke error path
+			// for a condition config.Load's own contract already rules out.
+			closeLimiters()
+			closeDB()
+			closeBlobs()
+			return nil, nil, fmt.Errorf("parse LINK_PUBLIC_BASE_URL: %w", err)
+		}
+
+		linkStore := memstore.New()
+		linkPolicy := policy.Default([]string{linkBaseURL.Host})
+		shortener, err := cairn.New(linkStore, cairn.WithPolicy(linkPolicy))
+		if err != nil {
+			closeLimiters()
+			closeDB()
+			closeBlobs()
+			return nil, nil, fmt.Errorf("build link shortener: %w", err)
+		}
+
+		linkSvc, err := link.NewService(shortener, linkStore)
+		if err != nil {
+			closeLimiters()
+			closeDB()
+			closeBlobs()
+			return nil, nil, fmt.Errorf("build link service: %w", err)
+		}
+		link.NewHandler(linkSvc, logger, cfg.LinkPublicBaseURL).RegisterRoutes(v1, authenticated)
+
+		// The public resolve route deliberately never joins v1 — see
+		// docs/DECISIONS.md's "Encurtador de links" section for why a
+		// short link's own address should not carry this API's version
+		// prefix. Registered on mux (not v1), it still inherits
+		// everything mux itself sits under: RequestID, Logging, Recovery,
+		// secureheaders, CORS, RealIP, and — through root's catch-all
+		// below — the global address-keyed rate limiter (T-01, scan
+		// resistance; cairn's own threat model assumes this layer exists,
+		// docs/INTEGRATION.md §2.1).
+		//
+		// "/{code}" is a single-path-segment wildcard, not a bare "/"
+		// catch-all: ServeMux already prefers "/v1/" and "GET /debug/vars"
+		// over it at the same or a shorter level, so this can never
+		// shadow either regardless of registration order — the same
+		// literal-beats-wildcard rule internal/task's GET /tasks/stats
+		// and GET /tasks/export both already rely on.
+		mux.Handle("/{code}", link.NewPublicResolveHandler(shortener))
 	}
 
 	// Mount the versioned contract. StripPrefix is what lets the handlers

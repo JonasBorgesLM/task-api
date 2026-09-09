@@ -42,6 +42,18 @@
 //	                        omits Strict-Transport-Security entirely; set
 //	                        it only when HTTPS actually terminates in front
 //	                        of this process. See middleware.SecurityHeaders.
+//	LINK_SHORTENING_ENABLED Whether the link-shortening subsystem
+//	                        (internal/link) is mounted at all: true or
+//	                        false (default: false). See docs/DECISIONS.md's
+//	                        "Encurtador de links" section — this is step 1
+//	                        of a four-step rollout, not a finished feature.
+//	LINK_PUBLIC_BASE_URL    Where this deployment's short links resolve
+//	                        (e.g. https://s.example.com) — used both to
+//	                        build the full short URL a caller gets back and
+//	                        to name this deployment's own domain so it can
+//	                        never be shortened as a destination. Required
+//	                        when LINK_SHORTENING_ENABLED is true, ignored
+//	                        otherwise (default: unset).
 package config
 
 import (
@@ -50,6 +62,7 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -88,6 +101,12 @@ const (
 	defaultHSTSMaxAge = 365 * 24 * time.Hour
 
 	defaultCookieInsecure = false
+
+	// defaultLinkShorteningEnabled is false: the subsystem is unmounted
+	// (no routes registered at all, cmd/api never constructs a
+	// cairn.Shortener) until an operator opts in. See
+	// Config.LinkShorteningEnabled.
+	defaultLinkShorteningEnabled = false
 
 	// Rate-limit defaults, in token-bucket terms: burst is the depth of
 	// the bucket (how many requests may arrive at once) and perSec the
@@ -380,6 +399,26 @@ type Config struct {
 	// lets an active network attacker read and write the cookie over any
 	// plaintext request to this host.
 	CookieInsecure bool
+
+	// LinkShorteningEnabled gates the entire link-shortening subsystem
+	// (internal/link, cairn): false, the default, means cmd/api never
+	// constructs a cairn.Shortener and registers none of its routes —
+	// not "registered but rejecting," genuinely absent. See
+	// docs/DECISIONS.md's "Encurtador de links" section for the rollout
+	// this flag is step 1 of.
+	LinkShorteningEnabled bool
+
+	// LinkPublicBaseURL is where this deployment's short links resolve,
+	// e.g. "https://s.example.com" — no trailing slash. It serves two
+	// purposes: cmd/api joins it with a generated code to build the full
+	// short URL POST /v1/links returns, and internal/link parses its
+	// host to configure cairn's policy.Default own-domain block (issue
+	// #215/15.A7) — a destination that is this deployment's own short
+	// link, or the API itself, is refused at creation rather than
+	// letting the shortener launder a link into its own address space.
+	// Required and validated as an absolute http(s) URL when
+	// LinkShorteningEnabled is true; ignored (and left empty) otherwise.
+	LinkPublicBaseURL string
 }
 
 // Load reads configuration from environment variables and applies defaults
@@ -548,7 +587,41 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	if cfg.LinkShorteningEnabled, err = parseBool("LINK_SHORTENING_ENABLED", defaultLinkShorteningEnabled); err != nil {
+		return Config{}, err
+	}
+	cfg.LinkPublicBaseURL = strings.TrimRight(strings.TrimSpace(os.Getenv("LINK_PUBLIC_BASE_URL")), "/")
+	if cfg.LinkShorteningEnabled {
+		if err := validateLinkPublicBaseURL(cfg.LinkPublicBaseURL); err != nil {
+			return Config{}, err
+		}
+	}
+
 	return cfg, nil
+}
+
+// validateLinkPublicBaseURL requires an absolute http(s) URL with a host —
+// enforced only when LinkShorteningEnabled is true, the same "fail at
+// startup, not at request time" rule every other conditionally-required
+// setting in this file follows (see ATTACHMENT_STORAGE_DIR/
+// ATTACHMENT_S3_ENDPOINT above). Both of LinkPublicBaseURL's consumers
+// (building the short URL a caller sees, and naming the own-domain block
+// for cairn's Policy) are meaningless against an empty or malformed value.
+func validateLinkPublicBaseURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("config: LINK_PUBLIC_BASE_URL is required when LINK_SHORTENING_ENABLED=true")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("config: LINK_PUBLIC_BASE_URL is not a valid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("config: LINK_PUBLIC_BASE_URL must be an absolute http(s) URL, got %q", raw)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("config: LINK_PUBLIC_BASE_URL must include a host, got %q", raw)
+	}
+	return nil
 }
 
 // validateAddr reports whether raw is a syntactically valid "host:port"

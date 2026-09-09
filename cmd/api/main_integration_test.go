@@ -1543,6 +1543,212 @@ func TestIntegration_Attachment_DisabledByDefault(t *testing.T) {
 	}
 }
 
+// --- Link shortening ---
+
+func linkConfig(_ *testing.T) config.Config {
+	cfg := testConfig()
+	cfg.LinkShorteningEnabled = true
+	cfg.LinkPublicBaseURL = "https://s.example.com"
+	return cfg
+}
+
+// TestIntegration_LinkShortening_DisabledByDefault mirrors
+// TestIntegration_Attachment_DisabledByDefault: with
+// LinkShorteningEnabled false (testConfig()'s own default), the routes
+// are absent, not present-and-rejecting.
+func TestIntegration_LinkShortening_DisabledByDefault(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv)
+
+	resp, err := srv.Client().Do(authedRequest(t, token, http.MethodPost, srv.URL+apiPrefix+"/links", `{"url":"https://example.com/a"}`))
+	if err != nil {
+		t.Fatalf("create link: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("create link with shortening disabled: status = %d, want 404", resp.StatusCode)
+	}
+
+	// The public resolve route must be equally absent — not just the
+	// authenticated CRUD routes.
+	pubResp, err := srv.Client().Get(srv.URL + "/anything")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	defer pubResp.Body.Close()
+	if pubResp.StatusCode != http.StatusNotFound {
+		t.Errorf("resolve with shortening disabled: status = %d, want 404", pubResp.StatusCode)
+	}
+}
+
+// TestIntegration_LinkShortening_CreateListResolveRevoke exercises the
+// whole lifecycle through the real HTTP surface: create (authenticated),
+// resolve (public, outside /v1), list (authenticated), revoke
+// (authenticated), then confirm the revoked code no longer resolves.
+func TestIntegration_LinkShortening_CreateListResolveRevoke(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, linkConfig(t), discardLogger()).Handler)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv)
+
+	createResp, err := srv.Client().Do(authedRequest(t, token, http.MethodPost, srv.URL+apiPrefix+"/links", `{"url":"https://example.com/a"}`))
+	if err != nil {
+		t.Fatalf("create link: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(createResp.Body)
+		t.Fatalf("create link status = %d, body = %s", createResp.StatusCode, body)
+	}
+	var created struct {
+		Code     string `json:"code"`
+		ShortURL string `json:"short_url"`
+		URL      string `json:"url"`
+	}
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.URL != "https://example.com/a" {
+		t.Errorf("create link URL = %q, want %q", created.URL, "https://example.com/a")
+	}
+	if created.ShortURL != "https://s.example.com/"+created.Code {
+		t.Errorf("create link ShortURL = %q, want %q", created.ShortURL, "https://s.example.com/"+created.Code)
+	}
+
+	// Resolve — public, unauthenticated, outside /v1.
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resolveResp, err := noRedirect.Get(srv.URL + "/" + created.Code)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	defer resolveResp.Body.Close()
+	if resolveResp.StatusCode != http.StatusFound {
+		t.Fatalf("resolve status = %d, want %d", resolveResp.StatusCode, http.StatusFound)
+	}
+	if got := resolveResp.Header.Get("Location"); got != "https://example.com/a" {
+		t.Errorf("resolve Location = %q, want %q", got, "https://example.com/a")
+	}
+
+	// List.
+	listResp, err := srv.Client().Do(authedRequest(t, token, http.MethodGet, srv.URL+apiPrefix+"/links", ""))
+	if err != nil {
+		t.Fatalf("list links: %v", err)
+	}
+	defer listResp.Body.Close()
+	var listed []struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Code != created.Code {
+		t.Fatalf("list = %+v, want exactly the created link", listed)
+	}
+
+	// Revoke.
+	revokeResp, err := srv.Client().Do(authedRequest(t, token, http.MethodDelete, srv.URL+apiPrefix+"/links/"+created.Code, ""))
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	defer revokeResp.Body.Close()
+	if revokeResp.StatusCode != http.StatusNoContent {
+		t.Errorf("revoke status = %d, want %d", revokeResp.StatusCode, http.StatusNoContent)
+	}
+
+	// A revoked code no longer resolves.
+	afterRevokeResp, err := noRedirect.Get(srv.URL + "/" + created.Code)
+	if err != nil {
+		t.Fatalf("resolve after revoke: %v", err)
+	}
+	defer afterRevokeResp.Body.Close()
+	if afterRevokeResp.StatusCode != http.StatusNotFound {
+		t.Errorf("resolve after revoke status = %d, want %d", afterRevokeResp.StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestIntegration_LinkShortening_CrossUserRevokeIsRefused is the
+// ownership rule (ADR-0010, issue #212/15.A4) end to end, through the
+// real HTTP surface rather than only at the Service layer
+// (internal/link/service_test.go already covers that level directly).
+func TestIntegration_LinkShortening_CrossUserRevokeIsRefused(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, linkConfig(t), discardLogger()).Handler)
+	defer srv.Close()
+
+	ownerToken := registerAndLoginAs(t, srv, "owner@example.com")
+	strangerToken := registerAndLoginAs(t, srv, "stranger@example.com")
+
+	createResp, err := srv.Client().Do(authedRequest(t, ownerToken, http.MethodPost, srv.URL+apiPrefix+"/links", `{"url":"https://example.com/a"}`))
+	if err != nil {
+		t.Fatalf("create link: %v", err)
+	}
+	defer createResp.Body.Close()
+	var created struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	revokeResp, err := srv.Client().Do(authedRequest(t, strangerToken, http.MethodDelete, srv.URL+apiPrefix+"/links/"+created.Code, ""))
+	if err != nil {
+		t.Fatalf("stranger revoke: %v", err)
+	}
+	defer revokeResp.Body.Close()
+	if revokeResp.StatusCode != http.StatusNotFound {
+		t.Errorf("stranger revoke status = %d, want 404 (never 403 — see .claude/rules/go-domain-errors.md)", revokeResp.StatusCode)
+	}
+
+	// The rejected attempt must not have revoked it: the owner's own
+	// link still resolves.
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resolveResp, err := noRedirect.Get(srv.URL + "/" + created.Code)
+	if err != nil {
+		t.Fatalf("resolve after rejected revoke: %v", err)
+	}
+	defer resolveResp.Body.Close()
+	if resolveResp.StatusCode != http.StatusFound {
+		t.Errorf("resolve after rejected revoke status = %d, want %d (still active)", resolveResp.StatusCode, http.StatusFound)
+	}
+}
+
+// TestIntegration_LinkShortening_RejectsOwnDomain is issue #215/15.A7's
+// own-domain SSRF boundary, end to end: a destination pointing back at
+// this deployment's own configured public host must be refused at
+// creation, never merely at resolve.
+func TestIntegration_LinkShortening_RejectsOwnDomain(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, linkConfig(t), discardLogger()).Handler)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv)
+
+	resp, err := srv.Client().Do(authedRequest(t, token, http.MethodPost, srv.URL+apiPrefix+"/links", `{"url":"https://s.example.com/somewhere"}`))
+	if err != nil {
+		t.Fatalf("create link: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create link to own domain: status = %d, body = %s, want %d", resp.StatusCode, body, http.StatusUnprocessableEntity)
+	}
+	// "s.example.com" is a fictional test domain that will not resolve
+	// in most environments either — asserting only the status code would
+	// let this pass for the wrong reason (BlockPrivateNetworks failing
+	// closed on a DNS lookup failure, ReasonResolveFailed) instead of the
+	// own-domain check this test exists to prove. The reason field is
+	// what tells the two apart.
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if body.Reason != "own_domain" {
+		t.Errorf("create link to own domain: reason = %q, want %q", body.Reason, "own_domain")
+	}
+}
+
 // --- API versioning ---
 
 // TestIntegration_Versioning_ContractIsUnderV1 pins which routes moved

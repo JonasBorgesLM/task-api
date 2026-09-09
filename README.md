@@ -77,6 +77,8 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `ATTACHMENT_S3_BUCKET` / `..._ACCESS_KEY` / `..._SECRET_KEY` | Required when the endpoint is set. The bucket must already exist | *(unset)* |
 | `ATTACHMENT_S3_REGION` / `ATTACHMENT_S3_USE_SSL` | Optional; SSL defaults to on (turn it off for the local MinIO) | — / `true` |
 | `CRIER_OTLP_ENDPOINT` | Mirrors every log record to this OTLP/HTTP collector (e.g. SigNoz), alongside — never instead of — the stdout JSON log. Full URL with scheme; use the collector's OTLP/HTTP port (`4318`), not gRPC's `4317`. Unset disables it entirely | *(unset)* |
+| `LINK_SHORTENING_ENABLED` | Mounts the short-link subsystem (`POST/GET /v1/links`, `DELETE /v1/links/{code}`, the public `GET /{code}`). Unset ⇒ none of it exists (404, not "present and rejecting") — see `docs/DECISIONS.md` § "Encurtador de links" | `false` |
+| `LINK_PUBLIC_BASE_URL` | Where short links resolve, e.g. `https://s.example.com` — no trailing slash. Builds the `short_url` a caller gets back, and names this deployment's own domain so it can never be shortened as a destination. Required (an absolute `http(s)` URL) when `LINK_SHORTENING_ENABLED=true`, ignored otherwise | *(unset)* |
 
 `config.Load()` returns an error (and the process refuses to start) if a timeout/TTL/max-age isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
@@ -250,6 +252,10 @@ All endpoints accept/return `application/json`; every response carries an `X-Req
 | `GET` | `/v1/tasks/{id}/attachments` | required | List a task's attachments |
 | `GET` | `/v1/files/{key}` | required | Download an attachment by its `storage_key` |
 | `DELETE` | `/v1/files/{key}` | required | Delete an attachment by its `storage_key` — removes the metadata row and the blob in the same request |
+| `POST` | `/v1/links` | required | Shorten a URL, owned by the caller — present only when `LINK_SHORTENING_ENABLED=true` |
+| `GET` | `/v1/links` | required | List the caller's own links, oldest first (`?limit=`, `?after=` cursor pagination) |
+| `DELETE` | `/v1/links/{code}` | required | Revoke one of the caller's own links |
+| `GET` | `/{code}` | — | Resolve a short code and redirect to its destination — public, unauthenticated, deliberately outside `/v1` |
 | `GET` | `/health` | — | Liveness — always `200` while the process runs |
 | `GET` | `/health/ready` | — | Readiness — `200` if the database is reachable, `503` if not |
 | `GET` | `/debug/vars` | required | Runtime stats (`expvar`) plus `version`/`commit` for the running build — authenticated, unlike the health routes |

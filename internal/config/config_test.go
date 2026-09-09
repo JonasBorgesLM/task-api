@@ -769,3 +769,103 @@ func TestLoad_InvalidCookieInsecure_NotABool(t *testing.T) {
 		t.Fatal("Load() expected error for COOKIE_INSECURE=not-a-bool, got nil")
 	}
 }
+
+// --- LinkShorteningEnabled / LinkPublicBaseURL ---
+
+func TestLoad_LinkShorteningEnabled_DefaultsFalse(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.LinkShorteningEnabled {
+		t.Error("Load() LinkShorteningEnabled = true, want false (subsystem must not mount without an explicit opt-in)")
+	}
+	if cfg.LinkPublicBaseURL != "" {
+		t.Errorf("Load() LinkPublicBaseURL = %q, want empty when the subsystem is disabled", cfg.LinkPublicBaseURL)
+	}
+}
+
+func TestLoad_LinkShorteningEnabled_RequiresPublicBaseURL(t *testing.T) {
+	t.Setenv("LINK_SHORTENING_ENABLED", "true")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for LINK_SHORTENING_ENABLED=true with no LINK_PUBLIC_BASE_URL, got nil")
+	}
+}
+
+func TestLoad_LinkShorteningEnabled_WithPublicBaseURL(t *testing.T) {
+	t.Setenv("LINK_SHORTENING_ENABLED", "true")
+	t.Setenv("LINK_PUBLIC_BASE_URL", "https://s.example.com")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if !cfg.LinkShorteningEnabled {
+		t.Error("Load() LinkShorteningEnabled = false, want true")
+	}
+	if cfg.LinkPublicBaseURL != "https://s.example.com" {
+		t.Errorf("Load() LinkPublicBaseURL = %q, want %q", cfg.LinkPublicBaseURL, "https://s.example.com")
+	}
+}
+
+// TestLoad_LinkPublicBaseURL_TrailingSlashTrimmed pins that a trailing
+// slash is stripped once, at Load, rather than every caller that joins
+// this value with a code having to guard against a doubled "//".
+func TestLoad_LinkPublicBaseURL_TrailingSlashTrimmed(t *testing.T) {
+	t.Setenv("LINK_SHORTENING_ENABLED", "true")
+	t.Setenv("LINK_PUBLIC_BASE_URL", "https://s.example.com/")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.LinkPublicBaseURL != "https://s.example.com" {
+		t.Errorf("Load() LinkPublicBaseURL = %q, want the trailing slash trimmed", cfg.LinkPublicBaseURL)
+	}
+}
+
+func TestLoad_LinkPublicBaseURL_IgnoredWhenDisabled(t *testing.T) {
+	// Not required, and Load must not choke on it either — an operator
+	// who sets this while the flag is still off (staging it ahead of
+	// time) is not a configuration error.
+	t.Setenv("LINK_PUBLIC_BASE_URL", "not a valid url at all")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.LinkShorteningEnabled {
+		t.Fatal("Load() LinkShorteningEnabled = true, want false")
+	}
+}
+
+func TestLoad_InvalidLinkShorteningEnabled_NotABool(t *testing.T) {
+	t.Setenv("LINK_SHORTENING_ENABLED", "not-a-bool")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for LINK_SHORTENING_ENABLED=not-a-bool, got nil")
+	}
+}
+
+func TestLoad_InvalidLinkPublicBaseURL_NotAbsolute(t *testing.T) {
+	t.Setenv("LINK_SHORTENING_ENABLED", "true")
+	t.Setenv("LINK_PUBLIC_BASE_URL", "s.example.com")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for a LINK_PUBLIC_BASE_URL with no scheme, got nil")
+	}
+}
+
+func TestLoad_InvalidLinkPublicBaseURL_WrongScheme(t *testing.T) {
+	t.Setenv("LINK_SHORTENING_ENABLED", "true")
+	t.Setenv("LINK_PUBLIC_BASE_URL", "ftp://s.example.com")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for a non-http(s) LINK_PUBLIC_BASE_URL, got nil")
+	}
+}

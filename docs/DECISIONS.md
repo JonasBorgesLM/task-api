@@ -2361,3 +2361,148 @@ passa a fazer sentido revisitar assim que #221 exista.
 **Trade-off aceito:** uma conta com senha esquecida continua
 permanentemente irrecuperável até esta decisão ser revisitada, e um
 cadastro com e-mail de terceiros continua possível.
+
+---
+
+## Encurtador de links (issues #209-#217, 15.A1-15.A9): cairn integrado, atrás de flag, memstore no passo 1
+
+`cairn` (`github.com/JonasBorgesLM/cairn`) nomeia o task-api como seu
+primeiro consumidor real (`cairn/docs/INTEGRATION.md` §4, IR-04). Nove
+issues, cinco decisões reais — as outras quatro (15.A3, 15.A4, 15.A6,
+15.A8) são implementação do que estas decidem, não decisões
+independentes.
+
+### Integrar (issue #209, 15.A1) — decisão levada ao usuário
+
+A própria issue permitia "não integrar" como resposta legítima: tasks
+são privadas, autorização é estritamente por dono, e o produto não tem
+nenhum modelo de compartilhamento hoje — um link curto não tem, à
+primeira vista, um destino óbvio dentro desse modelo. Levada ao usuário
+(`JonasBorgesLM`) apesar da recomendação inicial ser não integrar;
+**decidido integrar**. As perguntas que a própria issue #209 levantava
+("para onde o link aponta, quem pode criar, qual o ciclo de vida, a
+resolução é pública ou exige sessão") ficam respondidas pela forma como
+#211-#217 foram implementadas: qualquer usuário autenticado cria links
+para qualquer destino que passe pela política (não é restrito a
+apontar para uma task ou anexo específico — é um encurtador de URL de
+uso geral, escopado por dono), o ciclo de vida é revogação explícita
+(sem expiração automática por padrão — `ttl_seconds` é opcional por
+chamada), e a resolução (`GET /{code}`) é pública, exatamente como um
+encurtador de link precisa ser para ser útil (o link só serve a quem
+não tem sessão nesta API).
+
+### Backend do `cairn.Store` (issue #210, 15.A2): Redis escolhido — decisão levada ao usuário
+
+A alternativa (implementar `Store` sobre o PostgreSQL já existente,
+3 métodos, "uma tarde de trabalho" segundo a própria ADR-0008 do
+cairn) foi apresentada ao lado da opção Redis, com o custo de cada uma
+nomeado: Redis traz um contrato operacional real e novo para este
+projeto (AOF `appendfsync everysec`, réplica, `maxmemory-policy
+noeviction` verificado no startup, backup já exercitado, índice de
+banco dedicado — nenhum disso existe hoje neste projeto); PostgreSQL
+reusaria a infraestrutura já operacional (migrations, backup/restore)
+ao custo de sair do caminho testado pela própria lib. **Escolhido
+Redis.**
+
+**Esta PR não traz Redis.** O que ela entrega é o passo 1 do rollout de
+quatro passos que a própria issue #217 (15.A9) já define —
+`memstore.Store` atrás de uma flag, sem infraestrutura nova — porque é
+exatamente assim que a integração pôde ser implementada, testada e
+revisada sem antes decidir e provisionar Redis num projeto que hoje não
+tem nenhum. Trocar `memstore` por `redisstore` (o módulo oficial
+`github.com/JonasBorgesLM/cairn/redisstore`) é o passo 2, uma mudança
+própria e futura: acrescentar Redis ao `docker-compose.yml` e ao
+`k8s/`, estender `docs/RUNBOOK-BACKUP-RESTORE.md`, e satisfazer o
+contrato operacional da ADR-0008 antes de apontar `LINK_SHORTENING_ENABLED`
+para produção de verdade.
+
+### `ErrorEncoder` e a distinção 410-vs-404 (issue #213, 15.A5): nunca acionada pelas rotas construídas
+
+`docs/INTEGRATION.md` do cairn recomenda um `ErrorEncoder` que devolve
+`410` para uma requisição autenticada e `404` para uma anônima, quando
+um código resolve para um link expirado ou revogado — o dono aprende
+por que falhou, um scanner não aprende nada.
+
+**Nas quatro rotas que este projeto constrói, essa distinção nunca é
+alcançada — por desenho, não por omissão.** `Service.Revoke` (a única
+chamada autenticada que passa por `Resolve`) usa exatamente o padrão
+que `cairn/docs/integrations/task-api.md` documenta:
+`Resolve` primeiro, comparação de dono só depois. Um código
+expirado/revogado falha em `Resolve` **antes** da posse ser avaliada —
+então mesmo um chamador autenticado que não é dono do link recebe a
+mesma forma uniforme (`404`) que a rota pública já dá, exatamente para
+não vazar "este link de outra pessoa está revogado" a quem não é dono
+dele. `GET /{code}` (a rota pública) nunca é autenticada por desenho.
+Não sobra nenhum caminho onde "autenticado E dono confirmado" e "o link
+acabou de falhar em `Resolve`" coexistem.
+
+**Decisão: `Handler.handleServiceError` nunca opta pelo `410`** — todo
+erro da família "não resolve" (código desconhecido, inválido, expirado,
+revogado, e dono errado) colapsa no mesmo `404`, a mesma disciplina que
+`.claude/rules/go-domain-errors.md` já exige do resto do projeto para
+"recurso de outro dono". Se uma rota futura (ex.: "ver detalhes do meu
+link", que confirmaria posse *antes* de reportar por que ele não
+resolve mais) for adicionada, é ali que o ramo `410` passaria a ter uma
+chamada de verdade — não nas quatro rotas desta PR.
+
+### Política de destino e a fronteira de SSRF (issue #215, 15.A7)
+
+`policy.Default(ownDomains)` do próprio cairn já encadeia
+`BlockPrivateNetworks` (loopback, RFC 1918, link-local, CGNAT, IPv6 ULA,
+IPv4 mapeado, literais não-decimais) com `BlockOwnDomains` — o que
+faltava era só o host informar seu próprio domínio. `cmd/api/main.go`
+extrai o host de `LINK_PUBLIC_BASE_URL` (a mesma configuração que já
+monta a URL curta completa devolvida em `POST /v1/links`) e passa como
+o único domínio próprio bloqueado — sem essa checagem, o encurtador
+vira uma primitiva de lavagem de link contra a própria aplicação: um
+link "confiável" (mesmo domínio da API) que na verdade aponta de volta
+para dentro. Verificado com um controle negativo real: com
+`policy.Default(nil)` (lista vazia), a requisição de teste
+`TestIntegration_LinkShortening_RejectsOwnDomain` ainda falhava com
+`422`, mas com `reason: "host_resolution_failed"` (o domínio de teste
+fictício simplesmente não resolve) em vez de `reason: "own_domain"` —
+a asserção original checava só o código de status e teria passado por
+engano; corrigida para checar o `reason` específico antes de confiar no
+controle negativo.
+
+**Risco residual aceito, não resolvido:** a checagem de destino
+acontece no `create`. O DNS pode responder outra coisa no `resolve` —
+essa janela TOCTOU (T-05 no `THREAT-MODEL.md` do cairn) não fecha
+aqui, e a mitigação completa pertence a quem de fato segue o redirect
+(o navegador do visitante), não a este serviço.
+
+### Rollout (issue #217, 15.A9): uma flag, não quatro implantações separadas
+
+A issue descreve quatro passos operacionais (memstore atrás de flag →
+Redis em staging → criação liberada para um subconjunto → rota pública
+por último, com rate limit dimensionado pelo tráfego medido). Este
+projeto não tem múltiplos ambientes nem uma base de usuários real para
+"liberar para um subconjunto" — **os quatro passos descrevem como um
+operador ligaria a funcionalidade numa implantação real, não uma
+sequência de PRs de código**. Esta PR entrega o código inteiro (as
+quatro rotas, incluindo a pública) atrás de uma única flag
+(`LINK_SHORTENING_ENABLED`, `false` por padrão — ver
+`internal/config`), porque o código não fica menos correto por existir
+antes de ser ligado, e construir tudo de uma vez, revisado como uma
+unidade coesa, é mais barato do que quatro PRs que individualmente não
+compilam ou não testam sem a anterior já mergeada.
+
+**O que continua sendo um passo real, futuro e separado:** trocar
+`memstore` por `redisstore` (ver a seção do 15.A2 acima) — isso sim é
+infraestrutura nova que precisa da sua própria decisão de quando
+provisionar, não algo que faz sentido "já vir pronto atrás da flag"
+sem Redis existir em lugar nenhum do projeto ainda.
+
+### Nenhuma URL crua chega a um log (issue #216, 15.A8)
+
+Auditados os dois únicos pontos de log que `internal/link` introduz
+(`Handler.handleServiceError`'s branch de erro inesperado, e a falha de
+codificação de resposta em `writeJSON`) — nenhum constrói a mensagem a
+partir de `link.Dest`/da URL bruta da requisição; ambos logam apenas o
+próprio `error` (cujas mensagens, verificadas em `cairn/errors.go`,
+nunca embutem a URL) mais `request_id`/`method`/`path`. Nenhum `Hooks`
+do cairn (`OnCreate`, `OnReject`, `OnRetry`, `OnResolve`) está
+configurado nesta PR — sem hooks, não há um terceiro ponto de log a
+auditar. Fiar observabilidade de criação/rejeição em `crier`
+(`docs/INTEGRATION.md` §3 do cairn) fica para quando isso for
+realmente necessário, não construído por antecipação.
