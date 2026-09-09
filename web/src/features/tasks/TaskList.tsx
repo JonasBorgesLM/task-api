@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { apiFetch } from '../../api/client'
 import { classifyError } from '../../api/errors'
 import { Button } from '../../components/Button'
@@ -8,6 +9,7 @@ import {
   DownloadIcon,
   FilterIcon,
   PlusIcon,
+  PrinterIcon,
   RefreshIcon,
 } from '../../components/icons'
 import type { MenuItem } from '../../components/Menu'
@@ -26,7 +28,9 @@ import { useTasks } from './useTasks'
 
 const SKELETON_ROWS = 5
 
-const PRIORITY_LABELS: Record<Task['priority'], string> = {
+// Exported so ReportPage.tsx labels the same priority values the same
+// way, instead of a second copy of this map drifting from this one.
+export const PRIORITY_LABELS: Record<Task['priority'], string> = {
   low: 'Low',
   medium: 'Medium',
   high: 'High',
@@ -96,6 +100,7 @@ function filterLabel(
  * building its own.
  */
 export function TaskList() {
+  const navigate = useNavigate()
   const [statuses, setStatuses] = useState<Task['status'][]>(DEFAULT_STATUSES)
   const [priorities, setPriorities] = useState<Task['priority'][]>(ALL_PRIORITIES)
   // Joined here rather than inside useTasks: the hook needs a primitive
@@ -213,6 +218,18 @@ export function TaskList() {
     }
   }
 
+  // Opens the report route with the current filter carried in the URL
+  // (issue #246) — ReportPage does its own fetch from there rather than
+  // this component handing it data directly, so the report is a real,
+  // shareable/bookmarkable address, and reloading it re-fetches instead
+  // of showing whatever was on screen when the button was clicked.
+  function handlePrint() {
+    const params = new URLSearchParams()
+    for (const status of splitFilter(statusFilter)) params.append('status', status)
+    for (const priority of splitFilter(priorityFilter)) params.append('priority', priority)
+    navigate(`/report?${params.toString()}`)
+  }
+
   return (
     <div className={styles.container}>
       {successMessage && (
@@ -256,6 +273,11 @@ export function TaskList() {
         <Button variant="secondary" loading={exporting} onClick={() => void handleExport()}>
           <DownloadIcon />
           Export
+        </Button>
+
+        <Button variant="secondary" onClick={handlePrint}>
+          <PrinterIcon />
+          Print
         </Button>
 
         <Button onClick={() => setCreating(true)}>

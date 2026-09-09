@@ -9,8 +9,9 @@ import { RequireAuth } from './features/auth/RequireAuth'
 // Before this, a first-time visitor to /login downloaded TaskList, its
 // attachments UI, and every modal that only makes sense once a session
 // exists — none of which /login itself has any use for. SessionsPage
-// (issue #224) is its own chunk for the same reason: a visitor who never
-// opens "Manage sessions" never downloads it.
+// (issue #224) and ReportPage (issue #246) are each their own chunk for
+// the same reason: a visitor who never opens "Manage sessions" or
+// prints a report never downloads either.
 const AuthPages = lazy(() =>
   import('./features/auth/AuthPages').then((module) => ({ default: module.AuthPages })),
 )
@@ -19,6 +20,9 @@ const AuthenticatedHome = lazy(() =>
 )
 const SessionsPage = lazy(() =>
   import('./features/auth/SessionsPage').then((module) => ({ default: module.SessionsPage })),
+)
+const ReportPage = lazy(() =>
+  import('./features/tasks/ReportPage').then((module) => ({ default: module.ReportPage })),
 )
 
 /**
@@ -64,6 +68,14 @@ function App() {
           element={
             <Suspense fallback={<RouteFallback />}>
               <SessionsPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/report"
+          element={
+            <Suspense fallback={<RouteFallback />}>
+              <ReportPage />
             </Suspense>
           }
         />

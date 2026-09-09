@@ -219,3 +219,14 @@ export function DownloadIcon() {
     </svg>
   )
 }
+
+/** Printer body with paper above and below it — open the print report. */
+export function PrinterIcon() {
+  return (
+    <svg {...SHARED_PROPS}>
+      <path d="M4.5 5.5V2.75a.75.75 0 01.75-.75h5.5a.75.75 0 01.75.75V5.5" />
+      <rect x="2" y="5.5" width="12" height="5.5" rx="1" />
+      <path d="M4.5 10.5v2.75a.75.75 0 00.75.75h5.5a.75.75 0 00.75-.75V10.5" />
+    </svg>
+  )
+}

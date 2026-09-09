@@ -2251,3 +2251,60 @@ already settled" não precisou de uma linha nova).
 real, a resposta certa é um export assíncrono (gerado em background,
 baixado depois pronto) — issue nova, não um remendo neste teto, como a
 própria 15.F5 já nomeia.
+
+---
+
+## Relatório de impressão (issues #245/#246, 15.F7/15.F8): rota `/report`, não `@media print` na lista — decisão levada ao usuário
+
+**Alternativa rejeitada: `@media print` aplicado sobre `web/`'s lista de
+tasks já paginada.** `GET /v1/tasks` devolve no máximo `PAGE_SIZE` (10)
+tarefas por página — imprimir a tela tal como está mostraria só os
+primeiros dez itens, sem qualquer indicação de que existem mais. Um
+documento que mente por omissão é pior que nenhum documento, e quem
+imprime um relatório em geral o imprime para mostrar a outra pessoa —
+o próprio texto da issue #246.
+
+**Escolhida: uma rota `web/`-only, `/report`**, que busca o conjunto
+completo do filtro corrente (nunca janelado) e renderiza para leitura —
+sem menus, sem paginação, sem botões de ação por linha. Custa uma tela
+a mais, mas é a única das duas alternativas que produz um relatório de
+verdade.
+
+**Nenhuma rota nova no backend foi necessária.** `/report` busca via
+`GET /v1/tasks?status=…&priority=…` sem o parâmetro `limit` — o mesmo
+"limite ausente significa sem limite" que `/v1` já promete (ver
+`CLAUDE.md` § "An explicit limit above maxTaskListLimit…") e que
+`cmd/api/main.go`'s `deleteAccountCascade` já usa internamente. Isto é
+deliberadamente diferente de `GET /v1/tasks/export` (issue #239): o CSV
+tem um teto de linhas explícito porque sua resposta é servida como um
+único arquivo transmitido em fluxo sob o `WriteTimeout`; o relatório
+devolve a mesma página JSON que `GET /v1/tasks` sempre devolveu, só que
+sem `limit` — uma capacidade que já existia e já era usada em produção,
+não uma nova.
+
+**O filtro vive na URL** (`/report?status=…&priority=…`), não é passado
+como prop de `TaskList` para `ReportPage` — o endereço existe para ser
+impresso, favoritado ou recarregado sozinho, e essas três ações têm que
+reproduzir o mesmo relatório, não o que `TaskList` tinha em memória no
+momento do clique.
+
+**Cabeçalho do relatório mostra o filtro aplicado e quando foi
+gerado** (issue #245) — um documento impresso sem isso não é auditável
+um mês depois; ninguém sabe mais o que ele mostra. O timestamp é
+congelado uma única vez, no primeiro render (`useState(() => new
+Date())`), para que clicar em "Retry" após um erro não troque
+silenciosamente o que "Generated" diz.
+
+**Contraste em preto e branco para status/priority** (issue #245):
+essas duas colunas usam os mesmos tokens de cor da lista normal em
+tela, mas `@media print` neutraliza o fundo colorido e força a borda/
+texto para `--color-text-primary` — o rótulo de texto passa a carregar
+o significado sozinho, nunca a cor, já que configurações de "imprimir
+plano de fundo" variam por navegador e a conversão para tons de cinza
+não preserva contraste igualmente entre matizes.
+
+**Trade-off aceito:** uma segunda tela/rota, com sua própria busca de
+dados (não reaproveitando `useTasks`, cujo cache/paginação/ETag não têm
+sentido para uma busca única e completa) — mais código do que uma regra
+`@media print`, pelo preço de um relatório que efetivamente relata o
+conjunto inteiro.

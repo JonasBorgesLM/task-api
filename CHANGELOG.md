@@ -114,6 +114,16 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   um `<a href>` solto: precisa inspecionar a resposta antes de decidir
   entre entregar o arquivo ao navegador ou mostrar o erro pelo mesmo
   `classifyError` do resto do app.
+- `web/` ganha uma rota `/report` (issues #245/#246) — um relatório
+  para impressão do conjunto filtrado inteiro do chamador (nunca só a
+  página de 10 itens que a tela normal mostra), sem menus, paginação ou
+  botões de ação. Reusa `GET /v1/tasks` sem `limit` (o "ausente
+  significa sem limite" que `/v1` já promete), nenhuma rota nova no
+  backend. Cabeçalho mostra o filtro aplicado e quando foi gerado;
+  status/prioridade perdem a cor ao imprimir (`@media print`), sobrando
+  só o rótulo de texto e a borda. Botão "Print" ao lado de "Export" abre
+  a rota com o filtro corrente da tela. Ver `docs/DECISIONS.md` §
+  "Relatório de impressão".
 
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em
