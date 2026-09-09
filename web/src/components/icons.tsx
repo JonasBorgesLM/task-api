@@ -209,3 +209,13 @@ export function CircleIcon() {
     </svg>
   )
 }
+
+/** Arrow into a tray — export/download the current list as a file. */
+export function DownloadIcon() {
+  return (
+    <svg {...SHARED_PROPS}>
+      <path d="M8 2v7.5M5 7l3 3 3-3" />
+      <path d="M2.75 11v1.5a.75.75 0 00.75.75h9a.75.75 0 00.75-.75V11" />
+    </svg>
+  )
+}

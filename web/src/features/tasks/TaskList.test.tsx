@@ -18,7 +18,13 @@ function jsonResponse(status: number, body: unknown): Response {
   })
 }
 
-vi.mock('./useTasks', () => ({ useTasks: vi.fn() }))
+vi.mock('./useTasks', () => ({
+  useTasks: vi.fn(),
+  // Real implementation, not mocked: it's the pure "pending,done" ->
+  // ["pending", "done"] splitter handleExport reuses to build the same
+  // query string useTasks' own (mocked-away) fetch would have.
+  splitFilter: (value: string) => (value ? value.split(',').filter(Boolean) : []),
+}))
 vi.mock('../auth/useAuth', () => ({ useAuth: vi.fn() }))
 
 describe('TaskList.module.css', () => {
@@ -362,5 +368,88 @@ describe('TaskList', () => {
     await vi.waitFor(() => expect(addTaskLocally).toHaveBeenCalledWith(created))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(await screen.findByText('Task created.')).toBeInTheDocument()
+  })
+
+  describe('export', () => {
+    beforeEach(() => {
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock-url')
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      // A real click would have jsdom attempt navigation (it does not
+      // implement one) and log a distracting "not implemented" error;
+      // this test only needs to know the link the app built, never that
+      // jsdom completed a browser-level download.
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    })
+
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    it('fetches the current filter as CSV and hands the browser a download named from Content-Disposition', async () => {
+      const fetchMock = vi.mocked(fetch)
+      // A string body, not a Blob: jsdom's Blob polyfill isn't
+      // structurally compatible with Node's native Response
+      // constructor — see Preview.test.tsx's own comment on the same
+      // issue. response.blob() still produces a real, usable Blob.
+      fetchMock.mockResolvedValueOnce(
+        new Response('id,title\n1,Buy milk\n', {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/csv; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="tasks-2026-09-08.csv"',
+          },
+        }),
+      )
+      mockTasksResult({ status: 'success', tasks: [makeTask()] })
+      const user = userEvent.setup()
+      render(<TaskList />)
+
+      await user.click(screen.getByRole('button', { name: 'Export' }))
+
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+      const [url] = fetchMock.mock.calls[0]!
+      // Default filters: DEFAULT_STATUSES excludes "cancelled" (not all
+      // four, so it's sent explicitly); every priority is selected (all
+      // three, so the API's own "absent means no filter" applies and
+      // none is sent).
+      expect(String(url)).toBe(
+        'http://localhost:8080/v1/tasks/export?status=pending&status=in_progress&status=done',
+      )
+
+      await vi.waitFor(() => expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledOnce())
+      expect(URL.createObjectURL).toHaveBeenCalledOnce()
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
+    })
+
+    it('shows the server-provided message when the filter matches too many tasks to export', async () => {
+      const fetchMock = vi.mocked(fetch)
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(400, {
+          error: 'invalid input: 12000 tasks match this filter, more than the 10000-row export limit; narrow the filter',
+        }),
+      )
+      mockTasksResult({ status: 'success', tasks: [makeTask()] })
+      const user = userEvent.setup()
+      render(<TaskList />)
+
+      await user.click(screen.getByRole('button', { name: 'Export' }))
+
+      expect(
+        await screen.findByText(/more than the 10000-row export limit/),
+      ).toBeInTheDocument()
+      expect(URL.createObjectURL).not.toHaveBeenCalled()
+    })
+
+    it('shows a generic message for a failure with no actionable detail', async () => {
+      const fetchMock = vi.mocked(fetch)
+      fetchMock.mockResolvedValueOnce(jsonResponse(500, { error: 'internal server error' }))
+      mockTasksResult({ status: 'success', tasks: [makeTask()] })
+      const user = userEvent.setup()
+      render(<TaskList />)
+
+      await user.click(screen.getByRole('button', { name: 'Export' }))
+
+      expect(await screen.findByText('Could not export tasks. Please try again.')).toBeInTheDocument()
+    })
   })
 })

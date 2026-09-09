@@ -108,6 +108,12 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   qualquer linha ser transmitida, em vez de um arquivo que corta no meio
   e parece completo. Ver `docs/DECISIONS.md` § "Exportação CSV de
   tasks".
+- `web/`'s lista de tasks ganha um botão "Export" ao lado dos filtros
+  (issue #244) — baixa `GET /v1/tasks/export` com o filtro `status`/
+  `priority` correntemente aplicado na tela. Via `apiFetch` + blob, não
+  um `<a href>` solto: precisa inspecionar a resposta antes de decidir
+  entre entregar o arquivo ao navegador ou mostrar o erro pelo mesmo
+  `classifyError` do resto do app.
 
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em

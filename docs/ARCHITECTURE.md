@@ -260,6 +260,8 @@ cancelled        Y          N        N        -
 
 `internal/task/csv_export.go` owns the wire-format details: `sanitizeCSVCell` prefixes a leading single quote onto any title/description cell that would otherwise open with a character (`=`, `+`, `-`, `@`, tab, or CR) a spreadsheet reads as introducing a formula (CWE-1236) — verified with a manual negative control, not assumed correct from the diff. The handler writes and flushes one CSV row at a time directly to the `ResponseWriter` (via `http.Flusher` where the underlying writer supports it), so memory use stays proportional to one row rather than to the result set's size.
 
+`web/`'s "Export" button (issue #244, `TaskList.tsx`) calls this route with the list's currently applied `status`/`priority` filter and hands the response to the browser as a download. It goes through `apiFetch` and reads the response as a `Blob` rather than a plain `<a href>` — the request is a `GET` so it never touches the CSRF gate, but a bare link gives the app no chance to inspect the response before the browser acts on it, so a `400` (too many rows) would otherwise download as if it were the CSV itself instead of surfacing through the same `classifyError` every other action uses.
+
 ## Operational Behavior
 
 **Graceful shutdown.** On `SIGINT`/`SIGTERM`: the server stops accepting new connections immediately, lets in-flight requests finish (bounded by `HTTP_SHUTDOWN_TIMEOUT`), then closes the shared `*sql.DB` — in that order, so a request in flight is never cut off from its database connection mid-shutdown. If requests don't finish before the timeout, shutdown returns an error and the process exits non-zero; a clean shutdown logs `shutdown completed` and exits `0`.
