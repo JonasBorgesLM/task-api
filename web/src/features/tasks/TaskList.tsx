@@ -112,6 +112,8 @@ export function TaskList() {
     tasks,
     error,
     page,
+    totalPages,
+    total,
     hasNextPage,
     hasPreviousPage,
     isPaging,
@@ -268,7 +270,12 @@ export function TaskList() {
           />
         </div>
 
-        <TaskStats tasks={tasks} isFiltered={isNarrowed} />
+        <TaskStats
+          total={total}
+          statusFilter={statusFilter}
+          priorityFilter={priorityFilter}
+          isFiltered={isNarrowed}
+        />
 
         <Button variant="secondary" loading={exporting} onClick={() => void handleExport()}>
           <DownloadIcon />
@@ -343,11 +350,11 @@ export function TaskList() {
             ))}
           </ul>
 
-          {/* A page number and two directions, and nothing the API can't
-              tell this client: GET /v1/tasks returns no total, so there
-              is no "of 12" to render and no last-page jump to offer.
-              Next is enabled only when the extra row this page asked
-              for actually came back — see useTasks. */}
+          {/* Page N of M, from GET /v1/tasks's own X-Total-Count (issue
+              #237) — see useTasks.tsx. hasNextPage/totalPages are
+              derived from the total directly now, not from asking for
+              one extra row the way this used to work before that header
+              existed. */}
           {(hasPreviousPage || hasNextPage) && (
             <nav className={styles.pager} aria-label="Task pages">
               <Button
@@ -359,7 +366,7 @@ export function TaskList() {
                 Previous
               </Button>
               <span className={styles.pageNumber} aria-live="polite">
-                Page {page}
+                Page {page} of {totalPages}
               </span>
               <Button variant="secondary" onClick={nextPage} disabled={!hasNextPage || isPaging}>
                 Next

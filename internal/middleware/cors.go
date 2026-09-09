@@ -20,6 +20,21 @@ import (
 // sent.
 var corsAllowedHeaders = "Authorization, Content-Type, X-Request-Id, " + csrf.DefaultHeaderName
 
+// corsExposedHeaders lists response headers a cross-origin browser client
+// may read via fetch's Response.headers — anything not listed here is set
+// on the wire but invisible to that client's JavaScript, CORS's own
+// "safelisted response headers" restriction. X-Total-Count is issue
+// #237's pagination total (internal/task/handler.go's listTasks) and
+// ETag is the list/detail revalidation header (see
+// .claude/rules/go-http-handlers.md) — both are read directly by
+// web/src/features/tasks/useTasks.tsx, which only ever talks to this API
+// cross-origin (see docker-compose.yml's VITE_API_BASE_URL/
+// CORS_ALLOWED_ORIGINS pairing), so omitting either here silently breaks
+// that reader while every same-origin and server-to-server caller keeps
+// working — the gap that let this go unnoticed through Fase 15 until a
+// real cross-origin run surfaced it.
+const corsExposedHeaders = "X-Total-Count, ETag"
+
 const (
 	corsAllowedMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 	corsMaxAge         = "600"
@@ -106,6 +121,12 @@ func CORS(allowedOrigins []string) Middleware {
 			// combination of a wildcard origin with credentials allowed. If
 			// that ever changed, this header would have to change with it.
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+			// Meaningful only on the actual response (a preflight has no
+			// body/headers of its own for a browser to expose), but set
+			// unconditionally here the same way Allow-Credentials above is —
+			// harmless on a 204 and one less branch to keep in sync.
+			w.Header().Set("Access-Control-Expose-Headers", corsExposedHeaders)
 
 			if r.Method == http.MethodOptions {
 				w.Header().Set("Access-Control-Allow-Methods", corsAllowedMethods)

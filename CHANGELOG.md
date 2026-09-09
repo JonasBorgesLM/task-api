@@ -139,6 +139,19 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   Redis, não a implantação final. Ver `docs/DECISIONS.md` §
   "Encurtador de links".
 
+### Alterado
+- `web/`'s paginador e painel de contagens (issue #247/15.G1) deixam de
+  aproximar — o paginador dizia só "Página N", sem saber quantas
+  existiam, e o painel de contagens contava apenas as tasks da página
+  carregada, rotulado "N nesta página" para não sugerir um total que não
+  tinha como calcular. Agora que `GET /v1/tasks` expõe `X-Total-Count`
+  (issue #237) e `GET /v1/tasks/stats` existe (issue #238), o paginador
+  mostra "Página N de M" e o painel mostra o total real do conjunto
+  filtrado, com a distribuição por status/prioridade buscada de
+  `/v1/tasks/stats` só quando o painel é aberto pela primeira vez sob um
+  filtro — quem nunca abre o painel nunca paga por essa requisição
+  extra.
+
 ### Segurança
 - `GET /v1/tasks`'s `limit` rejeita valores acima de 100 com `400`, em
   vez de aceitar qualquer inteiro e montar o resultado inteiro em
@@ -208,6 +221,24 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   último. Sem erro, sem indicador — a tela simplesmente mentia até um
   recarregamento manual. `fetchPage` agora aborta a requisição anterior
   (`AbortController`) antes de iniciar uma nova, issue #235.
+- `X-Total-Count` e `ETag` — cabeçalhos que `GET /v1/tasks` já enviava
+  desde a issue #237 — nunca chegavam a um cliente browser
+  **cross-origin** (o próprio deployment que `docker-compose.yml`
+  documenta, frontend e API em origens diferentes ligadas por
+  `CORS_ALLOWED_ORIGINS`/`VITE_API_BASE_URL`): `Access-Control-Expose-
+  Headers` nunca foi enviado, e a restrição de "safelisted response
+  headers" do CORS torna qualquer cabeçalho de resposta não listado ali
+  invisível para `fetch`'s `Response.headers`. O total lido pelo
+  frontend caía silenciosamente para `0` e a revalidação por `ETag`
+  nunca dava cache-hit — sem erro de rede, sem exceção, só um número
+  errado na tela. `web/e2e/pagination.spec.ts` é a suíte que teria
+  pegado isso — um total lido como `0` desabilita "Next" numa página que
+  ainda deveria ter uma seguinte — mas é cross-origin por padrão só sob
+  o `CORS_ALLOWED_ORIGINS=http://localhost:4173` que
+  `playwright.config.ts` documenta, e não roda em CI; descoberto ao
+  verificar manualmente a issue #247/15.G1 (que passou a depender de ler
+  `X-Total-Count` de verdade) contra o backend numa origem diferente do
+  frontend. `internal/middleware/cors.go` agora expõe os dois.
 
 ## [1.5.0] — a definir na tag
 
