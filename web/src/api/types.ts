@@ -222,6 +222,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tasks/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Count the authenticated caller's tasks, grouped by status and priority
+         * @description Counts across the caller's entire filtered set — never just one page — grouped by status and, separately, by priority. Accepts the same `status`/`priority` query parameters as `GET /v1/tasks`, validated identically (an unrecognized value rejects the whole request with `400`, the same as listing does). `by_status` and `by_priority` always carry every `Status`/ `Priority` enum value, including at `0` — a caller never has to tell "no tasks in this group" apart from "this key is absent". `total` is the sum of `by_status`'s values (equivalently, of `by_priority`'s) and matches what `X-Total-Count` would report for `GET /v1/tasks` with the same filter.
+         */
+        get: operations["taskStats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/tasks/{id}": {
         parameters: {
             query?: never;
@@ -570,6 +590,32 @@ export interface components {
          * @enum {string}
          */
         Priority: "low" | "medium" | "high";
+        /** @description Body returned by `GET /v1/tasks/stats`. `by_status` and `by_priority` always carry every `Status`/`Priority` enum value, including at `0`. */
+        TaskStats: {
+            /** @example 9 */
+            total: number;
+            /**
+             * @example {
+             *       "pending": 3,
+             *       "in_progress": 1,
+             *       "done": 5,
+             *       "cancelled": 0
+             *     }
+             */
+            by_status: {
+                [key: string]: number;
+            };
+            /**
+             * @example {
+             *       "low": 2,
+             *       "medium": 4,
+             *       "high": 3
+             *     }
+             */
+            by_priority: {
+                [key: string]: number;
+            };
+        };
         /** @description The persisted representation of a task, as returned by every endpoint that returns a task body. Field order and JSON keys match the `json` struct tags on task.Task exactly (snake_case). The owning user's id is deliberately not included — every task a client can ever retrieve already belongs to it. */
         Task: {
             /**
@@ -837,6 +883,11 @@ export interface components {
          * @example "f47ac10b-58cc-4372-a567-0e02b2c3d479:3"
          */
         TaskETag: string;
+        /**
+         * @description Number of tasks matching the request's `status`/`priority` filter, independent of `limit`/`offset` — i.e. the total a client would see across every page, not the size of the page actually returned. Present on both `200` and `304` (set before the `ETag`/`If-None-Match` check is applied), since the total can change between two requests carrying the identical page `ETag` — a task added on a different page moves the total without moving this page's own rows. See `docs/DECISIONS.md` for why this is always computed rather than gated behind an opt-in parameter.
+         * @example 42
+         */
+        XTotalCount: number;
     };
     pathItems: never;
 }
@@ -1351,13 +1402,23 @@ export interface operations {
                 headers: {
                     "X-Request-Id": components["headers"]["XRequestID"];
                     ETag: components["headers"]["TaskETag"];
+                    "X-Total-Count": components["headers"]["XTotalCount"];
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["Task"][];
                 };
             };
-            304: components["responses"]["NotModified"];
+            /** @description The caller's `If-None-Match` names the current representation's `ETag` — nothing has changed, and the body is intentionally empty. `Cache-Control`, `ETag` and `X-Total-Count` are still sent, matching what the `200` would have carried — `X-Total-Count` in particular is set before the `ETag`/`If-None-Match` check, so a `304` never serves a stale total. */
+            304: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    ETag: components["headers"]["TaskETag"];
+                    "X-Total-Count": components["headers"]["XTotalCount"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description `limit`/`offset` is present but not a non-negative integer, or `status`/`priority` is present but not one of the values in their respective enum. */
             400: {
                 headers: {
@@ -1436,6 +1497,79 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    taskStats: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Only count tasks with this status. Follows the exact same repetition/OR-within, AND-across-fields rules as `GET /v1/tasks`'s `status` parameter.
+                 * @example [
+                 *       "pending",
+                 *       "in_progress"
+                 *     ]
+                 */
+                status?: components["schemas"]["Status"][];
+                /**
+                 * @description Only count tasks with this priority. Follows the exact same rules as `GET /v1/tasks`'s `priority` parameter.
+                 * @example [
+                 *       "high",
+                 *       "medium"
+                 *     ]
+                 */
+                priority?: components["schemas"]["Priority"][];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "total": 9,
+                     *       "by_status": {
+                     *         "pending": 3,
+                     *         "in_progress": 1,
+                     *         "done": 5,
+                     *         "cancelled": 0
+                     *       },
+                     *       "by_priority": {
+                     *         "low": 2,
+                     *         "medium": 4,
+                     *         "high": 3
+                     *       }
+                     *     }
+                     */
+                    "application/json": components["schemas"]["TaskStats"];
+                };
+            };
+            /** @description `status`/`priority` is present but not one of the values in their respective enum — the same rejection `GET /v1/tasks` applies to the identical parameters. */
+            400: {
+                headers: {
+                    "X-Request-Id": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "error": "invalid input: status must be one of pending, in_progress, done, cancelled"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalServerError"];
             503: components["responses"]["ServiceUnavailable"];

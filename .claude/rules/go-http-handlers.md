@@ -44,6 +44,20 @@ description: 'HTTP layer conventions: ServeMux only, /v1 mount, bounded bodies, 
 - Pagination (`limit`/`offset`) and ownership filtering are pushed into
   `Repository.FindAll` and into the SQL query. Never reintroduce "fetch
   everything, slice in Go" at `Service` or `Handler`.
+- `GET /tasks` sets `X-Total-Count` (the filtered total, from
+  `Repository.CountAll` — a `COUNT(*)` in the store, never `len()` of a
+  fetched page) **before** the ETag/`If-None-Match` check, so it is sent on
+  both a `200` and a `304`. The page's `ETag` only reflects the rows
+  actually returned, so it can stay identical across two requests where the
+  total changed (a task added on a different page) — moving this `Set`
+  after the `304` return would silently serve a stale total. See
+  `docs/DECISIONS.md` § "Total real na listagem".
+- `GET /tasks/stats` is registered as a literal path ahead of
+  `GET /tasks/{id}` for readability, but Go's `ServeMux` (1.22+) already
+  prefers a literal segment over a `{wildcard}` at the same position
+  regardless of registration order — don't "fix" a perceived ordering
+  hazard here, and don't add another literal segment under `/tasks/` without
+  checking it can't collide with a real task id in the way `{id}` expects.
 - An explicit `limit` above `maxTaskListLimit` (100) is `400`, checked in
   `parsePagination` before it ever reaches `Service`. An *absent* `limit`
   still means "no limit" — `docs/openapi.yaml` documents that, and changing

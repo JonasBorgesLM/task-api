@@ -38,11 +38,12 @@ const maxTaskListLimit = 100
 type taskService interface {
 	CreateTask(ctx context.Context, userID, title, description, priority string) (Task, error)
 	GetTask(ctx context.Context, userID, id string) (Task, error)
-	ListTasks(ctx context.Context, userID string, limit, offset int, statuses, priorities []string) ([]Task, error)
+	ListTasks(ctx context.Context, userID string, limit, offset int, statuses, priorities []string) (tasks []Task, total int, err error)
 	UpdateTask(ctx context.Context, userID, id, title, description, priority string) (Task, error)
 	DeleteTask(ctx context.Context, userID, id string) error
 	CompleteTask(ctx context.Context, userID, id string) (Task, error)
 	TransitionStatus(ctx context.Context, userID, id string, target Status) (Task, error)
+	TaskStats(ctx context.Context, userID string, statuses, priorities []string) (TaskStats, error)
 }
 
 // Handler exposes the task Service over HTTP.
@@ -66,6 +67,14 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, requireAuth middleware.Midd
 
 	mux.Handle("POST /tasks", protect(h.createTask))
 	mux.Handle("GET /tasks", protect(h.listTasks))
+	// /tasks/stats is a literal segment, not a task id — Go's ServeMux
+	// (1.22+) prefers a literal match over a {wildcard} at the same
+	// position regardless of registration order, so this can never be
+	// shadowed by GET /tasks/{id} below matching "stats" as an id.
+	// Confirmed directly: TestTaskStats_Handler_RoutedCorrectly drives
+	// this through the real mux rather than trusting the rule by
+	// reading it.
+	mux.Handle("GET /tasks/stats", protect(h.taskStats))
 	mux.Handle("GET /tasks/{id}", protect(h.getTask))
 	mux.Handle("PUT /tasks/{id}", protect(h.updateTask))
 	mux.Handle("PATCH /tasks/{id}/done", protect(h.completeTask))
@@ -150,7 +159,7 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 	// A single occurrence still arrives here as a one-element slice, so
 	// every caller written against the old single-value contract keeps
 	// working unchanged.
-	tasks, err := h.svc.ListTasks(r.Context(), userID, limit, offset, query["status"], query["priority"])
+	tasks, total, err := h.svc.ListTasks(r.Context(), userID, limit, offset, query["status"], query["priority"])
 	if err != nil {
 		h.handleServiceError(w, r, err)
 		return
@@ -161,6 +170,15 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 		tasks = make([]Task, 0)
 	}
 
+	// Set before the ETag/304 check, and therefore sent on both a 200
+	// and a 304 (issue #237): X-Total-Count reflects every task matching
+	// the filter, not just the page returned, so it can change between
+	// two requests that carry the exact same page ETag (a task added on
+	// a different page changes the total without changing this page's
+	// own rows). A 304 must not serve a stale total just because the
+	// page content itself didn't change.
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
+
 	etag := pageETag(tasks)
 	w.Header().Set("ETag", etag)
 	if ifNoneMatchHits(r, etag) {
@@ -169,6 +187,31 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, r, http.StatusOK, tasks)
+}
+
+// taskStatsResponse is the body GET /tasks/stats (issue #238) returns.
+// Field names match docs/openapi.yaml's TaskStats schema.
+type taskStatsResponse struct {
+	Total      int              `json:"total"`
+	ByStatus   map[Status]int   `json:"by_status"`
+	ByPriority map[Priority]int `json:"by_priority"`
+}
+
+// taskStats handles GET /tasks/stats — counts across the caller's
+// entire filtered set (never just the current page), respecting the
+// same status/priority query parameters GET /tasks itself accepts and
+// validating them identically.
+func (h *Handler) taskStats(w http.ResponseWriter, r *http.Request) {
+	userID, _ := middleware.UserIDFromContext(r.Context())
+	query := r.URL.Query()
+
+	stats, err := h.svc.TaskStats(r.Context(), userID, query["status"], query["priority"])
+	if err != nil {
+		h.handleServiceError(w, r, err)
+		return
+	}
+
+	h.writeJSON(w, r, http.StatusOK, taskStatsResponse(stats))
 }
 
 // parsePagination reads the optional "limit" and "offset" query

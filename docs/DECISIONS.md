@@ -2006,3 +2006,88 @@ uma segunda aba/link no cabeçalho (ver o próprio comentário de
 tratamento especial no frontend, pelo mesmo motivo do backend: a
 próxima chamada à API depois disso recebe `401` e cai no mesmo fluxo de
 `useAuth` que já trata uma sessão invalidada por qualquer outro motivo.
+
+---
+
+## Total real na listagem (issue #237, 15.E1) e `GET /tasks/stats` (issue #238, 15.E2): header aditivo, sempre calculado
+
+`GET /v1/tasks` sempre devolveu só a página pedida — sem `limit`/`offset`
+explícitos, "todas as tasks" já era a página inteira, mas com eles o
+chamador nunca sabia quantas linhas existiam além da página em mãos.
+A issue pedia explicitamente para medir o custo antes de decidir a forma
+da resposta, e as duas issues foram implementadas juntas porque #238
+("Depende de: 15.E1 (mesma decisão de forma de resposta)") reusa a mesma
+pergunta: adicionar um total nunca deve custar uma segunda leitura da
+tabela inteira em Go, tem que ser `COUNT(*)`/`GROUP BY` no próprio banco.
+
+**Forma escolhida: header `X-Total-Count`, não um envelope
+`{data, meta}`.** Um envelope muda o formato de toda resposta de
+`GET /v1/tasks` — quebra qualquer cliente que já faz
+`response.json()` esperando um array diretamente, incompatível com o
+contrato que `/v1` já promete (ver `docs/DECISIONS.md` § "A contract is
+mounted under /v1" em `CLAUDE.md`, e a regra de nunca reinterpretar o
+que `/v1` já significa). Um header é estritamente aditivo: nada que já
+lê o corpo da resposta precisa mudar, e um cliente que quer o total
+passa a ler um header a mais. `X-Total-Count` foi escolhido sobre um
+nome próprio porque é a convenção já estabelecida por várias APIs REST
+para exatamente este propósito.
+
+**Medição feita, mesma metodologia da issue #236 acima (volume
+sintético gerado direto via SQL, descartado depois):**
+
+1. **50 usuários × 5.000 tasks cada** (~350k linhas nesta rodada) —
+   `EXPLAIN ANALYZE` de `SELECT COUNT(*) FROM tasks WHERE user_id = $1
+   [AND status IN (…)] [AND priority IN (…)]` para um usuário típico
+   ficou entre **1ms e 3ms**, servido por Bitmap Heap Scan através de
+   `idx_tasks_user_id_created_at_id` — o mesmo índice que já sustenta
+   `FindAll`, e sem overhead perceptível de rodar como uma segunda
+   consulta ao lado dela.
+2. **Um único usuário com 100.000 tasks** — cenário deliberadamente
+   extremo, o mesmo usado em #236: aqui o usuário passa a dominar a
+   tabela inteira, o planner troca para Seq Scan, e o `COUNT(*)` sobe
+   para **~28ms**. Ainda assim, longe de um problema real — nenhum
+   timeout, nenhuma degradação visível numa única requisição.
+
+**Decisão: sempre incluir o total, em toda chamada — sem parâmetro
+opt-in.** Um parâmetro (`?include_total=true`) evitaria o custo para
+quem não precisa, mas o próprio custo medido (1-3ms no caso pesado
+realista) não justifica a complexidade extra de um comportamento
+condicional documentado, testado e mantido nos dois `Repository`. Se
+`status`/`priority` chegarem a crescer numa direção que mude esse
+número (ver os mesmos gatilhos já nomeados na issue #236 — busca
+textual, ordenação por outro campo), esta medição deve ser repetida
+antes de assumir que ainda vale.
+
+**`X-Total-Count` é calculado antes da checagem de `ETag`/
+`If-None-Match`, e por isso está presente tanto num `200` quanto num
+`304`.** O validador da listagem (`pageETag`) é derivado só das linhas
+da página atual — duas requisições podem carregar o mesmo `ETag` mesmo
+que o total tenha mudado (uma task nova em outra página não move as
+linhas desta, mas move o total). Calcular o header antes do `return`
+do `304` é o que impede essa resposta de servir um total desatualizado
+por engano; a ordem é fixada por
+`TestListTasks_Handler_XTotalCountSurvivesNotModified`, verificado por
+controle negativo (mover o `Set` do header para depois do `if
+ifNoneMatchHits` faz o teste falhar como esperado antes de restaurar a
+ordem correta).
+
+**`GET /v1/tasks/stats` reusa o mesmo filtro `status`/`priority` e a
+mesma validação de `GET /v1/tasks`**, via `buildTaskFilterWhere`
+compartilhado entre `FindAll`, `CountAll` e `CountByStatusAndPriority`
+(`internal/task/postgres_repository.go`) — extraído nesta mudança para
+que as três consultas nunca possam divergir silenciosamente sobre o que
+"casar com o filtro" significa. `by_status`/`by_priority` sempre
+incluem todo valor do enum, mesmo em `0`: `GROUP BY` só devolve grupos
+que existem, e um chamador não deveria ter que distinguir "zero tasks
+neste grupo" de "esta chave simplesmente não apareceu" — os dois
+`Repository` zeram os dois mapas antes de aplicar os resultados da
+consulta/da contagem em memória.
+
+**A rota `GET /tasks/stats` é registrada antes de `GET /tasks/{id}`**
+por legibilidade, mas isso não é o que a protege de ser interpretada
+como um id de task: o `ServeMux` do Go 1.22+ já prefere um segmento
+literal (`stats`) sobre um `{wildcard}` na mesma posição,
+independentemente da ordem de registro. `TestTaskStats_Handler_RoutedCorrectly`
+prova isso na prática, passando pelo `http.ServeMux` real (não chamando
+o handler diretamente) e confirmando que a rota nunca cai em `getTask`
+tratando `"stats"` como um id.

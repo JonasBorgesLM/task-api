@@ -857,6 +857,8 @@ paths:
               $ref: '#/components/headers/XRequestID'
             ETag:
               $ref: '#/components/headers/TaskETag'
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
           content:
             application/json:
               schema:
@@ -878,7 +880,21 @@ paths:
                   summary: No tasks exist
                   value: []
         '304':
-          $ref: '#/components/responses/NotModified'
+          description: >
+            The caller's `If-None-Match` names the current
+            representation's `ETag` — nothing has changed, and the body
+            is intentionally empty. `Cache-Control`, `ETag` and
+            `X-Total-Count` are still sent, matching what the `200`
+            would have carried — `X-Total-Count` in particular is set
+            before the `ETag`/`If-None-Match` check, so a `304` never
+            serves a stale total.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+            ETag:
+              $ref: '#/components/headers/TaskETag'
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
         '400':
           description: >
             `limit`/`offset` is present but not a non-negative integer,
@@ -905,6 +921,95 @@ paths:
                     answers a different question than the one asked.
                   value:
                     error: "invalid input: status must be one of pending, in_progress, done, cancelled"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/tasks/stats:
+    get:
+      tags: [Tasks]
+      operationId: taskStats
+      summary: Count the authenticated caller's tasks, grouped by status and priority
+      description: >
+        Counts across the caller's entire filtered set — never just one
+        page — grouped by status and, separately, by priority. Accepts
+        the same `status`/`priority` query parameters as `GET
+        /v1/tasks`, validated identically (an unrecognized value rejects
+        the whole request with `400`, the same as listing does).
+        `by_status` and `by_priority` always carry every `Status`/
+        `Priority` enum value, including at `0` — a caller never has to
+        tell "no tasks in this group" apart from "this key is absent".
+        `total` is the sum of `by_status`'s values (equivalently, of
+        `by_priority`'s) and matches what `X-Total-Count` would report
+        for `GET /v1/tasks` with the same filter.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >
+            Only count tasks with this status. Follows the exact same
+            repetition/OR-within, AND-across-fields rules as `GET
+            /v1/tasks`'s `status` parameter.
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/Status'
+          style: form
+          explode: true
+          example: [pending, in_progress]
+        - name: priority
+          in: query
+          required: false
+          description: >
+            Only count tasks with this priority. Follows the exact same
+            rules as `GET /v1/tasks`'s `priority` parameter.
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/Priority'
+          style: form
+          explode: true
+          example: [high, medium]
+      responses:
+        '200':
+          description: Success.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskStats'
+              example:
+                total: 9
+                by_status:
+                  pending: 3
+                  in_progress: 1
+                  done: 5
+                  cancelled: 0
+                by_priority:
+                  low: 2
+                  medium: 4
+                  high: 3
+        '400':
+          description: >
+            `status`/`priority` is present but not one of the values in
+            their respective enum — the same rejection `GET /v1/tasks`
+            applies to the identical parameters.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "invalid input: status must be one of pending, in_progress, done, cancelled"
         '401':
           $ref: '#/components/responses/Unauthorized'
         '429':
@@ -1771,6 +1876,23 @@ components:
         type: string
       example: '"f47ac10b-58cc-4372-a567-0e02b2c3d479:3"'
 
+    XTotalCount:
+      description: >
+        Number of tasks matching the request's `status`/`priority`
+        filter, independent of `limit`/`offset` — i.e. the total a
+        client would see across every page, not the size of the page
+        actually returned. Present on both `200` and `304` (set before
+        the `ETag`/`If-None-Match` check is applied), since the total
+        can change between two requests carrying the identical page
+        `ETag` — a task added on a different page moves the total
+        without moving this page's own rows. See `docs/DECISIONS.md`
+        for why this is always computed rather than gated behind an
+        opt-in parameter.
+      schema:
+        type: integer
+        minimum: 0
+      example: 42
+
   schemas:
     HealthResponse:
       type: object
@@ -2022,6 +2144,41 @@ components:
       type: string
       description: How urgently a task should be worked on. No transition rules — settable to any value at any time.
       enum: [low, medium, high]
+
+    TaskStats:
+      type: object
+      description: >
+        Body returned by `GET /v1/tasks/stats`. `by_status` and
+        `by_priority` always carry every `Status`/`Priority` enum value,
+        including at `0`.
+      properties:
+        total:
+          type: integer
+          minimum: 0
+          example: 9
+        by_status:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+          example:
+            pending: 3
+            in_progress: 1
+            done: 5
+            cancelled: 0
+        by_priority:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+          example:
+            low: 2
+            medium: 4
+            high: 3
+      required:
+        - total
+        - by_status
+        - by_priority
 
     Task:
       type: object

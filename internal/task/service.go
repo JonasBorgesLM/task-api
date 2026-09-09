@@ -196,22 +196,77 @@ func (s *Service) GetTask(ctx context.Context, userID, id string) (Task, error) 
 // apply ORDER BY/LIMIT/OFFSET in the query instead of fetching every row
 // into the process on every call just to discard most of them. The
 // status/priority filters follow the same reasoning — see FindAll.
-func (s *Service) ListTasks(ctx context.Context, userID string, limit, offset int, statuses, priorities []string) ([]Task, error) {
+//
+// total is how many tasks match statuses/priorities across the caller's
+// *entire* set, not just the page returned — GET /v1/tasks' X-Total-Count
+// header (issue #237). A second query (Repository.CountAll), not derived
+// from len(tasks): the page can be shorter than the full match count for
+// every reason pagination exists at all. See docs/DECISIONS.md § "Total
+// real na listagem" for why a second query on every call was measured
+// and judged cheap enough to always run, rather than gating it behind an
+// opt-in parameter.
+func (s *Service) ListTasks(ctx context.Context, userID string, limit, offset int, statuses, priorities []string) (tasks []Task, total int, err error) {
 	st, err := validateStatusFilters(statuses)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	p, err := validatePriorityFilters(priorities)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	tasks, err := s.repo.FindAll(ctx, userID, limit, offset, st, p)
+	tasks, err = s.repo.FindAll(ctx, userID, limit, offset, st, p)
 	if err != nil {
-		return nil, fmt.Errorf("list tasks: %w", err)
+		return nil, 0, fmt.Errorf("list tasks: %w", err)
 	}
 
-	return tasks, nil
+	total, err = s.repo.CountAll(ctx, userID, st, p)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list tasks: count: %w", err)
+	}
+
+	return tasks, total, nil
+}
+
+// TaskStats is what GET /v1/tasks/stats (issue #238) returns: counts
+// over userID's *entire* filtered set, grouped by status and separately
+// by priority. Total is the sum of ByStatus's values (every task falls
+// into exactly one status), computed here rather than with a third
+// query — the two are consistent by construction, not by coincidence.
+type TaskStats struct {
+	Total      int
+	ByStatus   map[Status]int
+	ByPriority map[Priority]int
+}
+
+// TaskStats computes userID's task counts, respecting the same
+// status/priority filters GET /v1/tasks itself accepts — the same
+// validation ListTasks applies, so an unrecognized value is rejected
+// identically on both routes. Grouping happens in Repository
+// (GROUP BY in postgresRepository), never by fetching every matching
+// row to tally in Go — see Repository.CountByStatusAndPriority's doc
+// comment.
+func (s *Service) TaskStats(ctx context.Context, userID string, statuses, priorities []string) (TaskStats, error) {
+	st, err := validateStatusFilters(statuses)
+	if err != nil {
+		return TaskStats{}, err
+	}
+	p, err := validatePriorityFilters(priorities)
+	if err != nil {
+		return TaskStats{}, err
+	}
+
+	byStatus, byPriority, err := s.repo.CountByStatusAndPriority(ctx, userID, st, p)
+	if err != nil {
+		return TaskStats{}, fmt.Errorf("task stats: %w", err)
+	}
+
+	total := 0
+	for _, count := range byStatus {
+		total += count
+	}
+
+	return TaskStats{Total: total, ByStatus: byStatus, ByPriority: byPriority}, nil
 }
 
 // UpdateTask updates the title, description and (optionally) priority of

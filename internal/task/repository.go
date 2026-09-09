@@ -53,4 +53,21 @@ type Repository interface {
 	FindAll(ctx context.Context, userID string, limit, offset int, statuses []Status, priorities []Priority) ([]Task, error)
 	Update(ctx context.Context, task Task) error
 	Delete(ctx context.Context, id, userID string) error
+
+	// CountAll returns how many tasks match userID/statuses/priorities —
+	// the same filter FindAll applies, without the limit/offset window.
+	// Backs GET /v1/tasks' X-Total-Count header (issue #237). Computed
+	// in the store itself (COUNT(*) in postgresRepository), never by
+	// fetching every matching row just to len() it in Go.
+	CountAll(ctx context.Context, userID string, statuses []Status, priorities []Priority) (int, error)
+
+	// CountByStatusAndPriority returns, for userID's tasks matching
+	// statuses/priorities, a count grouped by status and a separate
+	// count grouped by priority — GET /v1/tasks/stats (issue #238).
+	// Every Status and every Priority value is present in its
+	// respective map, including at zero: a caller must never have to
+	// tell "zero tasks in this group" apart from "this key is simply
+	// absent". Computed as GROUP BY in the store itself, never
+	// fetch-then-tally in Go.
+	CountByStatusAndPriority(ctx context.Context, userID string, statuses []Status, priorities []Priority) (byStatus map[Status]int, byPriority map[Priority]int, err error)
 }

@@ -435,6 +435,179 @@ func TestPostgres_FindAll_FiltersByStatusAndPriority(t *testing.T) {
 	}
 }
 
+// TestPostgres_CountAll_MatchesFindAllFiltering is the SQL half of
+// memory_repository_test.go's equivalent test — verified against a real
+// COUNT(*) query and buildTaskFilterWhere, not the in-memory store's own
+// filtering logic. Same seed and cases as
+// TestPostgres_FindAll_FiltersByStatusAndPriority, so a drift between
+// FindAll and CountAll's WHERE semantics shows up here.
+func TestPostgres_CountAll_MatchesFindAllFiltering(t *testing.T) {
+	repo, _, userID := newPostgresTestRepo(t)
+
+	seed := []struct {
+		title    string
+		status   Status
+		priority Priority
+	}{
+		{"1", StatusPending, PriorityLow},
+		{"2", StatusPending, PriorityHigh},
+		{"3", StatusDone, PriorityLow},
+		{"4", StatusDone, PriorityHigh},
+	}
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	for i, s := range seed {
+		task := newPostgresTestTask(t, userID, s.title)
+		task.Status = s.status
+		task.Priority = s.priority
+		task.CreatedAt = base.Add(time.Duration(i) * time.Second)
+		task.UpdatedAt = task.CreatedAt
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name       string
+		statuses   []Status
+		priorities []Priority
+		wantCount  int
+	}{
+		{"no filter", nil, nil, 4},
+		{"status only", []Status{StatusDone}, nil, 2},
+		{"priority only", nil, []Priority{PriorityHigh}, 2},
+		{"status and priority combined (AND)", []Status{StatusDone}, []Priority{PriorityHigh}, 1},
+		{"two statuses (OR)", []Status{StatusPending, StatusDone}, nil, 4},
+		{"two priorities (OR)", nil, []Priority{PriorityLow, PriorityHigh}, 4},
+		{
+			"several of each: OR within, AND across",
+			[]Status{StatusPending, StatusDone},
+			[]Priority{PriorityHigh},
+			2,
+		},
+		{"filter matches nothing", []Status{StatusCancelled}, nil, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repo.CountAll(context.Background(), userID, tc.statuses, tc.priorities)
+			if err != nil {
+				t.Fatalf("CountAll() unexpected error: %v", err)
+			}
+			if got != tc.wantCount {
+				t.Errorf("CountAll() = %d, want %d", got, tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestPostgres_CountAll_ScopedToUser(t *testing.T) {
+	repo, db, userID := newPostgresTestRepo(t)
+	// createTestUser directly, not a second newPostgresTestRepo call:
+	// that helper TRUNCATEs tasks/users on every call, which would wipe
+	// out userID and anything created for it above.
+	otherUserID := createTestUser(t, db)
+
+	if err := repo.Create(context.Background(), newPostgresTestTask(t, userID, "Mine")); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+	if err := repo.Create(context.Background(), newPostgresTestTask(t, otherUserID, "Someone else's")); err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	got, err := repo.CountAll(context.Background(), userID, nil, nil)
+	if err != nil {
+		t.Fatalf("CountAll() unexpected error: %v", err)
+	}
+	if got != 1 {
+		t.Errorf("CountAll() = %d, want 1 (must not count another user's task)", got)
+	}
+}
+
+// TestPostgres_CountByStatusAndPriority_GroupsCorrectly is the SQL half
+// of memory_repository_test.go's equivalent test — every Status and
+// every Priority must be present in its map even at zero, the same
+// contract Repository's doc comment states regardless of backend.
+func TestPostgres_CountByStatusAndPriority_GroupsCorrectly(t *testing.T) {
+	repo, _, userID := newPostgresTestRepo(t)
+
+	seed := []struct {
+		title    string
+		status   Status
+		priority Priority
+	}{
+		{"1", StatusPending, PriorityHigh},
+		{"2", StatusPending, PriorityHigh},
+		{"3", StatusDone, PriorityHigh},
+	}
+	for _, s := range seed {
+		task := newPostgresTestTask(t, userID, s.title)
+		task.Status = s.status
+		task.Priority = s.priority
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	byStatus, byPriority, err := repo.CountByStatusAndPriority(context.Background(), userID, nil, nil)
+	if err != nil {
+		t.Fatalf("CountByStatusAndPriority() unexpected error: %v", err)
+	}
+
+	wantByStatus := map[Status]int{
+		StatusPending:    2,
+		StatusInProgress: 0,
+		StatusDone:       1,
+		StatusCancelled:  0,
+	}
+	for status, want := range wantByStatus {
+		if got := byStatus[status]; got != want {
+			t.Errorf("byStatus[%q] = %d, want %d", status, got, want)
+		}
+	}
+	if len(byStatus) != len(wantByStatus) {
+		t.Errorf("byStatus has %d keys, want %d (every status must be present, none absent)", len(byStatus), len(wantByStatus))
+	}
+
+	wantByPriority := map[Priority]int{
+		PriorityLow:    0,
+		PriorityMedium: 0,
+		PriorityHigh:   3,
+	}
+	for priority, want := range wantByPriority {
+		if got := byPriority[priority]; got != want {
+			t.Errorf("byPriority[%q] = %d, want %d", priority, got, want)
+		}
+	}
+	if len(byPriority) != len(wantByPriority) {
+		t.Errorf("byPriority has %d keys, want %d (every priority must be present, none absent)", len(byPriority), len(wantByPriority))
+	}
+}
+
+func TestPostgres_CountByStatusAndPriority_RespectsFilter(t *testing.T) {
+	repo, _, userID := newPostgresTestRepo(t)
+
+	pending := newPostgresTestTask(t, userID, "Pending high")
+	pending.Status, pending.Priority = StatusPending, PriorityHigh
+	done := newPostgresTestTask(t, userID, "Done low")
+	done.Status, done.Priority = StatusDone, PriorityLow
+	for _, task := range []Task{pending, done} {
+		if err := repo.Create(context.Background(), task); err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+	}
+
+	byStatus, byPriority, err := repo.CountByStatusAndPriority(context.Background(), userID, nil, []Priority{PriorityHigh})
+	if err != nil {
+		t.Fatalf("CountByStatusAndPriority() unexpected error: %v", err)
+	}
+	if byStatus[StatusPending] != 1 || byStatus[StatusDone] != 0 {
+		t.Errorf("byStatus = %+v, want pending=1 done=0 (priority filter should exclude the done/low task)", byStatus)
+	}
+	if byPriority[PriorityHigh] != 1 || byPriority[PriorityLow] != 0 {
+		t.Errorf("byPriority = %+v, want high=1 low=0", byPriority)
+	}
+}
+
 func TestPostgres_Update(t *testing.T) {
 	repo, _, userID := newPostgresTestRepo(t)
 	task := newPostgresTestTask(t, userID, "Original title")
