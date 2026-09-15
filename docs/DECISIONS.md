@@ -2616,3 +2616,50 @@ casos negativos falharem, incluindo o 22P02 explícito; o `wrapDBError`
 neutralizado faz o teste de classificação de ponta a ponta (contra
 PostgreSQL real, via `DBCallTimeout` esgotado) falhar. Os dois restaurados
 e confirmados idênticos byte a byte ao original.
+
+---
+
+## Adoção do bastion (issue #280, 16.B1): só no ramo S3
+
+O bastion (v0.2.1) foi avaliado contra as três dependências de saída deste
+serviço. Custo de entrada: zero dependências, Go puro, um módulo a mais no
+grafo, nenhum transitivo — passa o único portão que o `CLAUDE.md` impõe a
+uma dependência nova (binário estático em `scratch` continua possível).
+
+**Três veredictos, não um — e o "não" ao crier é decisão tanto quanto os
+dois "sim":**
+
+- **S3/MinIO — adotar.** Dependência opcional (sem
+  `ATTACHMENT_S3_ENDPOINT` as rotas de anexo nem são registradas), isolada
+  do resto da API, com uma única sede de construção
+  (`buildBlobStore`, `cmd/api/main.go`). Um decorador entra ali sem que
+  `Service`, `Handler` ou a interface `BlobStore` mudem — ver
+  `internal/attachment/s3_breaker.go`.
+- **PostgreSQL — condicional, e não agora (fica para 16.C1).** Com uma
+  réplica, se o banco caiu a API está fora de qualquer jeito e o breaker
+  só trocaria `500` por `503`. O ganho real seria outro — esgotamento de
+  pool — e isso precisa ser medido antes de valer a pena, não assumido.
+- **crier/OTLP — não adotar.** `otlp.New` e `core.New` não fazem I/O de
+  rede; a exportação acontece nas goroutines do próprio dispatcher, e
+  `crierTeeHandler` descarta o erro do crier e devolve o do handler
+  embrulhado (`cmd/api/crier.go`). O crier é espelho, nunca portão — o
+  modo de falha que um breaker existe para prevenir não tem como ocorrer
+  aqui.
+
+**A restrição que fecha a decisão: embrulhar só o ramo S3.**
+`fsBlobStore` é disco local — sem rede, sem falha em cascata a prevenir.
+Um breaker ali só adicionaria um modo de falha a um caminho que não tem
+nenhum. O decorador (`attachment.NewBreakerBlobStore`) é aplicado ao
+construir o store S3 dentro de `buildBlobStore`, nunca à interface
+`BlobStore` em geral.
+
+**A limitação aceita conscientemente, não descoberta depois:**
+`BlobStore.Open` devolve um `io.ReadSeekCloser` — um handle vivo. O
+breaker cobre o `StatObject` que prova que o objeto existe e o
+`GetObject` (preguiçoso, sem I/O) que abre o handle. Todo `Read` que o
+`Handler` faz depois, streamando via `http.ServeContent`, acontece **fora**
+da chamada breada — a mesma razão pela qual o deadline de saída também não
+alcança esses bytes (ver "Deadline de saída" acima). Um S3 que aceita a
+abertura e trava no meio do stream é invisível para o breaker. Fechar essa
+lacuna significaria limitar o download em si, que é exatamente o erro que
+o próprio `s3BlobStore.Open` já rejeita.
