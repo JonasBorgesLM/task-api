@@ -2739,3 +2739,60 @@ sonda de half-open a cada `openTimeout` é uma forma razoável de perguntar
 "já trocaram a credencial?". Registrado aqui para que ninguém tente
 "consertar" isso depois: não há checagem de subida capaz de cobrir uma
 falha que só existe depois da subida.
+
+---
+
+## Counts() no /debug/vars, não no readiness (issue #284, 16.B5)
+
+Com o breaker da 16.B2, `Breaker.Counts()` passa a existir para os dois
+breakers de anexo e responde exatamente o que faltava — estado, falhas
+consecutivas contra o limiar, há quanto tempo o circuito está aberto. A
+tentação é expor isso em `GET /health/ready`. É errado nas duas
+topologias, e este projeto já tomou essa decisão uma vez, para o crier
+("um backend de log inacessível não impede a API de atender ninguém",
+seção crier + SigNoz acima) — aqui vale por um motivo ainda mais forte:
+anexos são dependência opcional cujas rotas já degradam sozinhas sem
+nenhum breaker envolvido.
+
+- **Com uma réplica** (a topologia registrada neste documento), reportar
+  not-ready tira o único pod. Uma falha parcial — anexos fora, tasks e
+  auth funcionando — vira indisponibilidade total.
+- **Com N réplicas contra o mesmo S3**, os breakers abrem mais ou menos
+  juntos, todos reportam not-ready mais ou menos juntos, e o
+  orquestrador não tem para onde mandar tráfego. Mesmo resultado, caminho
+  mais longo.
+
+Circuito aberto é falha **tratada** — tirar o pod de rotação por causa
+dele inverteria a prioridade justamente na dependência que o breaker já
+está degradando com elegância. `GET /health/ready` continua checando só o
+banco, sem nenhuma mudança.
+
+**Onde vai, então: `attachment_s3_breaker` e `attachment_s3_list_breaker`
+em `/debug/vars`** (`cmd/api/attachment_breaker.go`), publicados uma
+única vez por processo com o mesmo padrão `sync.Once` +
+`atomic.Pointer` que `publishCrierExpvarOnce` já usa — necessário pela
+mesma razão: `newServer` roda uma vez por `*testing.T` na suíte deste
+pacote, e `expvar.Publish` entra em pânico numa segunda chamada com o
+mesmo nome. Um breaker ausente (anexos desligados, ou backend em disco)
+reporta `{"state":"disabled"}`, não um erro nem um valor zerado
+ambíguo.
+
+**O detalhe que já custou caro uma vez, aplicado de novo aqui:**
+`Counts.State` é `bastion.State`, um tipo definido sobre `int` — o mesmo
+tipo que `crierAttrValue` (`cmd/api/crier.go`) precisa desviar
+explicitamente para não virar um marcador "unsupported value type" opaco
+no SigNoz (issue #81 do bastion). `attachmentBreakerSnapshot` passa
+`c.State.String()`, nunca o valor bruto, para o JSON de `/debug/vars`; o
+hook `OnStateChange` faz o mesmo antes de logar. `OnCall` complementa a
+transição com o erro que a causou — `StateChangeEvent` do bastion não
+carrega erro, só a transição em si, então o log de cada chamada contada
+como falha (`ev.Counted && ev.Err != nil`) é o que deixa "S3 caiu"
+distinguível de "credencial errada" ao lado da linha de transição, sem
+pedir ao bastion para carregar algo que ele deliberadamente não carrega.
+
+**Não verificado nesta sessão: a aparência real no SigNoz.** O ambiente
+de desenvolvimento não tem um coletor OTLP vivo para confirmar
+visualmente que os campos chegam intactos — a mesma limitação que já
+valia para a seção "crier + SigNoz" acima. O que está verificado é que
+`crierAttrValue`/`attachmentBreakerSnapshot` produzem a string correta
+antes de qualquer coisa sair deste processo.
