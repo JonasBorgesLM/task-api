@@ -34,3 +34,18 @@ var ErrInvalidInput = errors.New("invalid input")
 // worth retrying, once the dependency recovers. See
 // docs/DECISIONS.md § "Classificação positiva de erro de infraestrutura".
 var ErrDependencyUnavailable = errors.New("dependency unavailable")
+
+// ErrUnavailable is returned by a BlobStore wrapped with a circuit
+// breaker (see s3_breaker.go) when the breaker itself refuses a call —
+// the circuit is open, or half-open has already admitted its allowance
+// of probes. The wrapped operation was never invoked in either case.
+//
+// Distinct from ErrDependencyUnavailable on purpose: that sentinel means
+// "the call was attempted and the store told us it is unhealthy",
+// straight from one failed round trip. This one means "the breaker, from
+// a run of prior evidence, already knows better than to try" — and it is
+// the only case where the correct recovery moment is knowable in
+// advance, which is why Handler answers it with a 503 carrying
+// Retry-After rather than a bare one. See docs/DECISIONS.md §
+// "ErrUnavailable e 503 com Retry-After".
+var ErrUnavailable = errors.New("attachment store unavailable")

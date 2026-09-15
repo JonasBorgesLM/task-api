@@ -2663,3 +2663,42 @@ alcança esses bytes (ver "Deadline de saída" acima). Um S3 que aceita a
 abertura e trava no meio do stream é invisível para o breaker. Fechar essa
 lacuna significaria limitar o download em si, que é exatamente o erro que
 o próprio `s3BlobStore.Open` já rejeita.
+
+---
+
+## ErrUnavailable e 503 com Retry-After (issue #282, 16.B3)
+
+Um `bastion.ErrOpenState` ou `bastion.ErrTooManyRequests` vindo do
+decorador cairia, sem mais nada, no `default:` de `handleServiceError` —
+`500`, quando o `REQUIREMENTS.md` do próprio bastion (§5.1) já diz por que
+isso é errado: "um 500 diz ao chamador para desistir quando deveria dizer
+para voltar". São dois sentinelas, não um — esquecer
+`ErrTooManyRequests` deixaria um `500` raro, só visível na janela de
+half-open, e por isso o mais difícil de reproduzir.
+
+**A tradução acontece na fronteira, não no Handler.** `CLAUDE.md` já
+proíbe `handleServiceError` de ganhar um ramo que conheça o que está atrás
+do `Repository`; ensinar bastion ao `Handler` seria a mesma violação com
+outro nome. `s3_breaker.go`'s `translateBreakerError` embrulha os dois
+sentinelas do bastion num `ErrUnavailable` — sentinela próprio do pacote,
+no mesmo formato de `ErrNotFound`/`ErrDependencyUnavailable` — antes de
+cruzar para fora do arquivo. `unavailableError` não tem `Unwrap`: só
+`Is(ErrUnavailable)`, de propósito, para que `bastion.ErrOpenState` nunca
+seja alcançável por `errors.Is`/`errors.As` de fora deste arquivo, nem por
+acidente.
+
+**Por que `ErrUnavailable` é distinto de `ErrDependencyUnavailable`
+(issue #278).** Os dois viram `503`, mas por uma razão diferente cada um:
+`ErrDependencyUnavailable` significa "a chamada foi tentada e a
+dependência respondeu mal, uma vez" — não há como saber quando vai
+melhorar, daí nenhum `Retry-After` (ver o parêntese ao fim da seção
+"Classificação positiva" acima). `ErrUnavailable` significa "o breaker, a
+partir de um histórico de evidência, já sabe que não vale tentar" — e
+esse é exatamente o caso em que o momento de recuperação **é** conhecido
+de antemão: o `openTimeout` do próprio breaker. `Retry-After` carrega
+esse valor (`s3BreakerOpenTimeout`, 30s — uma única constante, para que o
+número no header e o timeout real do breaker nunca possam divergir), lido
+pelo `Handler` via `errors.As` contra
+`interface{ RetryAfter() time.Duration }`, sem nunca importar bastion —
+`cmd/api/boundary_test.go` garante isso estruturalmente, não só por
+convenção.
