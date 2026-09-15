@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -41,7 +42,8 @@ const postgreSQLUniqueViolation = "23505"
 // a behavioral one — Service's own ordering/validation is unaffected
 // either way.
 type postgresRepository struct {
-	db *sql.DB
+	db          *sql.DB
+	callTimeout time.Duration
 }
 
 // NewPostgresRepository returns a new PostgreSQL-backed Repository using
@@ -51,8 +53,27 @@ type postgresRepository struct {
 // opens or closes it. NewPostgresRepository does not ping db or run
 // migrations; callers that need either must do so explicitly (see
 // RunMigrations) before serving traffic.
-func NewPostgresRepository(db *sql.DB) Repository {
-	return &postgresRepository{db: db}
+func NewPostgresRepository(db *sql.DB, callTimeout time.Duration) Repository {
+	return &postgresRepository{db: db, callTimeout: callTimeout}
+}
+
+// withTimeout bounds one database call from the server's own side.
+//
+// Without it the only limit on a query is the caller going away:
+// http.Server's WriteTimeout closes the connection but does not cancel the
+// handler's context, so a query waiting for a free pooled connection waits
+// for as long as the client is willing to. The deadline covers a whole
+// method, transaction included, never an individual statement — a deadline
+// firing between BeginTx and Commit would abandon the transaction with its
+// locks still held. See docs/DECISIONS.md § "Deadline de saída".
+//
+// A zero callTimeout leaves ctx untouched, so a caller that has already
+// bounded the call — or a test — is not second-guessed.
+func (r *postgresRepository) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.callTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, r.callTimeout)
 }
 
 // Create persists a new task. Returns ErrAlreadyExists if the ID is
@@ -65,6 +86,9 @@ func NewPostgresRepository(db *sql.DB) Repository {
 // the database with a clear error instead of silently mismatching the
 // column's type at the wire level.
 func (r *postgresRepository) Create(ctx context.Context, task Task) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		INSERT INTO tasks (id, user_id, title, description, status, priority, created_at, updated_at, version)
 		VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, 1)
@@ -88,6 +112,9 @@ func (r *postgresRepository) Create(ctx context.Context, task Task) error {
 // Repository's doc comment on ownership. Returns ErrNotFound if absent or
 // owned by a different user.
 func (r *postgresRepository) FindByID(ctx context.Context, id, userID string) (Task, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		SELECT id::text, user_id::text, title, description, status, priority, created_at, updated_at, version
 		FROM tasks
@@ -125,6 +152,9 @@ func (r *postgresRepository) FindByID(ctx context.Context, id, userID string) (T
 // were never sent, and a filter still benefits from
 // idx_tasks_user_id_created_at_id rather than forcing a different plan.
 func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, offset int, statuses []Status, priorities []Priority) ([]Task, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	whereClause, args := buildTaskFilterWhere(userID, statuses, priorities)
 	// #nosec G202 -- whereClause is fixed clause text plus placeholder
 	// numbers only (see buildTaskFilterWhere); every value reaching
@@ -226,6 +256,9 @@ func buildTaskFilterWhere(userID string, statuses []Status, priorities []Priorit
 // every listing request rather than gating it behind an opt-in
 // parameter.
 func (r *postgresRepository) CountAll(ctx context.Context, userID string, statuses []Status, priorities []Priority) (int, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	whereClause, args := buildTaskFilterWhere(userID, statuses, priorities)
 	// #nosec G202 -- whereClause is fixed clause text plus placeholder
 	// numbers only (see buildTaskFilterWhere); every value reaching
@@ -251,6 +284,9 @@ func (r *postgresRepository) CountAll(ctx context.Context, userID string, status
 // serialize them — always including the key means the JSON response
 // itself is unambiguous, not just the Go value).
 func (r *postgresRepository) CountByStatusAndPriority(ctx context.Context, userID string, statuses []Status, priorities []Priority) (byStatus map[Status]int, byPriority map[Priority]int, err error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	whereClause, args := buildTaskFilterWhere(userID, statuses, priorities)
 
 	byStatus = map[Status]int{
@@ -331,6 +367,9 @@ func (r *postgresRepository) CountByStatusAndPriority(ctx context.Context, userI
 // another user's task (and contending with that user's own concurrent
 // Update) only to be rejected a moment later anyway.
 func (r *postgresRepository) Update(ctx context.Context, task Task) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("postgres: update task: begin transaction: %w", err)
@@ -381,6 +420,9 @@ func (r *postgresRepository) Update(ctx context.Context, task Task) error {
 // Delete removes the task with the given ID, scoped to userID. Returns
 // ErrNotFound if absent or owned by a different user.
 func (r *postgresRepository) Delete(ctx context.Context, id, userID string) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	result, err := r.db.ExecContext(ctx, `DELETE FROM tasks WHERE id = $1::uuid AND user_id = $2::uuid`, id, userID)
 	if err != nil {
 		return fmt.Errorf("postgres: delete task: %w", err)

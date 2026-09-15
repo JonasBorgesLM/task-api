@@ -274,8 +274,8 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 		taskRepo = task.NewMemoryRepository()
 		userRepo = user.NewMemoryRepository()
 	} else {
-		taskRepo = task.NewPostgresRepository(db)
-		userRepo = user.NewPostgresRepository(db)
+		taskRepo = task.NewPostgresRepository(db, cfg.DBCallTimeout)
+		userRepo = user.NewPostgresRepository(db, cfg.DBCallTimeout)
 	}
 
 	taskSvc := task.NewService(taskRepo)
@@ -523,7 +523,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 				},
 			)
 		} else {
-			attachmentRepo = attachment.NewPostgresRepository(db)
+			attachmentRepo = attachment.NewPostgresRepository(db, cfg.DBCallTimeout)
 		}
 
 		// = , not := : this must assign to the attachmentSvc declared
@@ -866,6 +866,8 @@ func buildBlobStore(ctx context.Context, cfg config.Config) (attachment.BlobStor
 			SecretKey: cfg.AttachmentS3SecretKey,
 			Region:    cfg.AttachmentS3Region,
 			UseSSL:    cfg.AttachmentS3UseSSL,
+
+			CallTimeout: cfg.StorageCallTimeout,
 		})
 	}
 	return attachment.NewFSBlobStore(cfg.AttachmentStorageDir)

@@ -28,6 +28,11 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+// testDBCallTimeout is deliberately generous: these tests assert
+// repository behaviour, not the deadline, and a slow CI database must
+// never turn a correct test into a flake.
+const testDBCallTimeout = 30 * time.Second
+
 const testDatabaseURLEnv = "TEST_DATABASE_URL"
 
 // newUUID generates a random UUID v4. The columns these tests write are
@@ -81,7 +86,7 @@ func newPostgresTestRepo(t *testing.T) (repo Repository, db *sql.DB, owner, stra
 	stranger = insertUser(t, db)
 	taskID = insertTask(t, db, owner)
 
-	return NewPostgresRepository(db), db, owner, stranger, taskID
+	return NewPostgresRepository(db, testDBCallTimeout), db, owner, stranger, taskID
 }
 
 // insertUser and insertTask write directly via SQL: this file tests

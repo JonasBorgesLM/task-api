@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -38,7 +39,8 @@ const (
 // forgets the check returns nothing rather than returning somebody else's
 // data.
 type postgresRepository struct {
-	db *sql.DB
+	db          *sql.DB
+	callTimeout time.Duration
 }
 
 // NewPostgresRepository returns a Repository backed by db.
@@ -46,8 +48,27 @@ type postgresRepository struct {
 // Unlike NewMemoryRepository it takes no TaskOwnershipFunc: the ownership
 // check is in the SQL. See Repository's doc comment for why both
 // implementations must still answer identically.
-func NewPostgresRepository(db *sql.DB) Repository {
-	return &postgresRepository{db: db}
+func NewPostgresRepository(db *sql.DB, callTimeout time.Duration) Repository {
+	return &postgresRepository{db: db, callTimeout: callTimeout}
+}
+
+// withTimeout bounds one database call from the server's own side.
+//
+// Without it the only limit on a query is the caller going away:
+// http.Server's WriteTimeout closes the connection but does not cancel the
+// handler's context, so a query waiting for a free pooled connection waits
+// for as long as the client is willing to. The deadline covers a whole
+// method, transaction included, never an individual statement — a deadline
+// firing between BeginTx and Commit would abandon the transaction with its
+// locks still held. See docs/DECISIONS.md § "Deadline de saída".
+//
+// A zero callTimeout leaves ctx untouched, so a caller that has already
+// bounded the call — or a test — is not second-guessed.
+func (r *postgresRepository) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.callTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, r.callTimeout)
 }
 
 // attachmentColumns is the select list every read below shares. id and
@@ -60,6 +81,9 @@ const attachmentColumns = `
 `
 
 func (r *postgresRepository) Create(ctx context.Context, attachment Attachment, userID string) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	// INSERT ... SELECT rather than INSERT ... VALUES: the SELECT
 	// produces a row only when the task exists *and* belongs to userID,
 	// so an attempt to hang an attachment off somebody else's task
@@ -106,6 +130,9 @@ func (r *postgresRepository) Create(ctx context.Context, attachment Attachment, 
 }
 
 func (r *postgresRepository) FindByStorageKey(ctx context.Context, storageKey, userID string) (Attachment, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		SELECT ` + attachmentColumns + `
 		FROM attachments a
@@ -133,6 +160,9 @@ func (r *postgresRepository) FindByStorageKey(ctx context.Context, storageKey, u
 // not a lookup followed by a delete, so there is no window between
 // deciding a row is deletable and removing it.
 func (r *postgresRepository) Delete(ctx context.Context, storageKey, userID string) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		DELETE FROM attachments a
 		USING tasks t
@@ -166,6 +196,9 @@ func (r *postgresRepository) Delete(ctx context.Context, storageKey, userID stri
 // shape FindByStorageKey and FindByTask use, without the trip through
 // Go to add up what the query itself can.
 func (r *postgresRepository) TotalBytesForUser(ctx context.Context, userID string) (int64, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		SELECT COALESCE(SUM(a.size_bytes), 0)
 		FROM attachments a
@@ -187,6 +220,9 @@ func (r *postgresRepository) TotalBytesForUser(ctx context.Context, userID strin
 // ownership check, later in the same request, is what reports
 // ErrTaskNotFound.
 func (r *postgresRepository) CountByTask(ctx context.Context, taskID, userID string) (int, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		SELECT COUNT(*)
 		FROM attachments a
@@ -203,6 +239,9 @@ func (r *postgresRepository) CountByTask(ctx context.Context, taskID, userID str
 }
 
 func (r *postgresRepository) FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	// The ownership check is its own statement here, unlike in the two
 	// methods above, because this one has to tell "your task, no
 	// attachments" apart from "not your task" — and an empty result set
@@ -274,6 +313,9 @@ func isForeignKeyViolation(err error) bool {
 }
 
 func (r *postgresRepository) UnreferencedKeys(ctx context.Context, keys []string) ([]string, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	if len(keys) == 0 {
 		return nil, nil
 	}

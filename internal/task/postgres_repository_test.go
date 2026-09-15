@@ -43,6 +43,11 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+// testDBCallTimeout is deliberately generous: these tests assert
+// repository behaviour, not the deadline, and a slow CI database must
+// never turn a correct test into a flake.
+const testDBCallTimeout = 30 * time.Second
+
 // testDatabaseURLEnv names the environment variable these tests read to
 // find a PostgreSQL instance. It deliberately does not reuse
 // config.Config's DATABASE_URL name, so a developer's local .env
@@ -90,7 +95,7 @@ func newPostgresTestRepo(t *testing.T) (repo *postgresRepository, db *sql.DB, us
 	// Goes through the exported constructor (rather than a bare struct
 	// literal) so these tests also exercise NewPostgresRepository itself,
 	// not just the type it returns.
-	return NewPostgresRepository(db).(*postgresRepository), db, createTestUser(t, db)
+	return NewPostgresRepository(db, testDBCallTimeout).(*postgresRepository), db, createTestUser(t, db)
 }
 
 // createTestUser inserts a minimal user row directly via SQL — this file
@@ -998,5 +1003,39 @@ func TestPostgres_Schema_RejectsInvalidPriority(t *testing.T) {
 	`, id, userID)
 	if err == nil {
 		t.Fatal("INSERT with an invalid priority: expected a CHECK constraint violation, got nil error")
+	}
+}
+
+// The deadline is the point of DBCallTimeout, so it is asserted against a
+// real driver rather than by reading the code: a callTimeout that has
+// already elapsed must stop the query even though the caller's own context
+// has no deadline at all. Before this existed, the only bound on a query
+// was the client going away — http.Server's WriteTimeout closes the
+// connection but does not cancel the handler's context.
+//
+// Negative control: verified failing (err == nil, the query completing
+// normally) against a repository built with callTimeout 0, which is the
+// behaviour every caller had before this change.
+func TestPostgres_CallTimeout_BoundsAQueryWithoutACallerDeadline(t *testing.T) {
+	_, db, userID := newPostgresTestRepo(t)
+
+	// 1ns is already spent by the time the driver looks at it.
+	repo := NewPostgresRepository(db, time.Nanosecond)
+
+	_, err := repo.FindAll(context.Background(), userID, 10, 0, nil, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FindAll with an exhausted call timeout: error = %v, want a match for context.DeadlineExceeded", err)
+	}
+}
+
+// The zero value must leave the caller's context untouched, so a caller
+// that has already bounded the call — or a test — is not second-guessed.
+func TestPostgres_ZeroCallTimeout_LeavesTheContextAlone(t *testing.T) {
+	_, db, userID := newPostgresTestRepo(t)
+
+	repo := NewPostgresRepository(db, 0)
+
+	if _, err := repo.FindAll(context.Background(), userID, 10, 0, nil, nil); err != nil {
+		t.Fatalf("FindAll with callTimeout 0: error = %v, want nil", err)
 	}
 }

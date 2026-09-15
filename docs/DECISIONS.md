@@ -2506,3 +2506,58 @@ configurado nesta PR — sem hooks, não há um terceiro ponto de log a
 auditar. Fiar observabilidade de criação/rejeição em `crier`
 (`docs/INTEGRATION.md` §3 do cairn) fica para quando isso for
 realmente necessário, não construído por antecipação.
+
+---
+
+## Deadline de saída (issues #277/16.A1, #279/16.A3)
+
+Nenhuma chamada de saída — banco, S3 — tinha teto de tempo do lado do
+servidor. `HTTP_WRITE_TIMEOUT` fecha a conexão, mas não cancela o
+contexto do handler: uma consulta esperando conexão livre no pool
+esperava até o cliente desistir, sem limite algum se o cliente for
+paciente.
+
+**A armadilha considerada e descartada: `http.TimeoutHandler` na
+cadeia.** O download de anexo usa `http.ServeContent`
+(`internal/attachment/handler.go`), escolhido deliberadamente por tratar
+`Range`. `TimeoutHandler` bufferiza o corpo inteiro em memória antes de
+escrever, o que quebraria Range e transformaria um download de 500 MB em
+500 MB de heap.
+
+**A decisão: deadline na fronteira de saída, não no HTTP.** Dois campos
+novos em `Config` — `DBCallTimeout` (padrão 5s) e `StorageCallTimeout`
+(padrão 30s, mais generoso porque uma chamada pode carregar um anexo
+inteiro) — cada repositório PostgreSQL e o `s3BlobStore` aplicam via um
+`withTimeout(ctx)` próprio, em volta de cada método, nunca em volta de
+cada `Read` de stream.
+
+**Por que o deadline nunca alcança o corpo de um download.** No
+`s3BlobStore.Open`, o `StatObject` — a ida real ao servidor, que prova
+que o objeto existe — é limitado pelo timeout. O `GetObject` que vem
+depois é preguiçoso (nenhum I/O até o primeiro `Read`) e recebe o
+`ctx` original do chamador, sem deadline algum: o `minio-go` vincula o
+`Object` retornado ao contexto que o criou e reconsulta esse contexto a
+cada `Read`. Um deadline ali não limitaria uma chamada travada — cortaria
+um download longo e legítimo no meio, que é pior do que o problema que
+deveria resolver. Verificado com teste de integração real contra o
+MinIO (`TestS3BlobStore_Open_StreamingOutlivesCallTimeout`): abre com
+timeout de 50ms, dorme 200ms, e o `Read` completo ainda funciona.
+
+**A troca que fechou junto: `obj.Stat()` virou `StatObject(ctx, ...)`**
+(issue #279). A chamada antiga não recebia contexto — a única ida à
+rede deste pacote imune a cancelamento, e por isso a única que um
+S3 travado conseguia manter presa mesmo depois do cliente desistir. A
+troca não custou round-trip a mais: `GetObject` continua preguiçoso, e
+chamá-lo depois do `Stat` deixa a contagem de idas ao servidor exatamente
+onde estava.
+
+**Transação, nunca statement.** Nas duas transações com cadeado
+(`task.Update`'s `SELECT ... FOR UPDATE`, `user`'s
+`pg_advisory_xact_lock`), o deadline cobre o método inteiro — `BeginTx`
+até `Commit` — nunca uma consulta isolada. Um timeout expirando entre elas
+abandonaria a transação com o cadeado preso até o `Rollback` do `defer`
+conseguir a mesma conexão que acabou de expirar.
+
+**Zero é "sem teto", não erro.** `withTimeout` com `callTimeout <= 0`
+devolve o `ctx` do chamador sem tocar — o mesmo `context.Context` que um
+teste já construiu com o seu próprio deadline não é sobrescrito.

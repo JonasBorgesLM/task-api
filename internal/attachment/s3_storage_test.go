@@ -20,6 +20,7 @@ package attachment
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -170,5 +171,143 @@ func TestS3BlobStore_OrphanCollectionWorksOverS3(t *testing.T) {
 	}
 	if deleted != 1 {
 		t.Errorf("CollectOrphans() removed %d, want 1", deleted)
+	}
+}
+
+// newS3TestBucket creates an empty bucket for the calling test and returns
+// everything needed to point one or more S3BlobStores at it, with whatever
+// CallTimeout each needs — the two CallTimeout tests below need two stores
+// sharing one bucket, which newS3TestStore's all-in-one shape cannot give
+// them.
+func newS3TestBucket(t *testing.T) (endpoint, accessKey, secretKey, bucket string) {
+	t.Helper()
+
+	endpoint = os.Getenv(testS3EndpointEnv)
+	if endpoint == "" {
+		t.Skipf("%s not set; skipping S3 integration test (see docker-compose.yml's minio service)", testS3EndpointEnv)
+	}
+	accessKey = os.Getenv(testS3AccessKeyEnv)
+	secretKey = os.Getenv(testS3SecretKeyEnv)
+	if accessKey == "" || secretKey == "" {
+		t.Fatalf("%s is set but %s/%s are not — credentials are required", testS3EndpointEnv, testS3AccessKeyEnv, testS3SecretKeyEnv)
+	}
+
+	ctx := context.Background()
+
+	admin, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: false,
+	})
+	if err != nil {
+		t.Fatalf("build admin client: %v", err)
+	}
+
+	bucket = fmt.Sprintf("test-%d", time.Now().UnixNano())
+	if err := admin.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+		t.Fatalf("create bucket %q: %v", bucket, err)
+	}
+	t.Cleanup(func() {
+		for object := range admin.ListObjects(ctx, bucket, minio.ListObjectsOptions{Recursive: true}) {
+			if object.Err != nil {
+				t.Errorf("list bucket for cleanup: %v", object.Err)
+				return
+			}
+			if err := admin.RemoveObject(ctx, bucket, object.Key, minio.RemoveObjectOptions{}); err != nil {
+				t.Errorf("remove object %q: %v", object.Key, err)
+			}
+		}
+		if err := admin.RemoveBucket(ctx, bucket); err != nil {
+			t.Errorf("remove bucket %q: %v", bucket, err)
+		}
+	})
+
+	return endpoint, accessKey, secretKey, bucket
+}
+
+// newS3StoreForBucket builds a store for an already-created bucket, with
+// callTimeout set explicitly — used to have two stores, with different
+// CallTimeouts, share one bucket.
+func newS3StoreForBucket(t *testing.T, endpoint, accessKey, secretKey, bucket string, callTimeout time.Duration) BlobStore {
+	t.Helper()
+
+	store, closeStore, err := NewS3BlobStore(context.Background(), S3Config{
+		Endpoint:    endpoint,
+		Bucket:      bucket,
+		AccessKey:   accessKey,
+		SecretKey:   secretKey,
+		UseSSL:      false,
+		CallTimeout: callTimeout,
+	})
+	if err != nil {
+		t.Fatalf("NewS3BlobStore() unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := closeStore(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	return store
+}
+
+// The round trip Open makes before handing back a reader (StatObject) must
+// be bound by CallTimeout, the same as every other call this store makes —
+// it replaced an obj.Stat() call that took no context at all and so could
+// never be cancelled (issue #279).
+//
+// Negative control: verified failing (error nil) against a version of Open
+// that called the original context-less obj.Stat() instead of
+// StatObject(statCtx, ...).
+func TestS3BlobStore_Open_StatIsBoundByCallTimeout(t *testing.T) {
+	endpoint, accessKey, secretKey, bucket := newS3TestBucket(t)
+
+	// A generous-timeout store just to create the object with.
+	setup := newS3StoreForBucket(t, endpoint, accessKey, secretKey, bucket, 24*time.Hour)
+	if _, err := setup.Put(context.Background(), "bound-by-timeout", strings.NewReader("content"), 1024); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+
+	// A second store, sharing the bucket but pointed at an exhausted
+	// timeout — the Stat this makes must fail before any data is read.
+	tiny := newS3StoreForBucket(t, endpoint, accessKey, secretKey, bucket, time.Nanosecond)
+	if _, err := tiny.Open(context.Background(), "bound-by-timeout"); err == nil {
+		t.Fatal("Open() with an exhausted CallTimeout: error = nil, want a timeout error")
+	}
+}
+
+// The point of splitting Open's Stat from its GetObject (see Open's own
+// doc comment): CallTimeout must bound the round trip that proves the
+// object exists, and must NOT bound reading the object's bytes afterward.
+// A real download can legitimately outlast a short per-call deadline meant
+// to catch a stuck round trip, not a slow-but-healthy transfer.
+//
+// Verified by opening successfully with a short CallTimeout, then sleeping
+// past it before reading — proving the reader is not tied to a context
+// that already expired.
+func TestS3BlobStore_Open_StreamingOutlivesCallTimeout(t *testing.T) {
+	const content = "the full content of a legitimately slow download"
+	endpoint, accessKey, secretKey, bucket := newS3TestBucket(t)
+
+	setup := newS3StoreForBucket(t, endpoint, accessKey, secretKey, bucket, 24*time.Hour)
+	if _, err := setup.Put(context.Background(), "outlives-timeout", strings.NewReader(content), 1024); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+
+	short := newS3StoreForBucket(t, endpoint, accessKey, secretKey, bucket, 50*time.Millisecond)
+	rc, err := short.Open(context.Background(), "outlives-timeout")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer rc.Close()
+
+	// Outlast the 50ms CallTimeout before reading a single byte. If Read
+	// were bound by the same deadline as Stat, this would now fail.
+	time.Sleep(200 * time.Millisecond)
+
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("reading after CallTimeout elapsed: error = %v, want nil (the deadline must not reach the stream)", err)
+	}
+	if string(got) != content {
+		t.Fatalf("read %q, want %q", got, content)
 	}
 }
