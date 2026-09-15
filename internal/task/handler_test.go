@@ -540,6 +540,24 @@ func TestGetTask_Handler_NotFound(t *testing.T) {
 	}
 }
 
+// ErrDependencyUnavailable -- a genuine PostgreSQL infrastructure failure,
+// classified by internal/platform/pgerr and distinguished at the
+// repository layer (issue #278) -- must reach the caller as 503, not the
+// 500 every other unclassified error gets. A client retrying a 503 is
+// doing the right thing; a client retrying a 500 has no such signal.
+func TestGetTask_Handler_DependencyUnavailable_Returns503(t *testing.T) {
+	svc := &fakeService{
+		getTaskFn: func(_, _ string) (Task, error) { return Task{}, ErrDependencyUnavailable },
+	}
+	h := newHandlerWithFake(svc)
+
+	w := do(t, h.getTask, http.MethodGet, "/tasks/abc-123", "")
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("getTask with a dependency failure: status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
 // 15.D2: ETag / If-None-Match.
 
 func TestGetTask_Handler_SetsETagFromIDAndVersion(t *testing.T) {

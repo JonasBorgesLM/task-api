@@ -1039,3 +1039,48 @@ func TestPostgres_ZeroCallTimeout_LeavesTheContextAlone(t *testing.T) {
 		t.Fatalf("FindAll with callTimeout 0: error = %v, want nil", err)
 	}
 }
+
+// A real infrastructure failure -- here, DBCallTimeout expiring while a
+// query waits, the same mechanism TestPostgres_CallTimeout_... above
+// already exercises -- must reach the caller classified as
+// ErrDependencyUnavailable, end to end, against a real database: not just
+// as a raw context.DeadlineExceeded a caller would have to know to check
+// for on every possible infrastructure failure shape.
+//
+// Negative control: verified failing (errors.Is false) against a version
+// of the generic error wrap that did not route through wrapDBError.
+func TestPostgres_InfrastructureFailure_ClassifiesAsErrDependencyUnavailable(t *testing.T) {
+	_, db, userID := newPostgresTestRepo(t)
+
+	repo := NewPostgresRepository(db, time.Nanosecond)
+
+	_, err := repo.FindAll(context.Background(), userID, 10, 0, nil, nil)
+	if !errors.Is(err, ErrDependencyUnavailable) {
+		t.Fatalf("FindAll with an exhausted call timeout: error = %v, want a match for ErrDependencyUnavailable", err)
+	}
+	// The original error is still in the chain -- ErrDependencyUnavailable
+	// is an additional classification, not a replacement of what actually
+	// happened.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FindAll with an exhausted call timeout: error = %v, want it to still match context.DeadlineExceeded too", err)
+	}
+}
+
+// The inverse of the test above: an error the database returns for the
+// caller's own bad input (Update against a non-existent task, surfacing
+// as ErrNotFound rather than any database-level error at all here, but
+// exercising the same wrapDBError path every other error in this file
+// passes through) must NOT be classified as ErrDependencyUnavailable.
+// This is the negative case issue #278 is fundamentally about: a client
+// mistake must never look like an outage.
+func TestPostgres_ClientError_DoesNotClassifyAsErrDependencyUnavailable(t *testing.T) {
+	repo, _, userID := newPostgresTestRepo(t)
+
+	_, err := repo.FindByID(context.Background(), "00000000-0000-0000-0000-000000000000", userID)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("FindByID for a missing task: error = %v, want a match for ErrNotFound", err)
+	}
+	if errors.Is(err, ErrDependencyUnavailable) {
+		t.Fatalf("FindByID for a missing task: error = %v, want it NOT to match ErrDependencyUnavailable", err)
+	}
+}

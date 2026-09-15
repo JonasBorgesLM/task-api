@@ -23,3 +23,17 @@ var ErrConflict = errors.New("task was modified concurrently")
 // the resource's current state regardless of timing — both map to 409,
 // but with different messages.
 var ErrInvalidTransition = errors.New("invalid status transition")
+
+// ErrDependencyUnavailable is returned when a Repository call fails because
+// the underlying store itself is the problem — a refused or dropped
+// connection, the database shedding load or shutting down, a pool with no
+// connection to spare — rather than because of anything about the request
+// itself. Handler maps it to 503, not 500: the request was reasonable and
+// worth retrying, once the dependency recovers.
+//
+// This is deliberately a package-level sentinel like every other error
+// here, not a PostgreSQL type — Service and Handler check it with
+// errors.Is exactly like ErrNotFound or ErrConflict, and stay unaware that
+// PostgreSQL exists. See docs/DECISIONS.md § "Classificação positiva de
+// erro de infraestrutura".
+var ErrDependencyUnavailable = errors.New("dependency unavailable")

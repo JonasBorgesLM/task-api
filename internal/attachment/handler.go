@@ -235,6 +235,20 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, r *http.Request, err
 			"path", r.URL.Path,
 		)
 		h.writeError(w, r, http.StatusInternalServerError, "internal server error")
+	case errors.Is(err, ErrDependencyUnavailable):
+		// See task/handler.go's own case: logged distinctly so an
+		// operator or an alert can filter on this without parsing err's
+		// raw wrapped PostgreSQL or S3 text. 503, not 500 -- retrying
+		// once the dependency recovers is the correct thing for the
+		// caller to do.
+		requestID, _ := middleware.RequestIDFromContext(r.Context())
+		h.logger.Error("dependency unavailable",
+			"error", err,
+			"request_id", requestID,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+		h.writeError(w, r, http.StatusServiceUnavailable, "service temporarily unavailable, please retry")
 	default:
 		requestID, _ := middleware.RequestIDFromContext(r.Context())
 		h.logger.Error("unexpected service error",

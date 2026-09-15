@@ -25,3 +25,12 @@ var ErrAlreadyExists = errors.New("attachment already exists")
 
 // ErrInvalidInput is returned when the caller provides invalid data.
 var ErrInvalidInput = errors.New("invalid input")
+
+// ErrDependencyUnavailable is returned when a Repository call fails because
+// the underlying store itself is the problem — a refused or dropped
+// connection, the database shedding load or shutting down, a pool with no
+// connection to spare — rather than because of anything about the request
+// itself. Handler maps it to 503, not 500: the request was reasonable and
+// worth retrying, once the dependency recovers. See
+// docs/DECISIONS.md § "Classificação positiva de erro de infraestrutura".
+var ErrDependencyUnavailable = errors.New("dependency unavailable")

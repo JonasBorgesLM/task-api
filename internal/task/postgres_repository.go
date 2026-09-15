@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/JonasBorgesLM/task-api/internal/platform/pgerr"
 )
 
 // postgreSQLUniqueViolation is the PostgreSQL error code for a unique
@@ -76,6 +78,24 @@ func (r *postgresRepository) withTimeout(ctx context.Context) (context.Context, 
 	return context.WithTimeout(ctx, r.callTimeout)
 }
 
+// wrapDBError classifies err from a database/sql call that reached no
+// more specific sentinel check above it. A genuine infrastructure failure
+// — the database itself being the problem, not the request — becomes
+// ErrDependencyUnavailable; every other error (a constraint violation
+// already routed to its own sentinel above, a scan error, malformed
+// input) passes through unchanged, for the caller to wrap and return as
+// it already did. See docs/DECISIONS.md § "Classificação positiva de
+// erro de infraestrutura".
+func wrapDBError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if pgerr.IsInfrastructureFailure(err) {
+		return fmt.Errorf("%w: %w", ErrDependencyUnavailable, err)
+	}
+	return err
+}
+
 // Create persists a new task. Returns ErrAlreadyExists if the ID is
 // already taken. The stored Version always starts at 1, regardless of
 // what the caller set on task.Version — matching memoryRepository's
@@ -102,7 +122,7 @@ func (r *postgresRepository) Create(ctx context.Context, task Task) error {
 		if isUniqueViolation(err) {
 			return ErrAlreadyExists
 		}
-		return fmt.Errorf("postgres: create task: %w", err)
+		return fmt.Errorf("postgres: create task: %w", wrapDBError(err))
 	}
 
 	return nil
@@ -126,7 +146,7 @@ func (r *postgresRepository) FindByID(ctx context.Context, id, userID string) (T
 		if errors.Is(err, sql.ErrNoRows) {
 			return Task{}, ErrNotFound
 		}
-		return Task{}, fmt.Errorf("postgres: find task by id: %w", err)
+		return Task{}, fmt.Errorf("postgres: find task by id: %w", wrapDBError(err))
 	}
 
 	return task, nil
@@ -181,7 +201,7 @@ func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, 
 	// bound parameter, never interpolated into the query string.
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: find all tasks: %w", err)
+		return nil, fmt.Errorf("postgres: find all tasks: %w", wrapDBError(err))
 	}
 	defer rows.Close()
 
@@ -189,12 +209,12 @@ func (r *postgresRepository) FindAll(ctx context.Context, userID string, limit, 
 	for rows.Next() {
 		task, err := scanTask(rows)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: scan task row: %w", err)
+			return nil, fmt.Errorf("postgres: scan task row: %w", wrapDBError(err))
 		}
 		tasks = append(tasks, task)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: find all tasks: %w", err)
+		return nil, fmt.Errorf("postgres: find all tasks: %w", wrapDBError(err))
 	}
 
 	return tasks, nil
@@ -267,7 +287,7 @@ func (r *postgresRepository) CountAll(ctx context.Context, userID string, status
 
 	var count int
 	if err := r.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
-		return 0, fmt.Errorf("postgres: count tasks: %w", err)
+		return 0, fmt.Errorf("postgres: count tasks: %w", wrapDBError(err))
 	}
 	return count, nil
 }
@@ -300,21 +320,21 @@ func (r *postgresRepository) CountByStatusAndPriority(ctx context.Context, userI
 	// Postgres travels through args as a bound parameter.
 	statusRows, err := r.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM tasks `+whereClause+` GROUP BY status`, args...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("postgres: count tasks by status: %w", err)
+		return nil, nil, fmt.Errorf("postgres: count tasks by status: %w", wrapDBError(err))
 	}
 	for statusRows.Next() {
 		var status string
 		var count int
 		if err := statusRows.Scan(&status, &count); err != nil {
 			statusRows.Close()
-			return nil, nil, fmt.Errorf("postgres: count tasks by status: scan: %w", err)
+			return nil, nil, fmt.Errorf("postgres: count tasks by status: scan: %w", wrapDBError(err))
 		}
 		byStatus[Status(status)] = count
 	}
 	statusErr := statusRows.Err()
 	statusRows.Close()
 	if statusErr != nil {
-		return nil, nil, fmt.Errorf("postgres: count tasks by status: %w", statusErr)
+		return nil, nil, fmt.Errorf("postgres: count tasks by status: %w", wrapDBError(statusErr))
 	}
 
 	byPriority = map[Priority]int{
@@ -327,19 +347,19 @@ func (r *postgresRepository) CountByStatusAndPriority(ctx context.Context, userI
 	// Postgres travels through args as a bound parameter.
 	priorityRows, err := r.db.QueryContext(ctx, `SELECT priority, COUNT(*) FROM tasks `+whereClause+` GROUP BY priority`, args...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("postgres: count tasks by priority: %w", err)
+		return nil, nil, fmt.Errorf("postgres: count tasks by priority: %w", wrapDBError(err))
 	}
 	defer priorityRows.Close()
 	for priorityRows.Next() {
 		var priority string
 		var count int
 		if err := priorityRows.Scan(&priority, &count); err != nil {
-			return nil, nil, fmt.Errorf("postgres: count tasks by priority: scan: %w", err)
+			return nil, nil, fmt.Errorf("postgres: count tasks by priority: scan: %w", wrapDBError(err))
 		}
 		byPriority[Priority(priority)] = count
 	}
 	if err := priorityRows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("postgres: count tasks by priority: %w", err)
+		return nil, nil, fmt.Errorf("postgres: count tasks by priority: %w", wrapDBError(err))
 	}
 
 	return byStatus, byPriority, nil
@@ -372,7 +392,7 @@ func (r *postgresRepository) Update(ctx context.Context, task Task) error {
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("postgres: update task: begin transaction: %w", err)
+		return fmt.Errorf("postgres: update task: begin transaction: %w", wrapDBError(err))
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once Commit has succeeded
 
@@ -385,7 +405,7 @@ func (r *postgresRepository) Update(ctx context.Context, task Task) error {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
-		return fmt.Errorf("postgres: update task: read current version: %w", err)
+		return fmt.Errorf("postgres: update task: read current version: %w", wrapDBError(err))
 	}
 	if currentVersion != task.Version {
 		return ErrConflict
@@ -407,11 +427,11 @@ func (r *postgresRepository) Update(ctx context.Context, task Task) error {
 		task.Title, task.Description, string(task.Status), string(task.Priority), task.UpdatedAt,
 		task.ID, task.UserID,
 	); err != nil {
-		return fmt.Errorf("postgres: update task: %w", err)
+		return fmt.Errorf("postgres: update task: %w", wrapDBError(err))
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("postgres: update task: commit transaction: %w", err)
+		return fmt.Errorf("postgres: update task: commit transaction: %w", wrapDBError(err))
 	}
 
 	return nil
@@ -425,12 +445,12 @@ func (r *postgresRepository) Delete(ctx context.Context, id, userID string) erro
 
 	result, err := r.db.ExecContext(ctx, `DELETE FROM tasks WHERE id = $1::uuid AND user_id = $2::uuid`, id, userID)
 	if err != nil {
-		return fmt.Errorf("postgres: delete task: %w", err)
+		return fmt.Errorf("postgres: delete task: %w", wrapDBError(err))
 	}
 
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("postgres: delete task: %w", err)
+		return fmt.Errorf("postgres: delete task: %w", wrapDBError(err))
 	}
 	if affected == 0 {
 		return ErrNotFound

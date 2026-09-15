@@ -2561,3 +2561,58 @@ conseguir a mesma conexão que acabou de expirar.
 **Zero é "sem teto", não erro.** `withTimeout` com `callTimeout <= 0`
 devolve o `ctx` do chamador sem tocar — o mesmo `context.Context` que um
 teste já construiu com o seu próprio deadline não é sobrescrito.
+
+---
+
+## Classificação positiva de erro de infraestrutura (issue #278)
+
+Um `500` de "PostgreSQL inacessível" e um `500` de "o cliente mandou um
+UUID malformado" eram indistinguíveis: `handleServiceError`'s ramo
+`default:` recebia os dois igual, e todo `fmt.Errorf("postgres: ...: %w",
+err)` que não passava por um sentinela específico (`ErrNotFound`,
+`ErrAlreadyExists`, `ErrConflict`) caía no mesmo balde genérico.
+
+**A decisão: um predicado puro em `internal/platform/pgerr`, escrito como
+lista de permissão.** `IsInfrastructureFailure(err error) bool` reconhece
+exatamente as classes SQLSTATE `08` (connection exception), `53`
+(insufficient resources), `57` (operator intervention), mais
+`driver.ErrBadConn` e `context.DeadlineExceeded` (este último, na prática,
+sobretudo o `DBCallTimeout` da seção "Deadline de saída" acima expirando
+esperando conexão livre no pool).
+
+**Por que lista de permissão, e não de exclusão — a mesma pergunta que o
+bastion já resolveu para si mesmo, aqui aplicada sem bastion nenhum
+envolvido:** um erro nunca visto pelo predicado devolve `false` — o mesmo
+comportamento que já existia antes desta issue, não um novo tipo de falha.
+Uma lista de exclusão erraria para o lado perigoso: um SQLSTATE `22P02`
+(UUID malformado — exatamente o caso que motivou esta issue) classificado
+por engano como infraestrutura transformaria uma rajada de requisições com
+entrada inválida em alarme de indisponibilidade.
+
+**Onde a classificação acontece, e por que não no `Handler`:**
+`Service`/`Handler` "devem permanecer completamente alheios à existência do
+PostgreSQL" — regra já registrada no `CLAUDE.md`. `handleServiceError`
+nunca pode ganhar um ramo específico de Postgres. A classificação acontece
+inteiramente dentro do repositório, via um `wrapDBError(err)` que embrulha
+apenas o erro genérico de cada método (nunca os já roteados para um
+sentinela específico como `isUniqueViolation`), produzindo um **novo
+sentinela por pacote** — `ErrDependencyUnavailable`, em `task`, `user` e
+`attachment` — checável com `errors.Is` como qualquer outro. `Handler`
+ganha um `case` a mais, sem nunca importar `pgconn` nem saber que
+PostgreSQL existe.
+
+**O log agora distingue sem ler a mensagem.** `handleServiceError` loga
+`"dependency unavailable"` para o novo sentinela — uma string de busca
+distinta de `"unexpected service error"` — e devolve `503`, não `500`: a
+requisição era legítima, o problema é a dependência, e vale a pena tentar
+de novo quando ela se recuperar. (Sem `Retry-After` por enquanto — um
+valor concreto exige um sinal real de "quanto tempo até recuperar", que
+esta issue não tem; fica para quando/se o bastion entrar, via `openTimeout`
+de um breaker real, não um número inventado agora.)
+
+**Verificado com controle negativo, não só com teste positivo:** o
+predicado invertido (`default: return true` em vez de `false`) faz sete
+casos negativos falharem, incluindo o 22P02 explícito; o `wrapDBError`
+neutralizado faz o teste de classificação de ponta a ponta (contra
+PostgreSQL real, via `DBCallTimeout` esgotado) falhar. Os dois restaurados
+e confirmados idênticos byte a byte ao original.

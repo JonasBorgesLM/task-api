@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/JonasBorgesLM/task-api/internal/platform/pgerr"
 )
 
 // postgreSQLUniqueViolation is the PostgreSQL error code for a unique
@@ -51,6 +53,24 @@ func (r *postgresRepository) withTimeout(ctx context.Context) (context.Context, 
 	return context.WithTimeout(ctx, r.callTimeout)
 }
 
+// wrapDBError classifies err from a database/sql call that reached no
+// more specific sentinel check above it. A genuine infrastructure failure
+// — the database itself being the problem, not the request — becomes
+// ErrDependencyUnavailable; every other error (a constraint violation
+// already routed to its own sentinel above, a scan error, malformed
+// input) passes through unchanged, for the caller to wrap and return as
+// it already did. See docs/DECISIONS.md § "Classificação positiva de
+// erro de infraestrutura".
+func wrapDBError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if pgerr.IsInfrastructureFailure(err) {
+		return fmt.Errorf("%w: %w", ErrDependencyUnavailable, err)
+	}
+	return err
+}
+
 // CreateUser persists a new user. Returns ErrAlreadyExists if the email is
 // already taken.
 func (r *postgresRepository) CreateUser(ctx context.Context, u User) error {
@@ -67,7 +87,7 @@ func (r *postgresRepository) CreateUser(ctx context.Context, u User) error {
 		if isUniqueViolation(err) {
 			return ErrAlreadyExists
 		}
-		return fmt.Errorf("postgres: create user: %w", err)
+		return fmt.Errorf("postgres: create user: %w", wrapDBError(err))
 	}
 	return nil
 }
@@ -88,7 +108,7 @@ func (r *postgresRepository) FindUserByEmail(ctx context.Context, email string) 
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrNotFound
 		}
-		return User{}, fmt.Errorf("postgres: find user by email: %w", err)
+		return User{}, fmt.Errorf("postgres: find user by email: %w", wrapDBError(err))
 	}
 	return u, nil
 }
@@ -109,7 +129,7 @@ func (r *postgresRepository) FindUserByID(ctx context.Context, id string) (User,
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrNotFound
 		}
-		return User{}, fmt.Errorf("postgres: find user by id: %w", err)
+		return User{}, fmt.Errorf("postgres: find user by id: %w", wrapDBError(err))
 	}
 	return u, nil
 }
@@ -127,11 +147,11 @@ func (r *postgresRepository) UpdateUserPassword(ctx context.Context, id, passwor
 	`
 	result, err := r.db.ExecContext(ctx, query, id, passwordHash)
 	if err != nil {
-		return fmt.Errorf("postgres: update user password: %w", err)
+		return fmt.Errorf("postgres: update user password: %w", wrapDBError(err))
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("postgres: update user password: %w", err)
+		return fmt.Errorf("postgres: update user password: %w", wrapDBError(err))
 	}
 	if rows == 0 {
 		return ErrNotFound
@@ -159,11 +179,11 @@ func (r *postgresRepository) DeleteUser(ctx context.Context, id string) error {
 	const query = `DELETE FROM users WHERE id = $1::uuid`
 	result, err := r.db.ExecContext(ctx, query, id)
 	if err != nil {
-		return fmt.Errorf("postgres: delete user: %w", err)
+		return fmt.Errorf("postgres: delete user: %w", wrapDBError(err))
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("postgres: delete user: %w", err)
+		return fmt.Errorf("postgres: delete user: %w", wrapDBError(err))
 	}
 	if rows == 0 {
 		return ErrNotFound
@@ -183,7 +203,7 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s Session, maxSe
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("postgres: create session: begin transaction: %w", err)
+		return fmt.Errorf("postgres: create session: begin transaction: %w", wrapDBError(err))
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once Commit has succeeded
 
@@ -204,7 +224,7 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s Session, maxSe
 	// variant), so there is nothing to unlock explicitly, and it never
 	// blocks a *different* user's sessions.
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, s.UserID); err != nil {
-		return fmt.Errorf("postgres: create session: acquire lock: %w", err)
+		return fmt.Errorf("postgres: create session: acquire lock: %w", wrapDBError(err))
 	}
 
 	const insertQuery = `
@@ -212,7 +232,7 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s Session, maxSe
 		VALUES ($1, $2::uuid, $3, $4)
 	`
 	if _, err := tx.ExecContext(ctx, insertQuery, s.TokenHash, s.UserID, s.ExpiresAt, s.CreatedAt); err != nil {
-		return fmt.Errorf("postgres: create session: %w", err)
+		return fmt.Errorf("postgres: create session: %w", wrapDBError(err))
 	}
 
 	const evictQuery = `
@@ -226,11 +246,11 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s Session, maxSe
 		  )
 	`
 	if _, err := tx.ExecContext(ctx, evictQuery, s.UserID, maxSessions); err != nil {
-		return fmt.Errorf("postgres: create session: evict oldest: %w", err)
+		return fmt.Errorf("postgres: create session: evict oldest: %w", wrapDBError(err))
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("postgres: create session: commit transaction: %w", err)
+		return fmt.Errorf("postgres: create session: commit transaction: %w", wrapDBError(err))
 	}
 	return nil
 }
@@ -242,7 +262,7 @@ func (r *postgresRepository) DeleteSessionsForUser(ctx context.Context, userID s
 
 	const query = `DELETE FROM sessions WHERE user_id = $1::uuid`
 	if _, err := r.db.ExecContext(ctx, query, userID); err != nil {
-		return fmt.Errorf("postgres: delete sessions for user: %w", err)
+		return fmt.Errorf("postgres: delete sessions for user: %w", wrapDBError(err))
 	}
 	return nil
 }
@@ -255,7 +275,7 @@ func (r *postgresRepository) DeleteSessionsForUserExcept(ctx context.Context, us
 
 	const query = `DELETE FROM sessions WHERE user_id = $1::uuid AND token_hash != $2`
 	if _, err := r.db.ExecContext(ctx, query, userID, keepTokenHash); err != nil {
-		return fmt.Errorf("postgres: delete sessions for user except: %w", err)
+		return fmt.Errorf("postgres: delete sessions for user except: %w", wrapDBError(err))
 	}
 	return nil
 }
@@ -278,7 +298,7 @@ func (r *postgresRepository) FindSessionByTokenHash(ctx context.Context, tokenHa
 		if errors.Is(err, sql.ErrNoRows) {
 			return Session{}, ErrNotFound
 		}
-		return Session{}, fmt.Errorf("postgres: find session: %w", err)
+		return Session{}, fmt.Errorf("postgres: find session: %w", wrapDBError(err))
 	}
 	return s, nil
 }
@@ -291,7 +311,7 @@ func (r *postgresRepository) DeleteSession(ctx context.Context, tokenHash string
 	defer cancel()
 
 	if _, err := r.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash); err != nil {
-		return fmt.Errorf("postgres: delete session: %w", err)
+		return fmt.Errorf("postgres: delete session: %w", wrapDBError(err))
 	}
 	return nil
 }
@@ -312,7 +332,7 @@ func (r *postgresRepository) FindSessionsForUser(ctx context.Context, userID str
 	`
 	rows, err := r.db.QueryContext(ctx, query, userID)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: find sessions for user: %w", err)
+		return nil, fmt.Errorf("postgres: find sessions for user: %w", wrapDBError(err))
 	}
 	defer rows.Close()
 
@@ -320,12 +340,12 @@ func (r *postgresRepository) FindSessionsForUser(ctx context.Context, userID str
 	for rows.Next() {
 		var s Session
 		if err := rows.Scan(&s.TokenHash, &s.UserID, &s.ExpiresAt, &s.CreatedAt); err != nil {
-			return nil, fmt.Errorf("postgres: find sessions for user: scan: %w", err)
+			return nil, fmt.Errorf("postgres: find sessions for user: scan: %w", wrapDBError(err))
 		}
 		sessions = append(sessions, s)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: find sessions for user: %w", err)
+		return nil, fmt.Errorf("postgres: find sessions for user: %w", wrapDBError(err))
 	}
 	return sessions, nil
 }
@@ -337,7 +357,7 @@ func (r *postgresRepository) DeleteExpiredSessions(ctx context.Context, now time
 	defer cancel()
 
 	if _, err := r.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < $1`, now); err != nil {
-		return fmt.Errorf("postgres: delete expired sessions: %w", err)
+		return fmt.Errorf("postgres: delete expired sessions: %w", wrapDBError(err))
 	}
 	return nil
 }
