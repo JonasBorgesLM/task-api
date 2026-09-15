@@ -468,6 +468,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// TestNewServer_* across this package) — a guarded, idempotent
 	// publish is what keeps newServer callable more than once per binary.
 	publishBuildInfoOnce()
+	publishAttachmentBreakerExpvarOnce()
 
 	userHandler.RegisterRoutes(v1, authenticated, authLimiter.Middleware)
 	taskHandler.RegisterRoutes(v1, authenticated)
@@ -495,7 +496,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// function that pretends to do nothing.
 	var collectOrphans func(context.Context) (int, error)
 	if attachmentsEnabled(cfg) {
-		blobs, closeStore, err := buildBlobStore(ctx, cfg)
+		blobs, closeStore, err := buildBlobStore(ctx, cfg, logger)
 		if err != nil {
 			closeLimiters()
 			closeDB()
@@ -535,6 +536,15 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 		collectOrphans = func(ctx context.Context) (int, error) {
 			return attachmentSvc.CollectOrphans(ctx, cfg.AttachmentOrphanMinAge)
 		}
+	} else {
+		// Attachments off entirely: buildBlobStore never runs, so
+		// nothing above resets the two breaker atomics. Reset them here
+		// for the same reason buildBlobStore's own fs/disabled branch
+		// does — a *testing.T building a no-attachments server after an
+		// S3-enabled one must not see the prior server's breakers on
+		// /debug/vars.
+		currentAttachmentRWBreaker.Store(nil)
+		currentAttachmentListBreaker.Store(nil)
 	}
 
 	// Link shortening (issues #209-#217, 15.A1-15.A9) is opt-in and, with
@@ -857,9 +867,15 @@ func attachmentsEnabled(cfg config.Config) bool {
 // moves node. The object store is what covers that, and addresses MinIO
 // in development and S3 in production through one code path — so neither
 // environment runs a path the other never exercises.
-func buildBlobStore(ctx context.Context, cfg config.Config) (attachment.BlobStore, func() error, error) {
+// buildBlobStore also resets currentAttachmentRWBreaker and
+// currentAttachmentListBreaker on every call — including the fs and
+// disabled paths, both of which store nil — so /debug/vars reflects
+// whichever server newServer built most recently rather than a stale
+// breaker from an earlier *testing.T in this package's own suite. See
+// publishAttachmentBreakerExpvarOnce's doc comment.
+func buildBlobStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (attachment.BlobStore, func() error, error) {
 	if cfg.AttachmentS3Endpoint != "" {
-		return attachment.NewS3BlobStore(ctx, attachment.S3Config{
+		store, closeStore, err := attachment.NewS3BlobStore(ctx, attachment.S3Config{
 			Endpoint:  cfg.AttachmentS3Endpoint,
 			Bucket:    cfg.AttachmentS3Bucket,
 			AccessKey: cfg.AttachmentS3AccessKey,
@@ -869,7 +885,22 @@ func buildBlobStore(ctx context.Context, cfg config.Config) (attachment.BlobStor
 
 			CallTimeout: cfg.StorageCallTimeout,
 		})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		wrapped, rw, list, err := attachment.NewBreakerBlobStore(store, attachmentBreakerHooks(logger))
+		if err != nil {
+			_ = closeStore()
+			return nil, nil, err
+		}
+		currentAttachmentRWBreaker.Store(rw)
+		currentAttachmentListBreaker.Store(list)
+		return wrapped, closeStore, nil
 	}
+
+	currentAttachmentRWBreaker.Store(nil)
+	currentAttachmentListBreaker.Store(nil)
 	return attachment.NewFSBlobStore(cfg.AttachmentStorageDir)
 }
 

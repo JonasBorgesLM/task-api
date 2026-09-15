@@ -1593,7 +1593,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
-          $ref: '#/components/responses/ServiceUnavailable'
+          $ref: '#/components/responses/AttachmentServiceUnavailable'
     get:
       tags: [Attachments]
       operationId: listAttachments
@@ -1632,7 +1632,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
-          $ref: '#/components/responses/ServiceUnavailable'
+          $ref: '#/components/responses/AttachmentServiceUnavailable'
 
   /v1/files/{key}:
     get:
@@ -1700,7 +1700,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
-          $ref: '#/components/responses/ServiceUnavailable'
+          $ref: '#/components/responses/AttachmentServiceUnavailable'
 
     delete:
       tags: [Attachments]
@@ -1756,7 +1756,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
-          $ref: '#/components/responses/ServiceUnavailable'
+          $ref: '#/components/responses/AttachmentServiceUnavailable'
 
   /v1/links:
     post:
@@ -3003,3 +3003,53 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             error: service temporarily unavailable, please retry
+
+    AttachmentServiceUnavailable:
+      description: >
+        A dependency the attachment routes need is not currently
+        answering. Three distinct causes share this status and this
+        exact generic body — the client's own action is the same either
+        way, retry — but only one of them carries Retry-After:
+
+        - The session lookup that authenticates this request could not
+        be performed (see ServiceUnavailable above).
+
+        - The attachment metadata repository itself failed a call
+        (connection refused, pool exhausted, ...).
+
+        - **Retry-After is present** when the object store's circuit
+        breaker has already opened from a run of prior failures and is
+        refusing this call without attempting it (see
+        docs/DECISIONS.md § "ErrUnavailable e 503 com Retry-After"). Its
+        value is the breaker's own openTimeout, in seconds — the
+        earliest moment a retry has a chance of finding the circuit
+        closed again, not a guarantee.
+
+        In every case, this says nothing about the caller's token: a
+        perfectly valid, unexpired token gets this response too, so the
+        client must NOT discard its credentials and re-authenticate.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestID'
+        Retry-After:
+          description: >
+            Seconds to wait before retrying. Present only when the
+            object store's circuit breaker is the cause — absent for the
+            other two, which have no knowable recovery time.
+          required: false
+          schema:
+            type: integer
+          example: 30
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            dependency:
+              summary: Session lookup or repository dependency unavailable
+              value:
+                error: service temporarily unavailable, please retry
+            breakerOpen:
+              summary: Object store circuit breaker open
+              value:
+                error: attachment storage temporarily unavailable, please retry

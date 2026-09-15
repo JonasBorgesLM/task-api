@@ -583,6 +583,48 @@ func TestIntegration_DebugVars_ReportsBuildInfo(t *testing.T) {
 	}
 }
 
+// TestIntegration_DebugVars_AttachmentBreaker_ReportsDisabledWithoutS3
+// pins 16.B5's "disabled" case: testConfig() enables no attachment
+// backend at all, so buildBlobStore never runs and neither breaker is
+// ever built — /debug/vars must say so plainly rather than reporting a
+// zero-valued breaker that looks like a healthy one at a glance.
+func TestIntegration_DebugVars_AttachmentBreaker_ReportsDisabledWithoutS3(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+	token := registerAndLogin(t, srv)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/debug/vars", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /debug/vars body: %v", err)
+	}
+
+	for _, key := range []string{"attachment_s3_breaker", "attachment_s3_list_breaker"} {
+		raw, ok := body[key]
+		if !ok {
+			t.Fatalf("/debug/vars response is missing expected key %q", key)
+		}
+		var v attachmentBreakerVars
+		if err := json.Unmarshal(raw, &v); err != nil {
+			t.Fatalf("decode %q: %v", key, err)
+		}
+		if v.State != "disabled" {
+			t.Errorf("%s.state = %q, want %q (testConfig() enables no attachment backend)", key, v.State, "disabled")
+		}
+	}
+}
+
 // TestIntegration_DebugVars_RequiresAuth guards the other half of the
 // contract: expvar leaks the process command line and full runtime
 // statistics, so an unauthenticated caller must not reach it. The health

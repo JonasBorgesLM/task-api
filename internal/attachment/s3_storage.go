@@ -1,6 +1,7 @@
 package attachment
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,13 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
+
+// writeProbeKey is the object probeWritePermission creates and removes
+// on every startup. Dot-prefixed and clearly named so it can never
+// collide with anything Service generates (those are UUIDs), and is
+// self-explanatory if a process crash between the Put and the Remove
+// below ever leaves it behind for a person to find.
+const writeProbeKey = ".task-api-write-probe"
 
 // S3Config describes the object store an s3BlobStore talks to. It is
 // deliberately provider-neutral: the same fields address MinIO in
@@ -95,7 +103,42 @@ func NewS3BlobStore(ctx context.Context, cfg S3Config) (BlobStore, func() error,
 		return nil, nil, fmt.Errorf("attachment: bucket %q does not exist", cfg.Bucket)
 	}
 
+	if err := probeWritePermission(checkCtx, client, cfg.Bucket); err != nil {
+		return nil, nil, err
+	}
+
 	return &s3BlobStore{client: client, bucket: cfg.Bucket, callTimeout: cfg.CallTimeout}, func() error { return nil }, nil
+}
+
+// probeWritePermission proves the configured credential can actually
+// write to bucket, not just reach it — BucketExists above only proves
+// the bucket is reachable, and a read-only (or altogether absent) write
+// permission passes that check the same as a fully-working credential.
+//
+// Without this, a credential missing write permission surfaces on a real
+// user's first upload — as a 500, several layers away from its cause,
+// exactly the failure mode NewS3BlobStore already exists to move to
+// startup for a wrong endpoint or a missing bucket. It matters even more
+// once a breaker sits in front of this store (see s3_breaker.go): every
+// call returns the same AccessDenied, the circuit opens, and nothing
+// about that improves on its own — a half-open probe asks the same
+// question and gets the same answer, forever, because the fault is a
+// permission, not a transient condition. See docs/DECISIONS.md §
+// "Validar permissão de escrita no S3 na subida" for the credential
+// rotation case this deliberately does not cover.
+//
+// The probe writes and removes an empty object under writeProbeKey. A
+// failed removal is reported distinctly, so a person reading the startup
+// log knows there may be a leftover object to clean up by hand, rather
+// than assuming a write failure that never happened.
+func probeWritePermission(ctx context.Context, client *minio.Client, bucket string) error {
+	if _, err := client.PutObject(ctx, bucket, writeProbeKey, bytes.NewReader(nil), 0, minio.PutObjectOptions{}); err != nil {
+		return fmt.Errorf("attachment: bucket %q is reachable but not writable with the configured credentials: %w", bucket, err)
+	}
+	if err := client.RemoveObject(ctx, bucket, writeProbeKey, minio.RemoveObjectOptions{}); err != nil {
+		return fmt.Errorf("attachment: wrote startup write-probe object %q to bucket %q but could not remove it, left behind: %w", writeProbeKey, bucket, err)
+	}
+	return nil
 }
 
 // withTimeout bounds one round trip to the object store. A zero

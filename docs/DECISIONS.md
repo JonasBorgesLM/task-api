@@ -2616,3 +2616,183 @@ casos negativos falharem, incluindo o 22P02 explícito; o `wrapDBError`
 neutralizado faz o teste de classificação de ponta a ponta (contra
 PostgreSQL real, via `DBCallTimeout` esgotado) falhar. Os dois restaurados
 e confirmados idênticos byte a byte ao original.
+
+---
+
+## Adoção do bastion (issue #280, 16.B1): só no ramo S3
+
+O bastion (v0.2.1) foi avaliado contra as três dependências de saída deste
+serviço. Custo de entrada: zero dependências, Go puro, um módulo a mais no
+grafo, nenhum transitivo — passa o único portão que o `CLAUDE.md` impõe a
+uma dependência nova (binário estático em `scratch` continua possível).
+
+**Três veredictos, não um — e o "não" ao crier é decisão tanto quanto os
+dois "sim":**
+
+- **S3/MinIO — adotar.** Dependência opcional (sem
+  `ATTACHMENT_S3_ENDPOINT` as rotas de anexo nem são registradas), isolada
+  do resto da API, com uma única sede de construção
+  (`buildBlobStore`, `cmd/api/main.go`). Um decorador entra ali sem que
+  `Service`, `Handler` ou a interface `BlobStore` mudem — ver
+  `internal/attachment/s3_breaker.go`.
+- **PostgreSQL — condicional, e não agora (fica para 16.C1).** Com uma
+  réplica, se o banco caiu a API está fora de qualquer jeito e o breaker
+  só trocaria `500` por `503`. O ganho real seria outro — esgotamento de
+  pool — e isso precisa ser medido antes de valer a pena, não assumido.
+- **crier/OTLP — não adotar.** `otlp.New` e `core.New` não fazem I/O de
+  rede; a exportação acontece nas goroutines do próprio dispatcher, e
+  `crierTeeHandler` descarta o erro do crier e devolve o do handler
+  embrulhado (`cmd/api/crier.go`). O crier é espelho, nunca portão — o
+  modo de falha que um breaker existe para prevenir não tem como ocorrer
+  aqui.
+
+**A restrição que fecha a decisão: embrulhar só o ramo S3.**
+`fsBlobStore` é disco local — sem rede, sem falha em cascata a prevenir.
+Um breaker ali só adicionaria um modo de falha a um caminho que não tem
+nenhum. O decorador (`attachment.NewBreakerBlobStore`) é aplicado ao
+construir o store S3 dentro de `buildBlobStore`, nunca à interface
+`BlobStore` em geral.
+
+**A limitação aceita conscientemente, não descoberta depois:**
+`BlobStore.Open` devolve um `io.ReadSeekCloser` — um handle vivo. O
+breaker cobre o `StatObject` que prova que o objeto existe e o
+`GetObject` (preguiçoso, sem I/O) que abre o handle. Todo `Read` que o
+`Handler` faz depois, streamando via `http.ServeContent`, acontece **fora**
+da chamada breada — a mesma razão pela qual o deadline de saída também não
+alcança esses bytes (ver "Deadline de saída" acima). Um S3 que aceita a
+abertura e trava no meio do stream é invisível para o breaker. Fechar essa
+lacuna significaria limitar o download em si, que é exatamente o erro que
+o próprio `s3BlobStore.Open` já rejeita.
+
+---
+
+## ErrUnavailable e 503 com Retry-After (issue #282, 16.B3)
+
+Um `bastion.ErrOpenState` ou `bastion.ErrTooManyRequests` vindo do
+decorador cairia, sem mais nada, no `default:` de `handleServiceError` —
+`500`, quando o `REQUIREMENTS.md` do próprio bastion (§5.1) já diz por que
+isso é errado: "um 500 diz ao chamador para desistir quando deveria dizer
+para voltar". São dois sentinelas, não um — esquecer
+`ErrTooManyRequests` deixaria um `500` raro, só visível na janela de
+half-open, e por isso o mais difícil de reproduzir.
+
+**A tradução acontece na fronteira, não no Handler.** `CLAUDE.md` já
+proíbe `handleServiceError` de ganhar um ramo que conheça o que está atrás
+do `Repository`; ensinar bastion ao `Handler` seria a mesma violação com
+outro nome. `s3_breaker.go`'s `translateBreakerError` embrulha os dois
+sentinelas do bastion num `ErrUnavailable` — sentinela próprio do pacote,
+no mesmo formato de `ErrNotFound`/`ErrDependencyUnavailable` — antes de
+cruzar para fora do arquivo. `unavailableError` não tem `Unwrap`: só
+`Is(ErrUnavailable)`, de propósito, para que `bastion.ErrOpenState` nunca
+seja alcançável por `errors.Is`/`errors.As` de fora deste arquivo, nem por
+acidente.
+
+**Por que `ErrUnavailable` é distinto de `ErrDependencyUnavailable`
+(issue #278).** Os dois viram `503`, mas por uma razão diferente cada um:
+`ErrDependencyUnavailable` significa "a chamada foi tentada e a
+dependência respondeu mal, uma vez" — não há como saber quando vai
+melhorar, daí nenhum `Retry-After` (ver o parêntese ao fim da seção
+"Classificação positiva" acima). `ErrUnavailable` significa "o breaker, a
+partir de um histórico de evidência, já sabe que não vale tentar" — e
+esse é exatamente o caso em que o momento de recuperação **é** conhecido
+de antemão: o `openTimeout` do próprio breaker. `Retry-After` carrega
+esse valor (`s3BreakerOpenTimeout`, 30s — uma única constante, para que o
+número no header e o timeout real do breaker nunca possam divergir), lido
+pelo `Handler` via `errors.As` contra
+`interface{ RetryAfter() time.Duration }`, sem nunca importar bastion —
+`cmd/api/boundary_test.go` garante isso estruturalmente, não só por
+convenção.
+
+---
+
+## Validar permissão de escrita no S3 na subida (issue #283, 16.B4)
+
+A subida já checava alcance do bucket (`client.BucketExists`), o que pega
+endpoint errado e bucket inexistente — mas não credencial ou policy sem
+permissão de **escrita**, que só aparecia no primeiro `Put` de um usuário
+real.
+
+**Por que isso importa mais depois da 16.B2.** Com o breaker na frente, um
+`AccessDenied` é indistinguível, no mapeamento de erro que já existia, de
+"o serviço está quebrado". O circuito abre, e cada sonda de half-open
+recebe o mesmo `403` — ele não fecha sozinho, porque nada no caminho
+melhora sozinho. O breaker em si continua sendo a escolha certa (custa
+~34ns por requisição rejeitada, contra o round-trip completo que cada
+requisição pagaria sem ele); o problema real é que "circuito aberto"
+aponta para a dependência quando a culpa é da configuração.
+
+**A correção é na subida, não no breaker** — o mesmo princípio já
+registrado para storage em geral ("Configuração de storage: obrigatória,
+sem default"): falhar rápido na inicialização, onde a mensagem é lida por
+quem acabou de mexer na config, não às 3h como "anexos fora do ar".
+`probeWritePermission` (`internal/attachment/s3_storage.go`) escreve e
+remove um objeto vazio sob `writeProbeKey`, uma chave dedicada e
+nomeada — uma falha ao remover é reportada distinta de uma falha ao
+escrever, para que quem lê o log da subida saiba se pode haver um objeto
+esquecido para limpar à mão.
+
+**O caso aceito em aberto: rotação de credencial em processo já
+rodando.** A checagem de subida não pega uma credencial que expira depois
+que o processo já está de pé. Nesse caso o circuito abrindo é o
+comportamento correto — ele para de martelar uma credencial morta — e a
+sonda de half-open a cada `openTimeout` é uma forma razoável de perguntar
+"já trocaram a credencial?". Registrado aqui para que ninguém tente
+"consertar" isso depois: não há checagem de subida capaz de cobrir uma
+falha que só existe depois da subida.
+
+---
+
+## Counts() no /debug/vars, não no readiness (issue #284, 16.B5)
+
+Com o breaker da 16.B2, `Breaker.Counts()` passa a existir para os dois
+breakers de anexo e responde exatamente o que faltava — estado, falhas
+consecutivas contra o limiar, há quanto tempo o circuito está aberto. A
+tentação é expor isso em `GET /health/ready`. É errado nas duas
+topologias, e este projeto já tomou essa decisão uma vez, para o crier
+("um backend de log inacessível não impede a API de atender ninguém",
+seção crier + SigNoz acima) — aqui vale por um motivo ainda mais forte:
+anexos são dependência opcional cujas rotas já degradam sozinhas sem
+nenhum breaker envolvido.
+
+- **Com uma réplica** (a topologia registrada neste documento), reportar
+  not-ready tira o único pod. Uma falha parcial — anexos fora, tasks e
+  auth funcionando — vira indisponibilidade total.
+- **Com N réplicas contra o mesmo S3**, os breakers abrem mais ou menos
+  juntos, todos reportam not-ready mais ou menos juntos, e o
+  orquestrador não tem para onde mandar tráfego. Mesmo resultado, caminho
+  mais longo.
+
+Circuito aberto é falha **tratada** — tirar o pod de rotação por causa
+dele inverteria a prioridade justamente na dependência que o breaker já
+está degradando com elegância. `GET /health/ready` continua checando só o
+banco, sem nenhuma mudança.
+
+**Onde vai, então: `attachment_s3_breaker` e `attachment_s3_list_breaker`
+em `/debug/vars`** (`cmd/api/attachment_breaker.go`), publicados uma
+única vez por processo com o mesmo padrão `sync.Once` +
+`atomic.Pointer` que `publishCrierExpvarOnce` já usa — necessário pela
+mesma razão: `newServer` roda uma vez por `*testing.T` na suíte deste
+pacote, e `expvar.Publish` entra em pânico numa segunda chamada com o
+mesmo nome. Um breaker ausente (anexos desligados, ou backend em disco)
+reporta `{"state":"disabled"}`, não um erro nem um valor zerado
+ambíguo.
+
+**O detalhe que já custou caro uma vez, aplicado de novo aqui:**
+`Counts.State` é `bastion.State`, um tipo definido sobre `int` — o mesmo
+tipo que `crierAttrValue` (`cmd/api/crier.go`) precisa desviar
+explicitamente para não virar um marcador "unsupported value type" opaco
+no SigNoz (issue #81 do bastion). `attachmentBreakerSnapshot` passa
+`c.State.String()`, nunca o valor bruto, para o JSON de `/debug/vars`; o
+hook `OnStateChange` faz o mesmo antes de logar. `OnCall` complementa a
+transição com o erro que a causou — `StateChangeEvent` do bastion não
+carrega erro, só a transição em si, então o log de cada chamada contada
+como falha (`ev.Counted && ev.Err != nil`) é o que deixa "S3 caiu"
+distinguível de "credencial errada" ao lado da linha de transição, sem
+pedir ao bastion para carregar algo que ele deliberadamente não carrega.
+
+**Não verificado nesta sessão: a aparência real no SigNoz.** O ambiente
+de desenvolvimento não tem um coletor OTLP vivo para confirmar
+visualmente que os campos chegam intactos — a mesma limitação que já
+valia para a seção "crier + SigNoz" acima. O que está verificado é que
+`crierAttrValue`/`attachmentBreakerSnapshot` produzem a string correta
+antes de qualquer coisa sair deste processo.
