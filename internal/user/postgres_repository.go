@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/JonasBorgesLM/task-api/internal/platform/pgerr"
 )
 
 // postgreSQLUniqueViolation is the PostgreSQL error code for a unique
@@ -21,19 +23,60 @@ const postgreSQLUniqueViolation = "23505"
 // cmd/api/main.go) — one connection pool for the whole process, since both
 // domains live in the same database.
 type postgresRepository struct {
-	db *sql.DB
+	db          *sql.DB
+	callTimeout time.Duration
 }
 
 // NewPostgresRepository returns a new PostgreSQL-backed Repository using
 // db for all queries. Lifecycle (Close) is the caller's responsibility —
 // see cmd/api/main.go.
-func NewPostgresRepository(db *sql.DB) Repository {
-	return &postgresRepository{db: db}
+func NewPostgresRepository(db *sql.DB, callTimeout time.Duration) Repository {
+	return &postgresRepository{db: db, callTimeout: callTimeout}
+}
+
+// withTimeout bounds one database call from the server's own side.
+//
+// Without it the only limit on a query is the caller going away:
+// http.Server's WriteTimeout closes the connection but does not cancel the
+// handler's context, so a query waiting for a free pooled connection waits
+// for as long as the client is willing to. The deadline covers a whole
+// method, transaction included, never an individual statement — a deadline
+// firing between BeginTx and Commit would abandon the transaction with its
+// locks still held. See docs/DECISIONS.md § "Deadline de saída".
+//
+// A zero callTimeout leaves ctx untouched, so a caller that has already
+// bounded the call — or a test — is not second-guessed.
+func (r *postgresRepository) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.callTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, r.callTimeout)
+}
+
+// wrapDBError classifies err from a database/sql call that reached no
+// more specific sentinel check above it. A genuine infrastructure failure
+// — the database itself being the problem, not the request — becomes
+// ErrDependencyUnavailable; every other error (a constraint violation
+// already routed to its own sentinel above, a scan error, malformed
+// input) passes through unchanged, for the caller to wrap and return as
+// it already did. See docs/DECISIONS.md § "Classificação positiva de
+// erro de infraestrutura".
+func wrapDBError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if pgerr.IsInfrastructureFailure(err) {
+		return fmt.Errorf("%w: %w", ErrDependencyUnavailable, err)
+	}
+	return err
 }
 
 // CreateUser persists a new user. Returns ErrAlreadyExists if the email is
 // already taken.
 func (r *postgresRepository) CreateUser(ctx context.Context, u User) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		INSERT INTO users (id, email, password_hash, created_at, updated_at)
 		VALUES ($1::uuid, $2, $3, $4, $5)
@@ -44,7 +87,7 @@ func (r *postgresRepository) CreateUser(ctx context.Context, u User) error {
 		if isUniqueViolation(err) {
 			return ErrAlreadyExists
 		}
-		return fmt.Errorf("postgres: create user: %w", err)
+		return fmt.Errorf("postgres: create user: %w", wrapDBError(err))
 	}
 	return nil
 }
@@ -52,6 +95,9 @@ func (r *postgresRepository) CreateUser(ctx context.Context, u User) error {
 // FindUserByEmail returns the user with the given email. Returns
 // ErrNotFound if absent.
 func (r *postgresRepository) FindUserByEmail(ctx context.Context, email string) (User, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		SELECT id::text, email, password_hash, created_at, updated_at
 		FROM users
@@ -62,7 +108,7 @@ func (r *postgresRepository) FindUserByEmail(ctx context.Context, email string) 
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrNotFound
 		}
-		return User{}, fmt.Errorf("postgres: find user by email: %w", err)
+		return User{}, fmt.Errorf("postgres: find user by email: %w", wrapDBError(err))
 	}
 	return u, nil
 }
@@ -70,6 +116,9 @@ func (r *postgresRepository) FindUserByEmail(ctx context.Context, email string) 
 // FindUserByID returns the user with the given ID. Returns ErrNotFound if
 // absent.
 func (r *postgresRepository) FindUserByID(ctx context.Context, id string) (User, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		SELECT id::text, email, password_hash, created_at, updated_at
 		FROM users
@@ -80,7 +129,7 @@ func (r *postgresRepository) FindUserByID(ctx context.Context, id string) (User,
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrNotFound
 		}
-		return User{}, fmt.Errorf("postgres: find user by id: %w", err)
+		return User{}, fmt.Errorf("postgres: find user by id: %w", wrapDBError(err))
 	}
 	return u, nil
 }
@@ -88,6 +137,9 @@ func (r *postgresRepository) FindUserByID(ctx context.Context, id string) (User,
 // UpdateUserPassword replaces id's stored password hash and bumps
 // updated_at to now. Returns ErrNotFound if no user with that id exists.
 func (r *postgresRepository) UpdateUserPassword(ctx context.Context, id, passwordHash string) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		UPDATE users
 		SET password_hash = $2, updated_at = now()
@@ -95,11 +147,11 @@ func (r *postgresRepository) UpdateUserPassword(ctx context.Context, id, passwor
 	`
 	result, err := r.db.ExecContext(ctx, query, id, passwordHash)
 	if err != nil {
-		return fmt.Errorf("postgres: update user password: %w", err)
+		return fmt.Errorf("postgres: update user password: %w", wrapDBError(err))
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("postgres: update user password: %w", err)
+		return fmt.Errorf("postgres: update user password: %w", wrapDBError(err))
 	}
 	if rows == 0 {
 		return ErrNotFound
@@ -121,14 +173,17 @@ func (r *postgresRepository) UpdateUserPassword(ctx context.Context, id, passwor
 // bug, not a condition Service.DeleteAccount's contract is meant to
 // paper over.
 func (r *postgresRepository) DeleteUser(ctx context.Context, id string) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `DELETE FROM users WHERE id = $1::uuid`
 	result, err := r.db.ExecContext(ctx, query, id)
 	if err != nil {
-		return fmt.Errorf("postgres: delete user: %w", err)
+		return fmt.Errorf("postgres: delete user: %w", wrapDBError(err))
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("postgres: delete user: %w", err)
+		return fmt.Errorf("postgres: delete user: %w", wrapDBError(err))
 	}
 	if rows == 0 {
 		return ErrNotFound
@@ -143,9 +198,12 @@ func (r *postgresRepository) DeleteUser(ctx context.Context, id string) error {
 // (0008_add_sessions_user_id_created_at_index.up.sql) to do that without
 // a sort step.
 func (r *postgresRepository) CreateSession(ctx context.Context, s Session, maxSessions int) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("postgres: create session: begin transaction: %w", err)
+		return fmt.Errorf("postgres: create session: begin transaction: %w", wrapDBError(err))
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once Commit has succeeded
 
@@ -166,7 +224,7 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s Session, maxSe
 	// variant), so there is nothing to unlock explicitly, and it never
 	// blocks a *different* user's sessions.
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, s.UserID); err != nil {
-		return fmt.Errorf("postgres: create session: acquire lock: %w", err)
+		return fmt.Errorf("postgres: create session: acquire lock: %w", wrapDBError(err))
 	}
 
 	const insertQuery = `
@@ -174,7 +232,7 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s Session, maxSe
 		VALUES ($1, $2::uuid, $3, $4)
 	`
 	if _, err := tx.ExecContext(ctx, insertQuery, s.TokenHash, s.UserID, s.ExpiresAt, s.CreatedAt); err != nil {
-		return fmt.Errorf("postgres: create session: %w", err)
+		return fmt.Errorf("postgres: create session: %w", wrapDBError(err))
 	}
 
 	const evictQuery = `
@@ -188,20 +246,23 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s Session, maxSe
 		  )
 	`
 	if _, err := tx.ExecContext(ctx, evictQuery, s.UserID, maxSessions); err != nil {
-		return fmt.Errorf("postgres: create session: evict oldest: %w", err)
+		return fmt.Errorf("postgres: create session: evict oldest: %w", wrapDBError(err))
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("postgres: create session: commit transaction: %w", err)
+		return fmt.Errorf("postgres: create session: commit transaction: %w", wrapDBError(err))
 	}
 	return nil
 }
 
 // DeleteSessionsForUser removes every session belonging to userID.
 func (r *postgresRepository) DeleteSessionsForUser(ctx context.Context, userID string) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `DELETE FROM sessions WHERE user_id = $1::uuid`
 	if _, err := r.db.ExecContext(ctx, query, userID); err != nil {
-		return fmt.Errorf("postgres: delete sessions for user: %w", err)
+		return fmt.Errorf("postgres: delete sessions for user: %w", wrapDBError(err))
 	}
 	return nil
 }
@@ -209,9 +270,12 @@ func (r *postgresRepository) DeleteSessionsForUser(ctx context.Context, userID s
 // DeleteSessionsForUserExcept removes every session belonging to userID
 // other than the one whose hash is keepTokenHash.
 func (r *postgresRepository) DeleteSessionsForUserExcept(ctx context.Context, userID, keepTokenHash string) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `DELETE FROM sessions WHERE user_id = $1::uuid AND token_hash != $2`
 	if _, err := r.db.ExecContext(ctx, query, userID, keepTokenHash); err != nil {
-		return fmt.Errorf("postgres: delete sessions for user except: %w", err)
+		return fmt.Errorf("postgres: delete sessions for user except: %w", wrapDBError(err))
 	}
 	return nil
 }
@@ -219,6 +283,9 @@ func (r *postgresRepository) DeleteSessionsForUserExcept(ctx context.Context, us
 // FindSessionByTokenHash returns the session with the given token hash.
 // Returns ErrNotFound if absent.
 func (r *postgresRepository) FindSessionByTokenHash(ctx context.Context, tokenHash string) (Session, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		SELECT token_hash, user_id::text, expires_at, created_at
 		FROM sessions
@@ -231,7 +298,7 @@ func (r *postgresRepository) FindSessionByTokenHash(ctx context.Context, tokenHa
 		if errors.Is(err, sql.ErrNoRows) {
 			return Session{}, ErrNotFound
 		}
-		return Session{}, fmt.Errorf("postgres: find session: %w", err)
+		return Session{}, fmt.Errorf("postgres: find session: %w", wrapDBError(err))
 	}
 	return s, nil
 }
@@ -240,8 +307,11 @@ func (r *postgresRepository) FindSessionByTokenHash(ctx context.Context, tokenHa
 // absent session is not an error — see memoryRepository.DeleteSession's
 // doc comment for why.
 func (r *postgresRepository) DeleteSession(ctx context.Context, tokenHash string) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	if _, err := r.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash); err != nil {
-		return fmt.Errorf("postgres: delete session: %w", err)
+		return fmt.Errorf("postgres: delete session: %w", wrapDBError(err))
 	}
 	return nil
 }
@@ -251,6 +321,9 @@ func (r *postgresRepository) DeleteSession(ctx context.Context, tokenHash string
 // CreateSession's own eviction query) serves this ORDER BY directly,
 // with no additional index.
 func (r *postgresRepository) FindSessionsForUser(ctx context.Context, userID string) ([]Session, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		SELECT token_hash, user_id::text, expires_at, created_at
 		FROM sessions
@@ -259,7 +332,7 @@ func (r *postgresRepository) FindSessionsForUser(ctx context.Context, userID str
 	`
 	rows, err := r.db.QueryContext(ctx, query, userID)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: find sessions for user: %w", err)
+		return nil, fmt.Errorf("postgres: find sessions for user: %w", wrapDBError(err))
 	}
 	defer rows.Close()
 
@@ -267,12 +340,12 @@ func (r *postgresRepository) FindSessionsForUser(ctx context.Context, userID str
 	for rows.Next() {
 		var s Session
 		if err := rows.Scan(&s.TokenHash, &s.UserID, &s.ExpiresAt, &s.CreatedAt); err != nil {
-			return nil, fmt.Errorf("postgres: find sessions for user: scan: %w", err)
+			return nil, fmt.Errorf("postgres: find sessions for user: scan: %w", wrapDBError(err))
 		}
 		sessions = append(sessions, s)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: find sessions for user: %w", err)
+		return nil, fmt.Errorf("postgres: find sessions for user: %w", wrapDBError(err))
 	}
 	return sessions, nil
 }
@@ -280,8 +353,11 @@ func (r *postgresRepository) FindSessionsForUser(ctx context.Context, userID str
 // DeleteExpiredSessions removes every session whose expires_at is before
 // now.
 func (r *postgresRepository) DeleteExpiredSessions(ctx context.Context, now time.Time) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	if _, err := r.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < $1`, now); err != nil {
-		return fmt.Errorf("postgres: delete expired sessions: %w", err)
+		return fmt.Errorf("postgres: delete expired sessions: %w", wrapDBError(err))
 	}
 	return nil
 }

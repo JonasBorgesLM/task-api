@@ -29,6 +29,12 @@ type S3Config struct {
 
 	Region string
 	UseSSL bool
+
+	// CallTimeout bounds one round trip to the object store. It does not
+	// bound reading a download's bytes -- see Open for why bounding those
+	// would kill a legitimate large download rather than a stuck one.
+	// Zero means no deadline is applied.
+	CallTimeout time.Duration
 }
 
 // s3BlobStore stores blobs as objects in a bucket.
@@ -43,8 +49,9 @@ type S3Config struct {
 // That was the bet made when metadata and bytes were split into two
 // boundaries back in the attachments work, and this is it paying off.
 type s3BlobStore struct {
-	client *minio.Client
-	bucket string
+	client      *minio.Client
+	bucket      string
+	callTimeout time.Duration
 }
 
 // NewS3BlobStore returns a BlobStore backed by the bucket in cfg, and
@@ -88,10 +95,28 @@ func NewS3BlobStore(ctx context.Context, cfg S3Config) (BlobStore, func() error,
 		return nil, nil, fmt.Errorf("attachment: bucket %q does not exist", cfg.Bucket)
 	}
 
-	return &s3BlobStore{client: client, bucket: cfg.Bucket}, func() error { return nil }, nil
+	return &s3BlobStore{client: client, bucket: cfg.Bucket, callTimeout: cfg.CallTimeout}, func() error { return nil }, nil
+}
+
+// withTimeout bounds one round trip to the object store. A zero
+// callTimeout leaves ctx untouched, so a caller that has already bounded
+// the call itself -- or a test -- is not second-guessed.
+//
+// This is deliberately per-call rather than per-request: a deadline on the
+// request context would also cancel the reader Open hands back, which is a
+// legitimate long download rather than a stuck call. See docs/DECISIONS.md
+// § "Deadline de saída".
+func (s *s3BlobStore) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if s.callTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, s.callTimeout)
 }
 
 func (s *s3BlobStore) Put(ctx context.Context, key string, r io.Reader, maxBytes int64) (int64, error) {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	// Read one byte past the limit, exactly as the filesystem store
 	// does: if that byte exists the stream was over the limit, and we
 	// know without buffering the whole thing to find out.
@@ -120,19 +145,37 @@ func (s *s3BlobStore) Put(ctx context.Context, key string, r io.Reader, maxBytes
 	return info.Size, nil
 }
 
+// Open returns a reader for key, after proving the object is actually there.
+//
+// The two calls below are split on purpose, and the split is this method's
+// whole shape:
+//
+// StatObject is the round trip. It is bounded by callTimeout, and it is what
+// lets Open return ErrNotFound like the filesystem store does instead of
+// handing back a reader that fails on its first read. It replaced an
+// obj.Stat() that took no context at all — the one call in this package no
+// cancellation could reach, so a hung object store held the goroutine even
+// after the client had gone.
+//
+// GetObject is lazy: it performs no I/O, so calling it after the Stat leaves
+// the round-trip count exactly where it was. It deliberately receives the
+// caller's own ctx rather than a deadline-bounded one, because minio binds
+// the returned object to whatever context created it and re-checks that
+// context on every Read. A deadline here would not bound a stuck call — it
+// would cut off a legitimate large download partway through, which is worse
+// than the problem it was meant to solve. Bounding the bytes is the HTTP
+// server's job, not this store's. See docs/DECISIONS.md § "Deadline de
+// saída".
 func (s *s3BlobStore) Open(ctx context.Context, key string) (io.ReadSeekCloser, error) {
-	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
-	if err != nil {
+	statCtx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
+	if _, err := s.client.StatObject(statCtx, s.bucket, key, minio.StatObjectOptions{}); err != nil {
 		return nil, mapS3Error(err)
 	}
 
-	// GetObject is lazy: it returns an object handle without having
-	// talked to the server, so a missing key surfaces on the first read
-	// rather than here. Stat forces that round trip now, which is what
-	// lets this return ErrNotFound like the filesystem store does
-	// instead of handing back a reader that fails later.
-	if _, err := obj.Stat(); err != nil {
-		obj.Close()
+	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
 		return nil, mapS3Error(err)
 	}
 
@@ -140,6 +183,9 @@ func (s *s3BlobStore) Open(ctx context.Context, key string) (io.ReadSeekCloser, 
 }
 
 func (s *s3BlobStore) Delete(ctx context.Context, key string) error {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	// S3 delete is idempotent: removing an absent key succeeds, which is
 	// the contract BlobStore.Delete already promises.
 	if err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{}); err != nil {
@@ -149,9 +195,12 @@ func (s *s3BlobStore) Delete(ctx context.Context, key string) error {
 }
 
 func (s *s3BlobStore) List(ctx context.Context) ([]BlobRef, error) {
-	// Cancel the underlying listing when this returns, so an early exit
-	// does not leave the client draining pages nobody will read.
-	listCtx, cancel := context.WithCancel(ctx)
+	// Bound the whole listing and cancel it when this returns, so an early
+	// exit does not leave the client draining pages nobody will read. The
+	// deadline covers the sweep as a whole rather than each page: List is
+	// explicitly unbounded in size, and a per-page deadline would let a
+	// large bucket run for as long as it has pages.
+	listCtx, cancel := s.withTimeout(ctx)
 	defer cancel()
 
 	refs := make([]BlobRef, 0)

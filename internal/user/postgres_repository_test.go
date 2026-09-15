@@ -22,6 +22,11 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+// testDBCallTimeout is deliberately generous: these tests assert
+// repository behaviour, not the deadline, and a slow CI database must
+// never turn a correct test into a flake.
+const testDBCallTimeout = 30 * time.Second
+
 const testDatabaseURLEnv = "TEST_DATABASE_URL"
 
 // newPostgresTestRepo connects to the database named by TEST_DATABASE_URL,
@@ -58,7 +63,7 @@ func newPostgresTestRepo(t *testing.T) *postgresRepository {
 	// Goes through the exported constructor (rather than a bare struct
 	// literal) so these tests also exercise NewPostgresRepository itself,
 	// not just the type it returns.
-	return NewPostgresRepository(db).(*postgresRepository)
+	return NewPostgresRepository(db, testDBCallTimeout).(*postgresRepository)
 }
 
 func newPostgresTestUser(t *testing.T, email string) User {

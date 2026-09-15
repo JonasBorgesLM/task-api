@@ -58,6 +58,8 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `DB_MAX_OPEN_CONNS` | Max open connections in the pool | `25` |
 | `DB_MAX_IDLE_CONNS` | Max idle connections kept in the pool | `25` |
 | `DB_CONN_MAX_LIFETIME` | Max lifetime of a pooled connection | `5m` |
+| `DB_CALL_TIMEOUT` | Server-side deadline for a single database call | `5s` |
+| `STORAGE_CALL_TIMEOUT` | Server-side deadline for a single object-storage round trip | `30s` |
 | `DB_AUTO_MIGRATE` | Apply pending migrations automatically on startup | `true` |
 | `AUTH_SESSION_TTL` | How long a `POST /v1/auth/login` token stays valid | `24h` |
 | `AUTH_MAX_SESSIONS_PER_USER` | How many of a user's sessions stay alive at once. A login past the cap evicts that user's oldest session rather than being refused — see `docs/DECISIONS.md` | `10` |

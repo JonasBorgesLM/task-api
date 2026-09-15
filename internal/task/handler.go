@@ -417,6 +417,22 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, r *http.Request, err
 		h.writeError(w, r, http.StatusConflict, "task was modified concurrently, please retry")
 	case errors.Is(err, ErrInvalidTransition):
 		h.writeError(w, r, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrDependencyUnavailable):
+		// Logged, and logged distinctly from the default branch below --
+		// this is exactly the distinction issue #278 exists for: an
+		// operator or an alert can filter on this message without
+		// reading err's own text, which is a raw wrapped PostgreSQL
+		// error and not something a log query should have to parse.
+		// 503, not 500: the request was reasonable, the dependency is
+		// the problem, and it is worth retrying once it recovers.
+		requestID, _ := middleware.RequestIDFromContext(r.Context())
+		h.logger.Error("dependency unavailable",
+			"error", err,
+			"request_id", requestID,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+		h.writeError(w, r, http.StatusServiceUnavailable, "service temporarily unavailable, please retry")
 	default:
 		requestID, _ := middleware.RequestIDFromContext(r.Context())
 		h.logger.Error("unexpected service error",
