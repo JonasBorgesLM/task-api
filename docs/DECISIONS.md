@@ -2702,3 +2702,40 @@ pelo `Handler` via `errors.As` contra
 `interface{ RetryAfter() time.Duration }`, sem nunca importar bastion —
 `cmd/api/boundary_test.go` garante isso estruturalmente, não só por
 convenção.
+
+---
+
+## Validar permissão de escrita no S3 na subida (issue #283, 16.B4)
+
+A subida já checava alcance do bucket (`client.BucketExists`), o que pega
+endpoint errado e bucket inexistente — mas não credencial ou policy sem
+permissão de **escrita**, que só aparecia no primeiro `Put` de um usuário
+real.
+
+**Por que isso importa mais depois da 16.B2.** Com o breaker na frente, um
+`AccessDenied` é indistinguível, no mapeamento de erro que já existia, de
+"o serviço está quebrado". O circuito abre, e cada sonda de half-open
+recebe o mesmo `403` — ele não fecha sozinho, porque nada no caminho
+melhora sozinho. O breaker em si continua sendo a escolha certa (custa
+~34ns por requisição rejeitada, contra o round-trip completo que cada
+requisição pagaria sem ele); o problema real é que "circuito aberto"
+aponta para a dependência quando a culpa é da configuração.
+
+**A correção é na subida, não no breaker** — o mesmo princípio já
+registrado para storage em geral ("Configuração de storage: obrigatória,
+sem default"): falhar rápido na inicialização, onde a mensagem é lida por
+quem acabou de mexer na config, não às 3h como "anexos fora do ar".
+`probeWritePermission` (`internal/attachment/s3_storage.go`) escreve e
+remove um objeto vazio sob `writeProbeKey`, uma chave dedicada e
+nomeada — uma falha ao remover é reportada distinta de uma falha ao
+escrever, para que quem lê o log da subida saiba se pode haver um objeto
+esquecido para limpar à mão.
+
+**O caso aceito em aberto: rotação de credencial em processo já
+rodando.** A checagem de subida não pega uma credencial que expira depois
+que o processo já está de pé. Nesse caso o circuito abrindo é o
+comportamento correto — ele para de martelar uma credencial morta — e a
+sonda de half-open a cada `openTimeout` é uma forma razoável de perguntar
+"já trocaram a credencial?". Registrado aqui para que ninguém tente
+"consertar" isso depois: não há checagem de subida capaz de cobrir uma
+falha que só existe depois da subida.
