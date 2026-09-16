@@ -2998,3 +2998,25 @@ zero, `docker compose down && make db-up storage-up` para recriar os
 containers a partir do `docker-compose.yml` já trocado, `docker inspect
 task-api-minio-1` confirmando a imagem em uso, e a suíte de integração
 completa (`make test-integration`) rodando verde contra o container real.
+
+**Um segundo bug, exposto só depois de consertar o primeiro.** Com o registry
+trocado, o job `Quality Gate` passou do passo "Start MinIO" pela primeira vez —
+e quebrou logo no próximo, em
+`TestIntegration_DebugVars_AttachmentBreaker_ReportsClosedWithHealthyS3`
+(escrito na 16.B5): `attachment: bucket "task-api-attachments" does not
+exist`. O teste assumia o bucket que `docker-compose.yml`'s serviço
+`minio-bucket` cria (`mc mb --ignore-existing local/task-api-attachments`) —
+mas o job `Quality Gate` sobe o MinIO com `docker run` direto, sem nenhum passo
+equivalente. Como a CI nunca tinha chegado vivo a esse teste antes (sempre
+travava no MinIO primeiro), o bug ficou invisível desde que foi escrito — um
+bloqueio escondendo o outro.
+
+Corrigido criando o próprio bucket dentro do teste (`s3TestConfig`, em
+`cmd/api/attachment_breaker_integration_test.go`), com um nome único por
+execução e `t.Cleanup` para remover — o mesmo padrão que
+`internal/attachment/s3_storage_test.go`'s `newS3TestBucket` já usa, em vez de
+depender de um bucket externo pré-criado. Reproduzido localmente antes da
+correção — `docker compose down -v` seguido de `docker compose up -d minio`
+sem o serviço `minio-bucket`, replicando exatamente o MinIO vazio que a CI vê
+— e confirmado que o teste corrigido passa contra esse MinIO vazio, não só
+contra o ambiente de desenvolvimento que já tinha o bucket de antes.
