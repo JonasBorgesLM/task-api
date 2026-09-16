@@ -2961,3 +2961,40 @@ confiança. Verificado contra PostgreSQL real
 `closed` depois de um ciclo completo de registro/login/criação de task através
 dos três repositórios decorados — não só que o breaker existe, mas que o tráfego
 real continua passando por ele.
+
+---
+
+## Registry do MinIO: Docker Hub para Quay.io (issue #288)
+
+O job `Quality Gate` da CI passou a falhar no passo "Start MinIO" —
+`docker: pull access denied for minio/minio, repository does not exist`.
+Investigado durante a #287 (16.A1-A3) e confirmado de novo em #289/#290/#291:
+`curl https://hub.docker.com/v2/repositories/minio/minio/` devolve
+`{"message":"object not found"}` direto da API do Docker Hub, reproduzido fora
+de qualquer contexto de CI (`docker pull` na máquina local falha do mesmo
+jeito). Não é rate limit nem exigência de login — o repositório não está mais
+sendo servido publicamente ali.
+
+**A correção: trocar de registry, não de versão.** O MinIO publica as mesmas
+imagens, com os mesmos nomes de tag, em `quay.io/minio/minio` —
+`quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` existe lá, e o `docker pull`
+devolve exatamente o mesmo digest (`sha256:a1ea29fa28355559ef137d71fc570e50
+8a214ec84ff8083e39bc5428980b015e`) que a imagem antiga do Docker Hub — é a
+mesma imagem, byte a byte, publicada em outro lugar, não uma migração de
+versão disfarçada de troca de registry.
+
+**Dois pontos de referência, os dois trocados juntos**: `docker-compose.yml`'s
+serviço `minio` e o passo "Start MinIO" de `.github/workflows/ci.yml` — o
+segundo roda `docker run` direto (não é um `services:` do GitHub Actions,
+porque a imagem do MinIO precisa do comando `server /data` explícito, que um
+`services:` não permite passar). Nenhum outro lugar do repositório referencia
+a imagem: as menções a `minio/minio` em `README.md`/`CLAUDE.md` são sobre o
+SDK Go (`github.com/minio/minio-go`), um pacote completamente diferente da
+imagem de container.
+
+**Verificado com a imagem antiga removida do cache local**, não só lida a
+respeito: `docker pull quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` do
+zero, `docker compose down && make db-up storage-up` para recriar os
+containers a partir do `docker-compose.yml` já trocado, `docker inspect
+task-api-minio-1` confirmando a imagem em uso, e a suíte de integração
+completa (`make test-integration`) rodando verde contra o container real.
