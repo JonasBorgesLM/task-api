@@ -82,13 +82,14 @@ func (s *breakerBlobStore) Put(ctx context.Context, key string, r io.Reader, max
 	n, err := bastion.Execute(ctx, s.rw, func(ctx context.Context) (int64, error) {
 		return s.next.Put(ctx, key, r, maxBytes)
 	})
-	return n, translateBreakerError(err)
+	return n, translateBreakerError(err, s3BreakerOpenTimeout)
 }
 
 func (s *breakerBlobStore) Delete(ctx context.Context, key string) error {
-	return translateBreakerError(bastion.Do(ctx, s.rw, func(ctx context.Context) error {
+	err := bastion.Do(ctx, s.rw, func(ctx context.Context) error {
 		return s.next.Delete(ctx, key)
-	}))
+	})
+	return translateBreakerError(err, s3BreakerOpenTimeout)
 }
 
 // Open covers only the round trip that proves the object exists and the
@@ -105,7 +106,7 @@ func (s *breakerBlobStore) Open(ctx context.Context, key string) (io.ReadSeekClo
 	blob, err := bastion.Execute(ctx, s.rw, func(ctx context.Context) (io.ReadSeekCloser, error) {
 		return s.next.Open(ctx, key)
 	})
-	return blob, translateBreakerError(err)
+	return blob, translateBreakerError(err, s3BreakerOpenTimeout)
 }
 
 // List runs through its own breaker, separate from rw: it only ever runs
@@ -117,7 +118,7 @@ func (s *breakerBlobStore) List(ctx context.Context) ([]BlobRef, error) {
 	refs, err := bastion.Execute(ctx, s.list, func(ctx context.Context) ([]BlobRef, error) {
 		return s.next.List(ctx)
 	})
-	return refs, translateBreakerError(err)
+	return refs, translateBreakerError(err, s3BreakerOpenTimeout)
 }
 
 // translateBreakerError maps bastion's own rejection sentinels to this
@@ -125,14 +126,20 @@ func (s *breakerBlobStore) List(ctx context.Context) ([]BlobRef, error) {
 // ever needs bastion in scope to handle the "breaker said no" case —
 // the same rule CLAUDE.md states for handleServiceError and PostgreSQL,
 // applied to a different dependency underneath the same interface.
+// retryAfter is the calling breaker's own openTimeout — the S3
+// breakers built in this file pass s3BreakerOpenTimeout; the shared
+// PostgreSQL breaker this package's own Repository decorator uses
+// (postgres_breaker.go) passes whatever cmd/api built it with, since
+// that breaker is shared across three packages and none of them owns
+// the number.
 //
 // Every other error — including one returned by s.next itself, already
 // in this package's own vocabulary (ErrNotFound, ErrTooLarge, or a
 // generic wrapped fmt.Errorf) — passes through unchanged: op's own
 // errors were never bastion's to translate.
-func translateBreakerError(err error) error {
+func translateBreakerError(err error, retryAfter time.Duration) error {
 	if errors.Is(err, bastion.ErrOpenState) || errors.Is(err, bastion.ErrTooManyRequests) {
-		return &unavailableError{cause: err}
+		return &unavailableError{cause: err, retryAfter: retryAfter}
 	}
 	return err
 }
@@ -142,8 +149,18 @@ func translateBreakerError(err error) error {
 // sentinel it was built from through Unwrap/errors.As — a handler has no
 // business inspecting bastion.ErrOpenState directly, only this
 // package's own ErrUnavailable, matched through Is below.
+//
+// Shared by both breakers that can produce an ErrUnavailable for this
+// package — the BlobStore breaker in this file and the shared
+// PostgreSQL breaker's Repository decorator (postgres_breaker.go) — so
+// a caller (Handler included) never needs to know which dependency
+// underneath actually rejected the call, only that one did and for how
+// long to back off. retryAfter carries that per rejection rather than
+// being read from a package constant, since the two breakers this type
+// represents do not share one.
 type unavailableError struct {
-	cause error
+	cause      error
+	retryAfter time.Duration
 }
 
 func (e *unavailableError) Error() string {
@@ -158,14 +175,13 @@ func (e *unavailableError) Is(target error) bool {
 	return target == ErrUnavailable
 }
 
-// RetryAfter reports how long the caller should wait before retrying —
-// always s3BreakerOpenTimeout, the same value the breaker itself was
-// built with. Handler reads this via errors.As against the
+// RetryAfter reports how long the caller should wait before retrying.
+// Handler reads this via errors.As against the
 // interface{ RetryAfter() time.Duration } shape, exactly the way the
 // standard library's own net/url and net/http errors expose extra detail
 // without a caller needing this file's concrete type.
 func (e *unavailableError) RetryAfter() time.Duration {
-	return s3BreakerOpenTimeout
+	return e.retryAfter
 }
 
 // isS3BreakerFailure classifies which errors returned by the wrapped

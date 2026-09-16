@@ -268,7 +268,7 @@ func TestDelete_Handler_RequiresAuth(t *testing.T) {
 func TestDelete_Handler_ErrUnavailable_Returns503WithRetryAfter(t *testing.T) {
 	svc := &fakeService{
 		deleteFn: func(_, _ string) error {
-			return translateBreakerError(bastion.ErrOpenState)
+			return translateBreakerError(bastion.ErrOpenState, s3BreakerOpenTimeout)
 		},
 	}
 	h := newHandlerWithFake(svc)
