@@ -3,12 +3,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/JonasBorgesLM/task-api/internal/config"
 )
@@ -19,6 +24,16 @@ import (
 // uses, so `make test-integration` (which sets it) runs this and a plain
 // `go test -tags=integration ./...` without MinIO up skips it instead of
 // failing.
+//
+// Creates its own bucket rather than assuming
+// docker-compose.yml's minio-bucket service already made one: this
+// file's own test is the only thing in the module that talks to S3
+// through a real newServer rather than through
+// internal/attachment's own test helpers, and CI's "Quality Gate" job
+// starts MinIO with a plain `docker run`, not docker-compose — no
+// minio-bucket step runs there at all. NewS3BlobStore refuses to
+// create a missing bucket itself (see its own doc comment), so
+// whoever calls it has to.
 func s3TestConfig(t *testing.T) config.Config {
 	t.Helper()
 
@@ -26,16 +41,33 @@ func s3TestConfig(t *testing.T) config.Config {
 	if endpoint == "" {
 		t.Skip("TEST_S3_ENDPOINT not set; skipping S3 integration test (see docker-compose.yml's minio service)")
 	}
+	accessKey := os.Getenv("TEST_S3_ACCESS_KEY")
+	secretKey := os.Getenv("TEST_S3_SECRET_KEY")
+
+	admin, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: false,
+	})
+	if err != nil {
+		t.Fatalf("build admin client: %v", err)
+	}
+
+	ctx := context.Background()
+	bucket := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	if err := admin.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+		t.Fatalf("create bucket %q: %v", bucket, err)
+	}
+	t.Cleanup(func() {
+		if err := admin.RemoveBucket(ctx, bucket); err != nil {
+			t.Errorf("remove bucket %q: %v", bucket, err)
+		}
+	})
 
 	cfg := testConfig()
 	cfg.AttachmentS3Endpoint = endpoint
-	// The bucket docker-compose.yml's minio-bucket service creates on
-	// startup (`mc mb --ignore-existing local/task-api-attachments`) —
-	// NewS3BlobStore refuses to create one itself, so this must already
-	// exist.
-	cfg.AttachmentS3Bucket = "task-api-attachments"
-	cfg.AttachmentS3AccessKey = os.Getenv("TEST_S3_ACCESS_KEY")
-	cfg.AttachmentS3SecretKey = os.Getenv("TEST_S3_SECRET_KEY")
+	cfg.AttachmentS3Bucket = bucket
+	cfg.AttachmentS3AccessKey = accessKey
+	cfg.AttachmentS3SecretKey = secretKey
 	cfg.AttachmentMaxBytes = 1 << 20
 	cfg.AttachmentMaxBytesPerUser = 10 << 20
 	cfg.AttachmentOrphanMinAge = time.Hour

@@ -112,8 +112,11 @@ jobs:
       # sleeping a fixed amount, so a slow runner waits longer instead of
       # producing a flake.
       - name: Start MinIO
+        # quay.io, not Docker Hub — see docker-compose.yml's minio
+        # service and docs/DECISIONS.md § "Registry do MinIO: Docker Hub
+        # para Quay.io" (issue #288). Same tag, same image.
         run: |
-          docker run -d --name minio             -p 9000:9000             -e MINIO_ROOT_USER=task_api             -e MINIO_ROOT_PASSWORD=task_api_secret             minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          docker run -d --name minio             -p 9000:9000             -e MINIO_ROOT_USER=task_api             -e MINIO_ROOT_PASSWORD=task_api_secret             quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
           for i in $(seq 1 60); do
             if curl -sf http://localhost:9000/minio/health/live >/dev/null; then
               echo "MinIO ready after ${i}s"
