@@ -27,3 +27,18 @@ var ErrInvalidCredentials = errors.New("invalid email or password")
 // worth retrying, once the dependency recovers. See
 // docs/DECISIONS.md § "Classificação positiva de erro de infraestrutura".
 var ErrDependencyUnavailable = errors.New("dependency unavailable")
+
+// ErrUnavailable is returned by a Repository wrapped with a circuit
+// breaker (see postgres_breaker.go) when the breaker itself refuses a
+// call — the circuit is open, or half-open has already admitted its
+// allowance of probes. The wrapped operation was never invoked in
+// either case.
+//
+// Distinct from ErrDependencyUnavailable: that sentinel means "the call
+// was attempted and the database told us it is unhealthy, once". This
+// one means "the breaker, from a run of prior evidence, already knows
+// better than to try" — the recovery moment is knowable in advance (the
+// breaker's own openTimeout), which is why Handler answers it with a
+// 503 carrying Retry-After. See docs/DECISIONS.md § "Breaker
+// compartilhado no PostgreSQL".
+var ErrUnavailable = errors.New("database unavailable")

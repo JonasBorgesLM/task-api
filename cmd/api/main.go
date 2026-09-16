@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/JonasBorgesLM/bastion"
 	"github.com/JonasBorgesLM/cairn"
 	"github.com/JonasBorgesLM/cairn/memstore"
 	"github.com/JonasBorgesLM/cairn/policy"
@@ -273,16 +274,32 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// db == nil (cfg.DatabaseURL unset) selects the in-memory
 	// implementation for both, unchanged from before this second domain
 	// existed.
+	//
+	// dbBreaker is nil in the in-memory configuration — there is no
+	// pool to protect — and reset on every call for the same reason
+	// currentDB is: a *testing.T building more than one server in this
+	// package's own suite must not see a prior server's breaker on
+	// /debug/vars.
+	publishDBBreakerExpvarOnce()
 	var (
-		taskRepo task.Repository
-		userRepo user.Repository
+		taskRepo  task.Repository
+		userRepo  user.Repository
+		dbBreaker *bastion.Breaker
 	)
 	if db == nil {
 		taskRepo = task.NewMemoryRepository()
 		userRepo = user.NewMemoryRepository()
+		currentDBBreaker.Store(nil)
 	} else {
-		taskRepo = task.NewPostgresRepository(db, cfg.DBCallTimeout)
-		userRepo = user.NewPostgresRepository(db, cfg.DBCallTimeout)
+		dbBreaker, err = buildDBBreaker(logger)
+		if err != nil {
+			closeDB()
+			return nil, nil, fmt.Errorf("build database breaker: %w", err)
+		}
+		currentDBBreaker.Store(dbBreaker)
+
+		taskRepo = task.NewBreakerRepository(task.NewPostgresRepository(db, cfg.DBCallTimeout), dbBreaker, dbBreakerOpenTimeout)
+		userRepo = user.NewBreakerRepository(user.NewPostgresRepository(db, cfg.DBCallTimeout), dbBreaker, dbBreakerOpenTimeout)
 	}
 
 	taskSvc := task.NewService(taskRepo)
@@ -531,7 +548,7 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 				},
 			)
 		} else {
-			attachmentRepo = attachment.NewPostgresRepository(db, cfg.DBCallTimeout)
+			attachmentRepo = attachment.NewBreakerRepository(attachment.NewPostgresRepository(db, cfg.DBCallTimeout), dbBreaker, dbBreakerOpenTimeout)
 		}
 
 		// = , not := : this must assign to the attachmentSvc declared

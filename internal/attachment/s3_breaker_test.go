@@ -267,7 +267,7 @@ func TestIsS3BreakerFailure(t *testing.T) {
 // cannot reach bastion.ErrOpenState/ErrTooManyRequests through it via
 // errors.Is/As — only ErrUnavailable itself.
 func TestUnavailableError_NeverMatchesTheUnderlyingBastionSentinel(t *testing.T) {
-	err := translateBreakerError(bastion.ErrOpenState)
+	err := translateBreakerError(bastion.ErrOpenState, s3BreakerOpenTimeout)
 
 	if !errors.Is(err, ErrUnavailable) {
 		t.Errorf("errors.Is(err, ErrUnavailable) = false, want true")

@@ -567,6 +567,45 @@ func TestIntegration_DebugVars_DBStats_ZeroWithoutADatabase(t *testing.T) {
 	}
 }
 
+// TestIntegration_DebugVars_PostgresBreaker_ReportsDisabledWithoutDatabase
+// is 16.C2's "disabled" case, the mirror of the attachment breakers'
+// own — testConfig() has no DatabaseURL, so newServer never builds
+// dbBreaker at all.
+func TestIntegration_DebugVars_PostgresBreaker_ReportsDisabledWithoutDatabase(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+	token := registerAndLogin(t, srv)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/debug/vars", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /debug/vars body: %v", err)
+	}
+
+	raw, ok := body["postgres_breaker"]
+	if !ok {
+		t.Fatal("/debug/vars response is missing expected key \"postgres_breaker\"")
+	}
+	var v attachmentBreakerVars
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("decode postgres_breaker: %v", err)
+	}
+	if v.State != "disabled" {
+		t.Errorf("postgres_breaker.state = %q, want %q (testConfig() has no DatabaseURL)", v.State, "disabled")
+	}
+}
+
 // TestIntegration_DebugVars_ReportsBuildInfo asserts the actual values
 // under version/commit, not just that the keys exist: a running pod's
 // only way to answer "which commit is this" is /debug/vars (the runtime

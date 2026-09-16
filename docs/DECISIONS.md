@@ -2858,3 +2858,106 @@ sem teto por uma recusa de ~34ns — a mesma troca que a 16.B2 já fez para o S3
 que só é segura agora porque a 16.A2 (classificador por lista de permissão) já
 existe: sem ela, uma rajada de UUID malformado abriria o circuito de um banco
 saudável.
+
+---
+
+## Breaker compartilhado no PostgreSQL (issue #286, 16.C2)
+
+Destravada pela 16.C1: `WaitCount` não fica perto de zero sob carga concorrente
+realista, então o breaker segue. E pela 16.A2, sem a qual o classificador seria
+por exclusão — abrindo o circuito de um banco saudável em uma rajada de UUID
+malformado (SQLSTATE 22P02).
+
+**Um breaker só, não três.** `task.Repository`, `user.Repository` e
+`attachment.Repository` ganham cada um o seu próprio decorador
+(`postgres_breaker.go` em cada pacote), mas os três **compartilham a mesma
+instância** de `*bastion.Breaker`, construída uma única vez em
+`cmd/api/db_breaker.go` (`buildDBBreaker`) e passada aos três construtores. A
+razão é o próprio recurso: os três domínios batem no mesmo `*sql.DB`, um único
+pool de 25 conexões — esgotamento de pool é uma falha sobre um recurso, não três
+falhas independentes. Três breakers separados aprenderiam a mesma lição devagar e
+cada um por conta própria; um só reage à primeira evidência, de qualquer um dos
+três domínios, e protege o pool inteiro de uma vez.
+
+**A regra que decide o desenho, e ela é estrutural, não convenção: um `Execute`
+por método da interface, nunca por statement.** As duas transações com cadeado —
+`task.Update` (`BeginTx` → `SELECT ... FOR UPDATE` → `UPDATE` → `Commit`,
+segurando row lock) e `user.CreateSession` (`BeginTx` → `pg_advisory_xact_lock` →
+`INSERT` → `DELETE` → `Commit`, segurando advisory lock) — são o motivo desta
+regra existir: uma recusa do breaker entre `BeginTx` e `Commit` abandonaria a
+transação ao `defer tx.Rollback()`, que precisa exatamente da conexão que o
+breaker acabou de negar, com o cadeado preso até o rollback chegar.
+
+O decorador embrulha na fronteira do `Repository` — `bastion.Execute`/`bastion.Do`
+em volta de `r.next.Update(ctx, task)` inteiro, nunca de uma consulta dentro dele.
+Isso torna a regra **impossível de violar por engano**, não apenas seguida por
+convenção: a transação inteira vive dentro de `next.Update`, que só roda se o
+breaker admitir a chamada. Uma rejeição significa que `next.Update` nunca foi
+chamado — nenhuma transação chegou a existir para abandonar.
+
+**Provado diretamente, não inferido do erro.** `TestBreakerRepository_TrippedCircuit_NeverReachesNext`,
+em `internal/task` e `internal/user`, força o breaker aberto (`Breaker.Trip`) e
+verifica que o *dublê* do repositório nunca foi chamado — não só que o erro
+devolvido é `ErrUnavailable`. Uma asserção só sobre o erro seria satisfeita mesmo
+que `next` tivesse sido chamado por engano; contar a chamada é o que realmente
+prova a regra. As duas transações também têm teste de 50 goroutines concorrentes
+sob `-race` (`TestBreakerRepository_Update_ConcurrentCallsAreRaceFree`,
+`TestBreakerRepository_CreateSession_ConcurrentCallsAreRaceFree`).
+
+**O classificador é `pgerr.IsInfrastructureFailure`, sem mudança** — a mesma
+função de `internal/platform/pgerr`, já com sua própria tabela de casos incluindo
+o 22P02 negativo (issue #278/16.A2). Construído uma vez em `buildDBBreaker`, não
+redefinido em cada pacote. `wrapDBError` já rodou dentro de `postgresRepository`
+antes do classificador ver o erro, embrulhando uma falha de infraestrutura como
+`ErrDependencyUnavailable(erro pg original)` — `IsInfrastructureFailure` ainda
+encontra o `*pgconn.PgError`/`driver.ErrBadConn`/`context.DeadlineExceeded`
+original através desse embrulho, via `errors.As`/`errors.Is`; um sentinela de
+domínio (`ErrNotFound`, `ErrConflict`, ...) nunca contém um e por isso nunca
+conta.
+
+**`ErrUnavailable` novo em `task` e `user`, reaproveitado em `attachment`.**
+`task.ErrUnavailable`/`user.ErrUnavailable` seguem o mesmo formato de
+`attachment.ErrUnavailable` (issue #282) — distinto de `ErrDependencyUnavailable`
+pela mesma razão: aquele sentinela significa "a chamada foi tentada e falhou uma
+vez", este significa "o breaker já sabe, por evidência acumulada, que não vale a
+pena tentar", e só o segundo tem um momento de recuperação conhecido de antemão
+(o `openTimeout` do breaker), daí o `Retry-After`. `attachment`'s decorador deste
+issue **reaproveita o `ErrUnavailable`/`unavailableError` que o breaker do S3 já
+usa** (`s3_breaker.go`) em vez de definir um segundo par — `Handler` não precisa
+saber qual dos dois breakers recusou a chamada, só que algum recusou e por quanto
+tempo esperar. Isso exigiu um pequeno refactor: `unavailableError.retryAfter`
+virou campo explícito em vez de ler a constante do pacote (`s3BreakerOpenTimeout`)
+direto no método `RetryAfter()`, porque agora dois breakers com timeouts
+potencialmente diferentes produzem o mesmo tipo de erro.
+
+**`dbBreakerOpenTimeout` mora em `cmd/api`, não em cada pacote de domínio** — ao
+contrário de `s3BreakerOpenTimeout`, que vive dentro de `internal/attachment`
+porque o breaker do S3 é construído e consumido no mesmo pacote. Aqui o breaker é
+compartilhado entre três pacotes, então nenhum deles é dono do número:
+`NewBreakerRepository` recebe `retryAfter time.Duration` como parâmetro explícito,
+e `cmd/api` passa a mesma constante que usou em `bastion.WithOpenTimeout` — uma
+única fonte de verdade, em vez de três cópias do mesmo `30 * time.Second` que
+poderiam divergir silenciosamente.
+
+**`GET /health/ready` inalterado, de propósito.** `registerReadinessRoute`
+continua recebendo o `*sql.DB` cru e chamando `PingContext` direto — o mesmo
+argumento já registrado para os breakers de anexo (seção "Counts() no
+/debug/vars" acima) vale aqui, com um motivo a mais: o **obstáculo estrutural**
+que a própria issue nomeou. `registerReadinessRoute(root, db, logger)` é o único
+lugar do processo que contorna a abstração de `Repository` — recebe o `*sql.DB`
+diretamente, não um repositório. Como a decisão é manter o readiness fora do
+breaker, essa inconsistência fica, deliberadamente: se alguém "consertar" isso
+passando o readiness por um `Repository` decorado, o pool exhaustion volta a
+converter uma falha parcial em indisponibilidade total, exatamente o resultado
+que a 16.B5 já rejeitou para o S3.
+
+**`postgres_breaker` em `/debug/vars`**, mesmo padrão `sync.Once` +
+`atomic.Pointer` dos demais (`cmd/api/db_breaker.go`), reaproveitando
+`attachmentBreakerSnapshot` para o formato — não pedido explicitamente pela
+issue, adicionado pela mesma razão que motivou a 16.B5 para o S3: um breaker sem
+nenhuma visibilidade operacional não é algo que se liga em produção com
+confiança. Verificado contra PostgreSQL real
+(`TestPostgres_PostgresBreaker_ReportsClosedAndProtectsRealTraffic`): reporta
+`closed` depois de um ciclo completo de registro/login/criação de task através
+dos três repositórios decorados — não só que o breaker existe, mas que o tráfego
+real continua passando por ele.
