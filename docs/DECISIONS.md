@@ -2796,3 +2796,65 @@ visualmente que os campos chegam intactos — a mesma limitação que já
 valia para a seção "crier + SigNoz" acima. O que está verificado é que
 `crierAttrValue`/`attachmentBreakerSnapshot` produzem a string correta
 antes de qualquer coisa sair deste processo.
+
+---
+
+## Medição de esgotamento de pool (issue #285, 16.C1): sinal real, fase C segue
+
+`sql.DBStats` publicado em `/debug/vars` (`db_stats` — `MaxOpenConnections`,
+`OpenConnections`, `InUse`, `Idle`, `WaitCount`, `WaitDuration`), mesmo padrão
+`sync.Once` + `atomic.Pointer` de `publishCrierExpvarOnce`/`attachment_s3_breaker`,
+reportando tudo zerado sem banco configurado.
+
+**A medição, contra PostgreSQL real, não hipotética.** Banco de dados local
+(`docker-compose`) semeado com 10 usuários e 500 tasks cada (5.000 linhas) via
+`cmd/seed`, pool no default de produção (`DBMaxOpenConns=25`). 10 sessões
+autenticadas reais (login completo, com CSRF), 6 goroutines por sessão — 60
+requisições concorrentes, deliberadamente acima das 25 conexões do pool —
+alternando `GET /tasks?limit=50` e `GET /tasks/stats` (os dois candidatos que o
+próprio texto da issue já apontava: `CountAll` roda em toda listagem,
+`CountByStatusAndPriority` faz dois `GROUP BY`). Limitadores de taxa
+deliberadamente elevados para o teste (`RATE_LIMIT_*`/`USER_RATE_LIMIT_*`), para
+isolar o comportamento do pool do comportamento do limitador — que é, ele mesmo,
+uma alavanca de defesa já presente e relevante para a conclusão, não um
+obstáculo a contornar.
+
+**O resultado, e ele não deixa dúvida:**
+
+| Momento | `open_connections`/`in_use` | `wait_count` | `wait_duration` (acumulado) |
+| --- | --- | --- | --- |
+| Ocioso, antes da carga | 1 / 0 | 0 | 0s |
+| +1s de carga | 25 / 25 | 57.500 | 2m35s |
+| +2s de carga | 25 / 25 | 69.540 | 3m10s |
+| +3s de carga | 25 / 25 | 81.415 | 3m45s |
+| +18s de carga (fim) | 25 / 25 | ~240.000 | ~10m54s |
+
+O pool satura (`open_connections == in_use == MaxOpenConnections`) no primeiro
+segundo e nunca sai daí enquanto a carga persiste. `WaitCount` não fica perto de
+zero — a condição que a própria issue nomeou como "a fase C morre aqui" — ele
+salta às dezenas de milhares assim que a concorrência ultrapassa o tamanho do
+pool, com **zero erros e zero 429** no cliente (120 mil requisições completadas
+em 20s, ~6.000 req/s): a fila fica inteiramente invisível para quem chama,
+visível só em `WaitCount`/`WaitDuration` — exatamente o ponto cego que motivou
+esta issue.
+
+**O que a medição não é, dito com a mesma honestidade que a issue pede.** A carga
+foi desenhada para ultrapassar o pool (60 concorrentes contra 25 conexões), não
+amostrada de tráfego real de produção — este serviço não tem histórico de
+produção para amostrar. Mas 60 requisições concorrentes vindas de 10 sessões
+distintas não é um cenário exótico: são poucos usuários reais atualizando uma
+lista de tasks ao mesmo tempo, o tipo de pico que `GET /tasks` e
+`GET /tasks/stats` — chamadas típicas de carregamento de tela — provocam juntas
+com naturalidade.
+
+**A decisão: segue para 16.C2.** O critério que a própria issue definiu
+(`WaitCount` em zero sob carga realista fecha a fase aqui) não se sustenta — o
+esgotamento é real, reproduzível e imediato. O argumento contra registrado na
+issue (com uma réplica, banco fora do ar já é indisponibilidade total,
+`/health/ready` já tira o pod) continua válido para esse cenário específico, mas
+não é o cenário que esta medição testou: aqui o banco está saudável o tempo
+todo, e o gargalo é fila, não queda. Um breaker ali trocaria uma fila que cresce
+sem teto por uma recusa de ~34ns — a mesma troca que a 16.B2 já fez para o S3, e
+que só é segura agora porque a 16.A2 (classificador por lista de permissão) já
+existe: sem ela, uma rajada de UUID malformado abriria o circuito de um banco
+saudável.

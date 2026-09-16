@@ -261,6 +261,13 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 		closeDB = db.Close
 	}
 
+	// Reset on every call, db == nil included, for the same reason the
+	// attachment breaker atomics are: a *testing.T building an
+	// in-memory-store server after a PostgreSQL-backed one must not see
+	// the prior server's pool on /debug/vars.
+	publishDBStatsExpvarOnce()
+	currentDB.Store(db)
+
 	// One *sql.DB backs both domains' postgresRepository — task and user
 	// live in the same database, so there is no reason to open two pools.
 	// db == nil (cfg.DatabaseURL unset) selects the in-memory
