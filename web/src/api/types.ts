@@ -964,12 +964,20 @@ export interface components {
             };
         };
         /**
-         * @description The session lookup that authenticates this request could not be performed — the database is unreachable, timed out, or the request was canceled. **This says nothing about the caller's token:** a perfectly valid, unexpired token gets this response too, so the client must NOT discard its credentials and re-authenticate. Retry the same request with the same token once the service recovers (GET /health/ready reports when that is).
-         *     Returned only by endpoints that require authentication, since it originates in the session lookup itself. POST /auth/register and POST /auth/login perform no such lookup, so the same underlying database failure surfaces there as a 500 instead.
+         * @description A dependency this request needed is not currently answering. **This says nothing about the caller's token:** a perfectly valid, unexpired token gets this response too, so the client must NOT discard its credentials and re-authenticate. Retry the same request with the same token once the service recovers (GET /health/ready reports when that is).
+         *     Three distinct causes share this status and this exact generic body:
+         *     - The session lookup that authenticates this request could not be performed — the database is unreachable, timed out, or the request was canceled. Returned only by endpoints that require authentication, since it originates in the session lookup itself. POST /auth/register and POST /auth/login perform no such lookup, so the same underlying database failure surfaces there as a 500 instead.
+         *     - A task or user repository call itself failed — a refused or dropped connection, the database shedding load or shutting down.
+         *     - **Retry-After is present** when the shared PostgreSQL circuit breaker has already opened from a run of prior failures and is refusing this call without attempting it. Its value is the breaker's own openTimeout, in seconds — the earliest moment a retry has a chance of finding the circuit closed again, not a guarantee. See docs/DECISIONS.md § "Breaker compartilhado no PostgreSQL".
          */
         ServiceUnavailable: {
             headers: {
                 "X-Request-Id": components["headers"]["XRequestID"];
+                /**
+                 * @description Seconds to wait before retrying. Present only when the shared PostgreSQL circuit breaker is the cause — absent for the other two, which have no knowable recovery time.
+                 * @example 30
+                 */
+                "Retry-After"?: number;
                 [name: string]: unknown;
             };
             content: {
@@ -978,6 +986,27 @@ export interface components {
                  *       "error": "service temporarily unavailable, please retry"
                  *     }
                  */
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /**
+         * @description A dependency the attachment routes need is not currently answering. Three distinct causes share this status and this exact generic body — the client's own action is the same either way, retry — but only one of them carries Retry-After:
+         *     - The session lookup that authenticates this request could not be performed (see ServiceUnavailable above).
+         *     - The attachment metadata repository itself failed a call (connection refused, pool exhausted, ...).
+         *     - **Retry-After is present** when the object store's circuit breaker has already opened from a run of prior failures and is refusing this call without attempting it (see docs/DECISIONS.md § "ErrUnavailable e 503 com Retry-After"). Its value is the breaker's own openTimeout, in seconds — the earliest moment a retry has a chance of finding the circuit closed again, not a guarantee.
+         *     In every case, this says nothing about the caller's token: a perfectly valid, unexpired token gets this response too, so the client must NOT discard its credentials and re-authenticate.
+         */
+        AttachmentServiceUnavailable: {
+            headers: {
+                "X-Request-Id": components["headers"]["XRequestID"];
+                /**
+                 * @description Seconds to wait before retrying. Present only when the object store's circuit breaker is the cause — absent for the other two, which have no knowable recovery time.
+                 * @example 30
+                 */
+                "Retry-After"?: number;
+                [name: string]: unknown;
+            };
+            content: {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
@@ -2102,7 +2131,7 @@ export interface operations {
             };
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalServerError"];
-            503: components["responses"]["ServiceUnavailable"];
+            503: components["responses"]["AttachmentServiceUnavailable"];
         };
     };
     uploadAttachment: {
@@ -2167,7 +2196,7 @@ export interface operations {
             };
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalServerError"];
-            503: components["responses"]["ServiceUnavailable"];
+            503: components["responses"]["AttachmentServiceUnavailable"];
         };
     };
     downloadAttachment: {
@@ -2212,7 +2241,7 @@ export interface operations {
             };
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalServerError"];
-            503: components["responses"]["ServiceUnavailable"];
+            503: components["responses"]["AttachmentServiceUnavailable"];
         };
     };
     deleteAttachment: {
@@ -2254,7 +2283,7 @@ export interface operations {
             };
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalServerError"];
-            503: components["responses"]["ServiceUnavailable"];
+            503: components["responses"]["AttachmentServiceUnavailable"];
         };
     };
     listLinks: {
