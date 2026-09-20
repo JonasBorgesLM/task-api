@@ -212,6 +212,15 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   mudança de contrato (`401` continua `401`); latência a mais numa
   conta sob ataque é o efeito observável. Ver `docs/DECISIONS.md` §
   "Atraso progressivo por conta" para a curva e o que ela não cobre.
+- `web/`'s `js-yaml` (transitivo, via `openapi-typescript` →
+  `@redocly/openapi-core`, usado só por `npm run generate:types` contra
+  o próprio `docs/openapi.yaml`) atualizado de `4.3.1` para `4.3.2` —
+  GHSA sobre `maxTotalMergeKeys` não limitar CPU para merge keys vazias
+  (Dependabot alert #1, `high`). Risco real baixo aqui — a única entrada
+  que esse `js-yaml` processa é o spec do próprio repositório, nunca
+  input de terceiros, e a dependência nunca entra no bundle de produção
+  — corrigido mesmo assim via `overrides` em `web/package.json`, mais
+  barato que deixar o alerta aberto.
 
 ### Corrigido
 - `web/`'s lista de tasks (`useTasks`) podia mostrar dados de um filtro
