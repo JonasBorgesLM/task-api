@@ -19,8 +19,11 @@ description: 'HTTP layer conventions: ServeMux only, /v1 mount, bounded bodies, 
 - `middleware.CacheControl` wraps `v1` **inside** `StripPrefix`, not outside
   it, so it sees the same unprefixed path (`/auth/login`, never `/v1/auth/login`)
   a handler's own pattern does. Every `/v1` response carries `Cache-Control`;
-  `/health`, `/health/ready` and `/debug/vars` do not, the same exception the
-  versioning rule above already makes.
+  `/health` and `/health/ready` do not (nothing sensitive to cache, and a
+  probe has no credentials to vary the response on). `/debug/vars` sits
+  outside `/v1` too but is authenticated and carries operational data, so
+  `cmd/api/newServer` wraps it directly in `middleware.CacheControl("/debug/vars")`
+  for the same `private, no-store` `/auth/*` gets — see issue #293.
 - `/health`, `/health/ready` and `/debug/vars` stay **unversioned** — probes
   and scrapers are operations, not clients. Never add an unversioned alias or a
   redirect for a contract path.

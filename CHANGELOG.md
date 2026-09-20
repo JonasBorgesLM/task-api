@@ -239,6 +239,15 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   verificar manualmente a issue #247/15.G1 (que passou a depender de ler
   `X-Total-Count` de verdade) contra o backend numa origem diferente do
   frontend. `internal/middleware/cors.go` agora expõe os dois.
+- `GET /debug/vars` não enviava `Cache-Control` nenhum — a rota fica fora
+  do mount `/v1`, então o `middleware.CacheControl` que passou a cobrir
+  toda resposta autenticada ali (ver "Segurança" acima) nunca chegava a
+  vê-la. Mesmo gap que aquela mudança fechou, um nível abaixo: um `200`
+  sem o header é cacheável por heurística (RFC 9111 §4.2.2), e `/debug/
+  vars` expõe estatísticas de runtime e command line — dado operacional
+  autenticado, não algo pra um cache compartilhado guardar. Agora recebe
+  `private, no-store`, o mesmo que `/auth/*` já tinha. Achado pelo
+  `security-scanner` (issue #293).
 
 ## [1.5.0] — a definir na tag
 

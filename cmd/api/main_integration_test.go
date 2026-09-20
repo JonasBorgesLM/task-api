@@ -531,6 +531,36 @@ func TestIntegration_DebugVars(t *testing.T) {
 	}
 }
 
+// TestIntegration_DebugVars_SetsNoStoreCacheControl guards issue #293:
+// /debug/vars sits outside the /v1 mount, so middleware.CacheControl (wrapped
+// around v1 only) never sees it — without an explicit header of its own, a
+// bare 200 here is heuristically cacheable under RFC 9111 §4.2.2 by any
+// shared cache in front of this authenticated, operational-data route. This
+// asserts it gets the same "private, no-store" /auth/* already does, not
+// silence.
+func TestIntegration_DebugVars_SetsNoStoreCacheControl(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/debug/vars", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got, want := resp.Header.Get("Cache-Control"), "private, no-store"; got != want {
+		t.Errorf("GET /debug/vars Cache-Control = %q, want %q", got, want)
+	}
+}
+
 // TestIntegration_DebugVars_DBStats_ZeroWithoutADatabase is 16.C1's
 // baseline: testConfig() has no DatabaseURL, so openDatabase resolves to
 // the in-memory Repositorys and there is no pool to describe.

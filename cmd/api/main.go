@@ -484,7 +484,19 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	// probing it. The health routes stay public because an orchestrator's
 	// probe has no credentials to offer; expvar has no such constraint,
 	// since the humans and scrapers who read it can carry a token.
-	mux.Handle("GET /debug/vars", authenticated(expvar.Handler()))
+	//
+	// It sits outside the /v1 mount, so middleware.CacheControl below
+	// (wrapped around v1 only) never sees it and this response would
+	// otherwise carry no Cache-Control at all — heuristically cacheable
+	// under RFC 9111 §4.2.2 by any shared cache in front of this API, the
+	// same gap that middleware sets out to close for every /v1 response.
+	// Reusing it here with authPrefix "/debug/vars" is exactly that fix:
+	// every request that reaches this handler already matched the exact
+	// registered pattern, so the prefix always matches and this always
+	// gets the same "private, no-store" /auth/* itself gets — right for
+	// authenticated operational data, never meant to be replayed from a
+	// cache to a second caller.
+	mux.Handle("GET /debug/vars", authenticated(middleware.CacheControl("/debug/vars")(expvar.Handler())))
 
 	// Published once per process, not read back anywhere in this file:
 	// expvar.Publish panics if called twice with the same name, which
