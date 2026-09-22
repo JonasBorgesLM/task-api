@@ -138,6 +138,8 @@ func TestLogging_LevelAndErrorField_ByStatusClass(t *testing.T) {
 		{"400 Bad Request", http.StatusBadRequest, "WARN", true},
 		{"404 Not Found", http.StatusNotFound, "WARN", true},
 		{"409 Conflict", http.StatusConflict, "WARN", true},
+		{"429 Too Many Requests", http.StatusTooManyRequests, "INFO", true},
+		{"401 Unauthorized", http.StatusUnauthorized, "INFO", true},
 		{"500 Internal Server Error", http.StatusInternalServerError, "ERROR", true},
 	}
 
@@ -383,4 +385,31 @@ func TestLogging_NoUserID_OmitsTheField(t *testing.T) {
 // isolation), it must not panic and must simply do nothing observable.
 func TestRecordUserIDForLog_NoOpWithoutLogging(t *testing.T) {
 	RecordUserIDForLog(context.Background(), "user-1") // must not panic
+}
+
+func TestLogging_QuietPaths(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	serve := func(path string, status int) map[string]any {
+		buf.Reset()
+		h := Logging(logger, QuietPaths("/health", "/health/ready"))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+		return decodeLogLine(t, &buf)
+	}
+
+	// A successful probe on a quiet path drops to Debug (no per-probe Info spam).
+	if lvl := serve("/health", http.StatusOK)["level"]; lvl != "DEBUG" {
+		t.Errorf("quiet path 200 level = %v, want DEBUG", lvl)
+	}
+	// A non-quiet path is unaffected.
+	if lvl := serve("/v1/tasks", http.StatusOK)["level"]; lvl != "INFO" {
+		t.Errorf("non-quiet path 200 level = %v, want INFO", lvl)
+	}
+	// A failing readiness probe on a quiet path stays visible (not silenced).
+	if lvl := serve("/health/ready", http.StatusServiceUnavailable)["level"]; lvl != "ERROR" {
+		t.Errorf("quiet path 503 level = %v, want ERROR", lvl)
+	}
 }

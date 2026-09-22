@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 )
@@ -235,6 +237,39 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, r *http.Request, err
 			"path", r.URL.Path,
 		)
 		h.writeError(w, r, http.StatusInternalServerError, "internal server error")
+	case errors.Is(err, ErrDependencyUnavailable):
+		// See task/handler.go's own case: logged distinctly so an
+		// operator or an alert can filter on this without parsing err's
+		// raw wrapped PostgreSQL or S3 text. 503, not 500 -- retrying
+		// once the dependency recovers is the correct thing for the
+		// caller to do.
+		requestID, _ := middleware.RequestIDFromContext(r.Context())
+		h.logger.Error("dependency unavailable",
+			"error", err,
+			"request_id", requestID,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+		h.writeError(w, r, http.StatusServiceUnavailable, "service temporarily unavailable, please retry")
+	case errors.Is(err, ErrUnavailable):
+		// The breaker itself refused the call (s3_breaker.go) — distinct
+		// from ErrDependencyUnavailable above, which means a call was
+		// attempted and failed once. Here the recovery moment is
+		// knowable in advance (the breaker's own openTimeout), so the
+		// response carries Retry-After rather than leaving the caller to
+		// guess when to try again.
+		requestID, _ := middleware.RequestIDFromContext(r.Context())
+		h.logger.Warn("attachment store circuit open, call rejected",
+			"error", err,
+			"request_id", requestID,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+		var withRetryAfter interface{ RetryAfter() time.Duration }
+		if errors.As(err, &withRetryAfter) {
+			w.Header().Set("Retry-After", strconv.Itoa(int(withRetryAfter.RetryAfter().Seconds())))
+		}
+		h.writeError(w, r, http.StatusServiceUnavailable, "attachment storage temporarily unavailable, please retry")
 	default:
 		requestID, _ := middleware.RequestIDFromContext(r.Context())
 		h.logger.Error("unexpected service error",

@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/JonasBorgesLM/bastion"
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 )
 
@@ -254,5 +256,34 @@ func TestDelete_Handler_RequiresAuth(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+// TestDelete_Handler_ErrUnavailable_Returns503WithRetryAfter pins
+// 16.B3's whole contract at the HTTP boundary: a breaker-open rejection
+// reaches the caller as 503 with a Retry-After header naming
+// s3BreakerOpenTimeout, not a bare 500 — the outcome
+// bastion's own REQUIREMENTS.md §5.1 documents as what a caller needs to
+// tell "come back later" apart from "give up".
+func TestDelete_Handler_ErrUnavailable_Returns503WithRetryAfter(t *testing.T) {
+	svc := &fakeService{
+		deleteFn: func(_, _ string) error {
+			return translateBreakerError(bastion.ErrOpenState, s3BreakerOpenTimeout)
+		},
+	}
+	h := newHandlerWithFake(svc)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux, passthroughAuth)
+
+	req := httptest.NewRequest(http.MethodDelete, "/files/abc-123", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	want := strconv.Itoa(int(s3BreakerOpenTimeout.Seconds()))
+	if got := w.Header().Get("Retry-After"); got != want {
+		t.Errorf("Retry-After = %q, want %q", got, want)
 	}
 }

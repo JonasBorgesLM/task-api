@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/JonasBorgesLM/task-api/internal/platform/pgerr"
 )
 
 // postgreSQLUniqueViolation and postgreSQLForeignKeyViolation are the
@@ -38,7 +41,8 @@ const (
 // forgets the check returns nothing rather than returning somebody else's
 // data.
 type postgresRepository struct {
-	db *sql.DB
+	db          *sql.DB
+	callTimeout time.Duration
 }
 
 // NewPostgresRepository returns a Repository backed by db.
@@ -46,8 +50,45 @@ type postgresRepository struct {
 // Unlike NewMemoryRepository it takes no TaskOwnershipFunc: the ownership
 // check is in the SQL. See Repository's doc comment for why both
 // implementations must still answer identically.
-func NewPostgresRepository(db *sql.DB) Repository {
-	return &postgresRepository{db: db}
+func NewPostgresRepository(db *sql.DB, callTimeout time.Duration) Repository {
+	return &postgresRepository{db: db, callTimeout: callTimeout}
+}
+
+// withTimeout bounds one database call from the server's own side.
+//
+// Without it the only limit on a query is the caller going away:
+// http.Server's WriteTimeout closes the connection but does not cancel the
+// handler's context, so a query waiting for a free pooled connection waits
+// for as long as the client is willing to. The deadline covers a whole
+// method, transaction included, never an individual statement — a deadline
+// firing between BeginTx and Commit would abandon the transaction with its
+// locks still held. See docs/DECISIONS.md § "Deadline de saída".
+//
+// A zero callTimeout leaves ctx untouched, so a caller that has already
+// bounded the call — or a test — is not second-guessed.
+func (r *postgresRepository) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.callTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, r.callTimeout)
+}
+
+// wrapDBError classifies err from a database/sql call that reached no
+// more specific sentinel check above it. A genuine infrastructure failure
+// — the database itself being the problem, not the request — becomes
+// ErrDependencyUnavailable; every other error (a constraint violation
+// already routed to its own sentinel above, a scan error, malformed
+// input) passes through unchanged, for the caller to wrap and return as
+// it already did. See docs/DECISIONS.md § "Classificação positiva de
+// erro de infraestrutura".
+func wrapDBError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if pgerr.IsInfrastructureFailure(err) {
+		return fmt.Errorf("%w: %w", ErrDependencyUnavailable, err)
+	}
+	return err
 }
 
 // attachmentColumns is the select list every read below shares. id and
@@ -60,6 +101,9 @@ const attachmentColumns = `
 `
 
 func (r *postgresRepository) Create(ctx context.Context, attachment Attachment, userID string) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	// INSERT ... SELECT rather than INSERT ... VALUES: the SELECT
 	// produces a row only when the task exists *and* belongs to userID,
 	// so an attempt to hang an attachment off somebody else's task
@@ -88,7 +132,7 @@ func (r *postgresRepository) Create(ctx context.Context, attachment Attachment, 
 		if isForeignKeyViolation(err) {
 			return ErrTaskNotFound
 		}
-		return fmt.Errorf("postgres: create attachment: %w", err)
+		return fmt.Errorf("postgres: create attachment: %w", wrapDBError(err))
 	}
 
 	// Zero rows means the SELECT matched nothing: no such task, or not
@@ -96,7 +140,7 @@ func (r *postgresRepository) Create(ctx context.Context, attachment Attachment, 
 	// use the error to learn that a task ID exists.
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("postgres: create attachment: %w", err)
+		return fmt.Errorf("postgres: create attachment: %w", wrapDBError(err))
 	}
 	if affected == 0 {
 		return ErrTaskNotFound
@@ -106,6 +150,9 @@ func (r *postgresRepository) Create(ctx context.Context, attachment Attachment, 
 }
 
 func (r *postgresRepository) FindByStorageKey(ctx context.Context, storageKey, userID string) (Attachment, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		SELECT ` + attachmentColumns + `
 		FROM attachments a
@@ -120,7 +167,7 @@ func (r *postgresRepository) FindByStorageKey(ctx context.Context, storageKey, u
 			// else", deliberately indistinguishable.
 			return Attachment{}, ErrNotFound
 		}
-		return Attachment{}, fmt.Errorf("postgres: find attachment by storage key: %w", err)
+		return Attachment{}, fmt.Errorf("postgres: find attachment by storage key: %w", wrapDBError(err))
 	}
 
 	return att, nil
@@ -133,6 +180,9 @@ func (r *postgresRepository) FindByStorageKey(ctx context.Context, storageKey, u
 // not a lookup followed by a delete, so there is no window between
 // deciding a row is deletable and removing it.
 func (r *postgresRepository) Delete(ctx context.Context, storageKey, userID string) error {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		DELETE FROM attachments a
 		USING tasks t
@@ -143,12 +193,12 @@ func (r *postgresRepository) Delete(ctx context.Context, storageKey, userID stri
 
 	result, err := r.db.ExecContext(ctx, query, storageKey, userID)
 	if err != nil {
-		return fmt.Errorf("postgres: delete attachment: %w", err)
+		return fmt.Errorf("postgres: delete attachment: %w", wrapDBError(err))
 	}
 
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("postgres: delete attachment: %w", err)
+		return fmt.Errorf("postgres: delete attachment: %w", wrapDBError(err))
 	}
 	if affected == 0 {
 		// Covers "no such key" and "a key belonging to someone else",
@@ -166,6 +216,9 @@ func (r *postgresRepository) Delete(ctx context.Context, storageKey, userID stri
 // shape FindByStorageKey and FindByTask use, without the trip through
 // Go to add up what the query itself can.
 func (r *postgresRepository) TotalBytesForUser(ctx context.Context, userID string) (int64, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		SELECT COALESCE(SUM(a.size_bytes), 0)
 		FROM attachments a
@@ -175,7 +228,7 @@ func (r *postgresRepository) TotalBytesForUser(ctx context.Context, userID strin
 
 	var total int64
 	if err := r.db.QueryRowContext(ctx, query, userID).Scan(&total); err != nil {
-		return 0, fmt.Errorf("postgres: total bytes for user: %w", err)
+		return 0, fmt.Errorf("postgres: total bytes for user: %w", wrapDBError(err))
 	}
 
 	return total, nil
@@ -187,6 +240,9 @@ func (r *postgresRepository) TotalBytesForUser(ctx context.Context, userID strin
 // ownership check, later in the same request, is what reports
 // ErrTaskNotFound.
 func (r *postgresRepository) CountByTask(ctx context.Context, taskID, userID string) (int, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	const query = `
 		SELECT COUNT(*)
 		FROM attachments a
@@ -196,13 +252,16 @@ func (r *postgresRepository) CountByTask(ctx context.Context, taskID, userID str
 
 	var count int
 	if err := r.db.QueryRowContext(ctx, query, userID, taskID).Scan(&count); err != nil {
-		return 0, fmt.Errorf("postgres: count by task: %w", err)
+		return 0, fmt.Errorf("postgres: count by task: %w", wrapDBError(err))
 	}
 
 	return count, nil
 }
 
 func (r *postgresRepository) FindByTask(ctx context.Context, taskID, userID string) ([]Attachment, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	// The ownership check is its own statement here, unlike in the two
 	// methods above, because this one has to tell "your task, no
 	// attachments" apart from "not your task" — and an empty result set
@@ -214,7 +273,7 @@ func (r *postgresRepository) FindByTask(ctx context.Context, taskID, userID stri
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, ErrTaskNotFound
 	case err != nil:
-		return nil, fmt.Errorf("postgres: check task ownership: %w", err)
+		return nil, fmt.Errorf("postgres: check task ownership: %w", wrapDBError(err))
 	}
 
 	const query = `
@@ -226,7 +285,7 @@ func (r *postgresRepository) FindByTask(ctx context.Context, taskID, userID stri
 
 	rows, err := r.db.QueryContext(ctx, query, taskID)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: find attachments by task: %w", err)
+		return nil, fmt.Errorf("postgres: find attachments by task: %w", wrapDBError(err))
 	}
 	defer rows.Close()
 
@@ -234,12 +293,12 @@ func (r *postgresRepository) FindByTask(ctx context.Context, taskID, userID stri
 	for rows.Next() {
 		att, err := scanAttachment(rows)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: scan attachment row: %w", err)
+			return nil, fmt.Errorf("postgres: scan attachment row: %w", wrapDBError(err))
 		}
 		attachments = append(attachments, att)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: find attachments by task: %w", err)
+		return nil, fmt.Errorf("postgres: find attachments by task: %w", wrapDBError(err))
 	}
 
 	return attachments, nil
@@ -274,6 +333,9 @@ func isForeignKeyViolation(err error) bool {
 }
 
 func (r *postgresRepository) UnreferencedKeys(ctx context.Context, keys []string) ([]string, error) {
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
 	if len(keys) == 0 {
 		return nil, nil
 	}
@@ -300,7 +362,7 @@ func (r *postgresRepository) UnreferencedKeys(ctx context.Context, keys []string
 
 	rows, err := r.db.QueryContext(ctx, query, pqTextArray(keys))
 	if err != nil {
-		return nil, fmt.Errorf("postgres: find unreferenced storage keys: %w", err)
+		return nil, fmt.Errorf("postgres: find unreferenced storage keys: %w", wrapDBError(err))
 	}
 	defer rows.Close()
 
@@ -308,12 +370,12 @@ func (r *postgresRepository) UnreferencedKeys(ctx context.Context, keys []string
 	for rows.Next() {
 		var key string
 		if err := rows.Scan(&key); err != nil {
-			return nil, fmt.Errorf("postgres: scan unreferenced key: %w", err)
+			return nil, fmt.Errorf("postgres: scan unreferenced key: %w", wrapDBError(err))
 		}
 		unreferenced = append(unreferenced, key)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: find unreferenced storage keys: %w", err)
+		return nil, fmt.Errorf("postgres: find unreferenced storage keys: %w", wrapDBError(err))
 	}
 
 	return unreferenced, nil

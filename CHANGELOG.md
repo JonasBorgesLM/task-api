@@ -212,6 +212,34 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   mudança de contrato (`401` continua `401`); latência a mais numa
   conta sob ataque é o efeito observável. Ver `docs/DECISIONS.md` §
   "Atraso progressivo por conta" para a curva e o que ela não cobre.
+- `web/`'s `js-yaml` (transitivo, via `openapi-typescript` →
+  `@redocly/openapi-core`, usado só por `npm run generate:types` contra
+  o próprio `docs/openapi.yaml`) atualizado de `4.3.1` para `4.3.2` —
+  GHSA sobre `maxTotalMergeKeys` não limitar CPU para merge keys vazias
+  (Dependabot alert #1, `high`). Risco real baixo aqui — a única entrada
+  que esse `js-yaml` processa é o spec do próprio repositório, nunca
+  input de terceiros, e a dependência nunca entra no bundle de produção
+  — corrigido mesmo assim via `overrides` em `web/package.json`, mais
+  barato que deixar o alerta aberto.
+- O log de requisição registra `429 Too Many Requests` em `Info`, não
+  `Warn` (issue #299). Uma requisição barrada pelo rate limiter é a defesa
+  funcionando e é alto-volume por natureza; logar cada uma em `Warn`
+  transformava uma rajada de rejeições numa rajada de `Warn` — num teste de
+  carga sustentada (Sapper) um único ramp-up gerou ~87 mil linhas `Warn`,
+  afogando avisos legítimos e podendo disparar alerta em massa sob ataque. O
+  campo `error` continua presente, então o pipeline ainda distingue a
+  resposta; só o nível muda. Demais 4xx seguem em `Warn`, 5xx em `Error`.
+- No mesmo espírito, `401 Unauthorized` também passa a `Info` (issue #300):
+  requisição não autenticada é o desafio de auth funcionando e é alto-volume
+  por natureza (um bot sondando, um token expirado, um cliente sem sessão);
+  logá-la em `Warn` inflava o nível em tráfego perfeitamente normal e faria
+  alerta de servidor disparar com tráfego comum. Demais 4xx seguem em `Warn`.
+- O `Logging` ganhou `QuietPaths`, e `cmd/api` marca `/health` e `/health/ready`
+  como silenciosas (issue #301): uma resposta **bem-sucedida** nessas rotas passa
+  a `Debug` em vez de uma linha `Info` por sondagem — um orquestrador bate nelas
+  o tempo todo. Uma sonda que **falha** (ex.: `503` de readiness) mantém o nível
+  normal e continua visível. O middleware segue sem conhecer rotas: quem passa os
+  paths é o `cmd/api`, que as conhece.
 
 ### Corrigido
 - `web/`'s lista de tasks (`useTasks`) podia mostrar dados de um filtro
@@ -239,6 +267,15 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   verificar manualmente a issue #247/15.G1 (que passou a depender de ler
   `X-Total-Count` de verdade) contra o backend numa origem diferente do
   frontend. `internal/middleware/cors.go` agora expõe os dois.
+- `GET /debug/vars` não enviava `Cache-Control` nenhum — a rota fica fora
+  do mount `/v1`, então o `middleware.CacheControl` que passou a cobrir
+  toda resposta autenticada ali (ver "Segurança" acima) nunca chegava a
+  vê-la. Mesmo gap que aquela mudança fechou, um nível abaixo: um `200`
+  sem o header é cacheável por heurística (RFC 9111 §4.2.2), e `/debug/
+  vars` expõe estatísticas de runtime e command line — dado operacional
+  autenticado, não algo pra um cache compartilhado guardar. Agora recebe
+  `private, no-store`, o mesmo que `/auth/*` já tinha. Achado pelo
+  `security-scanner` (issue #293).
 
 ## [1.5.0] — a definir na tag
 

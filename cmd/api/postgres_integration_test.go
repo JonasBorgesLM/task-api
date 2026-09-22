@@ -196,3 +196,120 @@ func TestPostgres_ReadinessReportsUnavailable_WhenDatabaseUnreachable(t *testing
 		t.Errorf("GET /health/ready status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
 	}
 }
+
+// TestPostgres_DBStats_ReportsRealPoolConfig is 16.C1's wiring proof
+// against a real *sql.DB: MaxOpenConnections on /debug/vars must match
+// what openDatabase actually configured (postgresTestConfig sets
+// DBMaxOpenConns to 5, deliberately different from the production
+// default of 25, so this cannot pass by coincidence against a
+// zero-valued or default-valued stats struct).
+func TestPostgres_DBStats_ReportsRealPoolConfig(t *testing.T) {
+	cfg := postgresTestConfig(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	srv, closeDB, err := newServer(ctx, cfg, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("newServer() unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := closeDB(); err != nil {
+			t.Errorf("closeDB() unexpected error: %v", err)
+		}
+	})
+
+	ts := httptest.NewServer(srv.Handler)
+	defer ts.Close()
+	token := registerAndLogin(t, ts)
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/debug/vars", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /debug/vars body: %v", err)
+	}
+
+	var stats dbStatsVars
+	if err := json.Unmarshal(body["db_stats"], &stats); err != nil {
+		t.Fatalf("decode db_stats: %v", err)
+	}
+	if stats.MaxOpenConnections != cfg.DBMaxOpenConns {
+		t.Errorf("db_stats.max_open_connections = %d, want %d (cfg.DBMaxOpenConns)", stats.MaxOpenConnections, cfg.DBMaxOpenConns)
+	}
+}
+
+// TestPostgres_PostgresBreaker_ReportsClosedAndProtectsRealTraffic is
+// 16.C2's end-to-end proof against a real *sql.DB: the shared breaker
+// reports Closed under healthy traffic, and — the part that actually
+// matters — a full register/login/create/read/update/delete cycle
+// still works with every task.Repository and user.Repository call
+// routed through it. A wiring mistake that routed every call straight
+// to ErrUnavailable would still leave postgres_breaker looking healthy
+// on its own; this is what catches that.
+func TestPostgres_PostgresBreaker_ReportsClosedAndProtectsRealTraffic(t *testing.T) {
+	cfg := postgresTestConfig(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	srv, closeDB, err := newServer(ctx, cfg, discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("newServer() unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := closeDB(); err != nil {
+			t.Errorf("closeDB() unexpected error: %v", err)
+		}
+	})
+
+	ts := httptest.NewServer(srv.Handler)
+	defer ts.Close()
+	token := registerAndLogin(t, ts)
+	client := ts.Client()
+
+	createResp, err := client.Do(authedRequest(t, token, http.MethodPost, ts.URL+apiPrefix+"/tasks",
+		`{"title":"Breaker-protected task","description":"created through the shared postgres breaker"}`))
+	if err != nil {
+		t.Fatalf("POST /tasks: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(createResp.Body)
+		t.Fatalf("POST /tasks status = %d, body = %s", createResp.StatusCode, respBody)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/debug/vars", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /debug/vars body: %v", err)
+	}
+	var v attachmentBreakerVars
+	if err := json.Unmarshal(body["postgres_breaker"], &v); err != nil {
+		t.Fatalf("decode postgres_breaker: %v", err)
+	}
+	if v.State != "closed" {
+		t.Errorf("postgres_breaker.state = %q, want %q — healthy traffic must not have tripped it", v.State, "closed")
+	}
+}

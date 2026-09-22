@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/JonasBorgesLM/task-api/internal/middleware"
 )
@@ -417,6 +418,40 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, r *http.Request, err
 		h.writeError(w, r, http.StatusConflict, "task was modified concurrently, please retry")
 	case errors.Is(err, ErrInvalidTransition):
 		h.writeError(w, r, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrDependencyUnavailable):
+		// Logged, and logged distinctly from the default branch below --
+		// this is exactly the distinction issue #278 exists for: an
+		// operator or an alert can filter on this message without
+		// reading err's own text, which is a raw wrapped PostgreSQL
+		// error and not something a log query should have to parse.
+		// 503, not 500: the request was reasonable, the dependency is
+		// the problem, and it is worth retrying once it recovers.
+		requestID, _ := middleware.RequestIDFromContext(r.Context())
+		h.logger.Error("dependency unavailable",
+			"error", err,
+			"request_id", requestID,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+		h.writeError(w, r, http.StatusServiceUnavailable, "service temporarily unavailable, please retry")
+	case errors.Is(err, ErrUnavailable):
+		// The breaker itself refused the call (postgres_breaker.go) --
+		// distinct from ErrDependencyUnavailable above, which means a
+		// call was attempted and failed once. Here the recovery moment
+		// is knowable in advance (the breaker's own openTimeout), so
+		// the response carries Retry-After.
+		requestID, _ := middleware.RequestIDFromContext(r.Context())
+		h.logger.Warn("database circuit open, call rejected",
+			"error", err,
+			"request_id", requestID,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+		var withRetryAfter interface{ RetryAfter() time.Duration }
+		if errors.As(err, &withRetryAfter) {
+			w.Header().Set("Retry-After", strconv.Itoa(int(withRetryAfter.RetryAfter().Seconds())))
+		}
+		h.writeError(w, r, http.StatusServiceUnavailable, "service temporarily unavailable, please retry")
 	default:
 		requestID, _ := middleware.RequestIDFromContext(r.Context())
 		h.logger.Error("unexpected service error",

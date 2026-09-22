@@ -524,10 +524,115 @@ func TestIntegration_DebugVars(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode /debug/vars body: %v", err)
 	}
-	for _, key := range []string{"cmdline", "memstats", "version", "commit"} {
+	for _, key := range []string{"cmdline", "memstats", "version", "commit", "db_stats"} {
 		if _, ok := body[key]; !ok {
 			t.Errorf("/debug/vars response is missing expected key %q", key)
 		}
+	}
+}
+
+// TestIntegration_DebugVars_SetsNoStoreCacheControl guards issue #293:
+// /debug/vars sits outside the /v1 mount, so middleware.CacheControl (wrapped
+// around v1 only) never sees it — without an explicit header of its own, a
+// bare 200 here is heuristically cacheable under RFC 9111 §4.2.2 by any
+// shared cache in front of this authenticated, operational-data route. This
+// asserts it gets the same "private, no-store" /auth/* already does, not
+// silence.
+func TestIntegration_DebugVars_SetsNoStoreCacheControl(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+
+	token := registerAndLogin(t, srv)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/debug/vars", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got, want := resp.Header.Get("Cache-Control"), "private, no-store"; got != want {
+		t.Errorf("GET /debug/vars Cache-Control = %q, want %q", got, want)
+	}
+}
+
+// TestIntegration_DebugVars_DBStats_ZeroWithoutADatabase is 16.C1's
+// baseline: testConfig() has no DatabaseURL, so openDatabase resolves to
+// the in-memory Repositorys and there is no pool to describe.
+// dbStatsSnapshot must report every field at zero rather than an error —
+// the same "disabled reports zero" shape the attachment breaker vars use.
+func TestIntegration_DebugVars_DBStats_ZeroWithoutADatabase(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+	token := registerAndLogin(t, srv)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/debug/vars", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /debug/vars body: %v", err)
+	}
+
+	var stats dbStatsVars
+	if err := json.Unmarshal(body["db_stats"], &stats); err != nil {
+		t.Fatalf("decode db_stats: %v", err)
+	}
+	if stats != (dbStatsVars{}) {
+		t.Errorf("db_stats = %+v, want the zero value (no database configured)", stats)
+	}
+}
+
+// TestIntegration_DebugVars_PostgresBreaker_ReportsDisabledWithoutDatabase
+// is 16.C2's "disabled" case, the mirror of the attachment breakers'
+// own — testConfig() has no DatabaseURL, so newServer never builds
+// dbBreaker at all.
+func TestIntegration_DebugVars_PostgresBreaker_ReportsDisabledWithoutDatabase(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+	token := registerAndLogin(t, srv)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/debug/vars", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /debug/vars body: %v", err)
+	}
+
+	raw, ok := body["postgres_breaker"]
+	if !ok {
+		t.Fatal("/debug/vars response is missing expected key \"postgres_breaker\"")
+	}
+	var v attachmentBreakerVars
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("decode postgres_breaker: %v", err)
+	}
+	if v.State != "disabled" {
+		t.Errorf("postgres_breaker.state = %q, want %q (testConfig() has no DatabaseURL)", v.State, "disabled")
 	}
 }
 
@@ -580,6 +685,48 @@ func TestIntegration_DebugVars_ReportsBuildInfo(t *testing.T) {
 	}
 	if gotCommit != "deadbeef" {
 		t.Errorf("/debug/vars commit = %q, want %q", gotCommit, "deadbeef")
+	}
+}
+
+// TestIntegration_DebugVars_AttachmentBreaker_ReportsDisabledWithoutS3
+// pins 16.B5's "disabled" case: testConfig() enables no attachment
+// backend at all, so buildBlobStore never runs and neither breaker is
+// ever built — /debug/vars must say so plainly rather than reporting a
+// zero-valued breaker that looks like a healthy one at a glance.
+func TestIntegration_DebugVars_AttachmentBreaker_ReportsDisabledWithoutS3(t *testing.T) {
+	srv := httptest.NewServer(newTestServer(t, testConfig(), discardLogger()).Handler)
+	defer srv.Close()
+	token := registerAndLogin(t, srv)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/debug/vars", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /debug/vars: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /debug/vars body: %v", err)
+	}
+
+	for _, key := range []string{"attachment_s3_breaker", "attachment_s3_list_breaker"} {
+		raw, ok := body[key]
+		if !ok {
+			t.Fatalf("/debug/vars response is missing expected key %q", key)
+		}
+		var v attachmentBreakerVars
+		if err := json.Unmarshal(raw, &v); err != nil {
+			t.Fatalf("decode %q: %v", key, err)
+		}
+		if v.State != "disabled" {
+			t.Errorf("%s.state = %q, want %q (testConfig() enables no attachment backend)", key, v.State, "disabled")
+		}
 	}
 }
 
@@ -2337,7 +2484,10 @@ func TestIntegration_AccessLog_IncludesUserIDForAuthenticatedRequest(t *testing.
 // user_id field at all, not an empty one.
 func TestIntegration_AccessLog_OmitsUserIDForUnauthenticatedRequest(t *testing.T) {
 	var logBuf syncBuffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	// Debug level: GET /health is a quiet path (see main's QuietPaths), so its
+	// successful access-log line is emitted at Debug — this control case only
+	// needs to see that line to assert it carries no user_id.
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	srv := httptest.NewServer(newTestServer(t, testConfig(), logger).Handler)
 	defer srv.Close()

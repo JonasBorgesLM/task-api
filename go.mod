@@ -3,6 +3,7 @@ module github.com/JonasBorgesLM/task-api
 go 1.26.6
 
 require (
+	github.com/JonasBorgesLM/bastion v0.2.1
 	github.com/JonasBorgesLM/cairn v0.1.1
 	github.com/JonasBorgesLM/crier/core v0.3.0
 	github.com/JonasBorgesLM/crier/exporters/otlp v0.1.0

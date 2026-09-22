@@ -1,3 +1,5 @@
+github.com/JonasBorgesLM/bastion v0.2.1 h1:tAaYQAEX89mmrti3CvbKjBZwQreMYCoVcUV2+x3AkqI=
+github.com/JonasBorgesLM/bastion v0.2.1/go.mod h1:NSB+LQnNjX/uTr3naA5Mclv7CULXuO9/9Wdylu4KzXE=
 github.com/JonasBorgesLM/cairn v0.1.1 h1:aYoGm1wi0/FqvG0muyrAUlg/3uWOUXX4L3ChycvSqdM=
 github.com/JonasBorgesLM/cairn v0.1.1/go.mod h1:XAMOKM45k4SrlfQapbj86RNjR2rUAUnXiWsu2pegR4A=
 github.com/JonasBorgesLM/crier/core v0.3.0 h1:Di9QjzQisNAnB5CHKZy0Aaa2BM+r60IDcYTOT8oxbZ4=

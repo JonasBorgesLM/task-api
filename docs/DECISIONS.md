@@ -2506,3 +2506,517 @@ configurado nesta PR — sem hooks, não há um terceiro ponto de log a
 auditar. Fiar observabilidade de criação/rejeição em `crier`
 (`docs/INTEGRATION.md` §3 do cairn) fica para quando isso for
 realmente necessário, não construído por antecipação.
+
+---
+
+## Deadline de saída (issues #277/16.A1, #279/16.A3)
+
+Nenhuma chamada de saída — banco, S3 — tinha teto de tempo do lado do
+servidor. `HTTP_WRITE_TIMEOUT` fecha a conexão, mas não cancela o
+contexto do handler: uma consulta esperando conexão livre no pool
+esperava até o cliente desistir, sem limite algum se o cliente for
+paciente.
+
+**A armadilha considerada e descartada: `http.TimeoutHandler` na
+cadeia.** O download de anexo usa `http.ServeContent`
+(`internal/attachment/handler.go`), escolhido deliberadamente por tratar
+`Range`. `TimeoutHandler` bufferiza o corpo inteiro em memória antes de
+escrever, o que quebraria Range e transformaria um download de 500 MB em
+500 MB de heap.
+
+**A decisão: deadline na fronteira de saída, não no HTTP.** Dois campos
+novos em `Config` — `DBCallTimeout` (padrão 5s) e `StorageCallTimeout`
+(padrão 30s, mais generoso porque uma chamada pode carregar um anexo
+inteiro) — cada repositório PostgreSQL e o `s3BlobStore` aplicam via um
+`withTimeout(ctx)` próprio, em volta de cada método, nunca em volta de
+cada `Read` de stream.
+
+**Por que o deadline nunca alcança o corpo de um download.** No
+`s3BlobStore.Open`, o `StatObject` — a ida real ao servidor, que prova
+que o objeto existe — é limitado pelo timeout. O `GetObject` que vem
+depois é preguiçoso (nenhum I/O até o primeiro `Read`) e recebe o
+`ctx` original do chamador, sem deadline algum: o `minio-go` vincula o
+`Object` retornado ao contexto que o criou e reconsulta esse contexto a
+cada `Read`. Um deadline ali não limitaria uma chamada travada — cortaria
+um download longo e legítimo no meio, que é pior do que o problema que
+deveria resolver. Verificado com teste de integração real contra o
+MinIO (`TestS3BlobStore_Open_StreamingOutlivesCallTimeout`): abre com
+timeout de 50ms, dorme 200ms, e o `Read` completo ainda funciona.
+
+**A troca que fechou junto: `obj.Stat()` virou `StatObject(ctx, ...)`**
+(issue #279). A chamada antiga não recebia contexto — a única ida à
+rede deste pacote imune a cancelamento, e por isso a única que um
+S3 travado conseguia manter presa mesmo depois do cliente desistir. A
+troca não custou round-trip a mais: `GetObject` continua preguiçoso, e
+chamá-lo depois do `Stat` deixa a contagem de idas ao servidor exatamente
+onde estava.
+
+**Transação, nunca statement.** Nas duas transações com cadeado
+(`task.Update`'s `SELECT ... FOR UPDATE`, `user`'s
+`pg_advisory_xact_lock`), o deadline cobre o método inteiro — `BeginTx`
+até `Commit` — nunca uma consulta isolada. Um timeout expirando entre elas
+abandonaria a transação com o cadeado preso até o `Rollback` do `defer`
+conseguir a mesma conexão que acabou de expirar.
+
+**Zero é "sem teto", não erro.** `withTimeout` com `callTimeout <= 0`
+devolve o `ctx` do chamador sem tocar — o mesmo `context.Context` que um
+teste já construiu com o seu próprio deadline não é sobrescrito.
+
+---
+
+## Classificação positiva de erro de infraestrutura (issue #278)
+
+Um `500` de "PostgreSQL inacessível" e um `500` de "o cliente mandou um
+UUID malformado" eram indistinguíveis: `handleServiceError`'s ramo
+`default:` recebia os dois igual, e todo `fmt.Errorf("postgres: ...: %w",
+err)` que não passava por um sentinela específico (`ErrNotFound`,
+`ErrAlreadyExists`, `ErrConflict`) caía no mesmo balde genérico.
+
+**A decisão: um predicado puro em `internal/platform/pgerr`, escrito como
+lista de permissão.** `IsInfrastructureFailure(err error) bool` reconhece
+exatamente as classes SQLSTATE `08` (connection exception), `53`
+(insufficient resources), `57` (operator intervention), mais
+`driver.ErrBadConn` e `context.DeadlineExceeded` (este último, na prática,
+sobretudo o `DBCallTimeout` da seção "Deadline de saída" acima expirando
+esperando conexão livre no pool).
+
+**Por que lista de permissão, e não de exclusão — a mesma pergunta que o
+bastion já resolveu para si mesmo, aqui aplicada sem bastion nenhum
+envolvido:** um erro nunca visto pelo predicado devolve `false` — o mesmo
+comportamento que já existia antes desta issue, não um novo tipo de falha.
+Uma lista de exclusão erraria para o lado perigoso: um SQLSTATE `22P02`
+(UUID malformado — exatamente o caso que motivou esta issue) classificado
+por engano como infraestrutura transformaria uma rajada de requisições com
+entrada inválida em alarme de indisponibilidade.
+
+**Onde a classificação acontece, e por que não no `Handler`:**
+`Service`/`Handler` "devem permanecer completamente alheios à existência do
+PostgreSQL" — regra já registrada no `CLAUDE.md`. `handleServiceError`
+nunca pode ganhar um ramo específico de Postgres. A classificação acontece
+inteiramente dentro do repositório, via um `wrapDBError(err)` que embrulha
+apenas o erro genérico de cada método (nunca os já roteados para um
+sentinela específico como `isUniqueViolation`), produzindo um **novo
+sentinela por pacote** — `ErrDependencyUnavailable`, em `task`, `user` e
+`attachment` — checável com `errors.Is` como qualquer outro. `Handler`
+ganha um `case` a mais, sem nunca importar `pgconn` nem saber que
+PostgreSQL existe.
+
+**O log agora distingue sem ler a mensagem.** `handleServiceError` loga
+`"dependency unavailable"` para o novo sentinela — uma string de busca
+distinta de `"unexpected service error"` — e devolve `503`, não `500`: a
+requisição era legítima, o problema é a dependência, e vale a pena tentar
+de novo quando ela se recuperar. (Sem `Retry-After` por enquanto — um
+valor concreto exige um sinal real de "quanto tempo até recuperar", que
+esta issue não tem; fica para quando/se o bastion entrar, via `openTimeout`
+de um breaker real, não um número inventado agora.)
+
+**Verificado com controle negativo, não só com teste positivo:** o
+predicado invertido (`default: return true` em vez de `false`) faz sete
+casos negativos falharem, incluindo o 22P02 explícito; o `wrapDBError`
+neutralizado faz o teste de classificação de ponta a ponta (contra
+PostgreSQL real, via `DBCallTimeout` esgotado) falhar. Os dois restaurados
+e confirmados idênticos byte a byte ao original.
+
+---
+
+## Adoção do bastion (issue #280, 16.B1): só no ramo S3
+
+O bastion (v0.2.1) foi avaliado contra as três dependências de saída deste
+serviço. Custo de entrada: zero dependências, Go puro, um módulo a mais no
+grafo, nenhum transitivo — passa o único portão que o `CLAUDE.md` impõe a
+uma dependência nova (binário estático em `scratch` continua possível).
+
+**Três veredictos, não um — e o "não" ao crier é decisão tanto quanto os
+dois "sim":**
+
+- **S3/MinIO — adotar.** Dependência opcional (sem
+  `ATTACHMENT_S3_ENDPOINT` as rotas de anexo nem são registradas), isolada
+  do resto da API, com uma única sede de construção
+  (`buildBlobStore`, `cmd/api/main.go`). Um decorador entra ali sem que
+  `Service`, `Handler` ou a interface `BlobStore` mudem — ver
+  `internal/attachment/s3_breaker.go`.
+- **PostgreSQL — condicional, e não agora (fica para 16.C1).** Com uma
+  réplica, se o banco caiu a API está fora de qualquer jeito e o breaker
+  só trocaria `500` por `503`. O ganho real seria outro — esgotamento de
+  pool — e isso precisa ser medido antes de valer a pena, não assumido.
+- **crier/OTLP — não adotar.** `otlp.New` e `core.New` não fazem I/O de
+  rede; a exportação acontece nas goroutines do próprio dispatcher, e
+  `crierTeeHandler` descarta o erro do crier e devolve o do handler
+  embrulhado (`cmd/api/crier.go`). O crier é espelho, nunca portão — o
+  modo de falha que um breaker existe para prevenir não tem como ocorrer
+  aqui.
+
+**A restrição que fecha a decisão: embrulhar só o ramo S3.**
+`fsBlobStore` é disco local — sem rede, sem falha em cascata a prevenir.
+Um breaker ali só adicionaria um modo de falha a um caminho que não tem
+nenhum. O decorador (`attachment.NewBreakerBlobStore`) é aplicado ao
+construir o store S3 dentro de `buildBlobStore`, nunca à interface
+`BlobStore` em geral.
+
+**A limitação aceita conscientemente, não descoberta depois:**
+`BlobStore.Open` devolve um `io.ReadSeekCloser` — um handle vivo. O
+breaker cobre o `StatObject` que prova que o objeto existe e o
+`GetObject` (preguiçoso, sem I/O) que abre o handle. Todo `Read` que o
+`Handler` faz depois, streamando via `http.ServeContent`, acontece **fora**
+da chamada breada — a mesma razão pela qual o deadline de saída também não
+alcança esses bytes (ver "Deadline de saída" acima). Um S3 que aceita a
+abertura e trava no meio do stream é invisível para o breaker. Fechar essa
+lacuna significaria limitar o download em si, que é exatamente o erro que
+o próprio `s3BlobStore.Open` já rejeita.
+
+---
+
+## ErrUnavailable e 503 com Retry-After (issue #282, 16.B3)
+
+Um `bastion.ErrOpenState` ou `bastion.ErrTooManyRequests` vindo do
+decorador cairia, sem mais nada, no `default:` de `handleServiceError` —
+`500`, quando o `REQUIREMENTS.md` do próprio bastion (§5.1) já diz por que
+isso é errado: "um 500 diz ao chamador para desistir quando deveria dizer
+para voltar". São dois sentinelas, não um — esquecer
+`ErrTooManyRequests` deixaria um `500` raro, só visível na janela de
+half-open, e por isso o mais difícil de reproduzir.
+
+**A tradução acontece na fronteira, não no Handler.** `CLAUDE.md` já
+proíbe `handleServiceError` de ganhar um ramo que conheça o que está atrás
+do `Repository`; ensinar bastion ao `Handler` seria a mesma violação com
+outro nome. `s3_breaker.go`'s `translateBreakerError` embrulha os dois
+sentinelas do bastion num `ErrUnavailable` — sentinela próprio do pacote,
+no mesmo formato de `ErrNotFound`/`ErrDependencyUnavailable` — antes de
+cruzar para fora do arquivo. `unavailableError` não tem `Unwrap`: só
+`Is(ErrUnavailable)`, de propósito, para que `bastion.ErrOpenState` nunca
+seja alcançável por `errors.Is`/`errors.As` de fora deste arquivo, nem por
+acidente.
+
+**Por que `ErrUnavailable` é distinto de `ErrDependencyUnavailable`
+(issue #278).** Os dois viram `503`, mas por uma razão diferente cada um:
+`ErrDependencyUnavailable` significa "a chamada foi tentada e a
+dependência respondeu mal, uma vez" — não há como saber quando vai
+melhorar, daí nenhum `Retry-After` (ver o parêntese ao fim da seção
+"Classificação positiva" acima). `ErrUnavailable` significa "o breaker, a
+partir de um histórico de evidência, já sabe que não vale tentar" — e
+esse é exatamente o caso em que o momento de recuperação **é** conhecido
+de antemão: o `openTimeout` do próprio breaker. `Retry-After` carrega
+esse valor (`s3BreakerOpenTimeout`, 30s — uma única constante, para que o
+número no header e o timeout real do breaker nunca possam divergir), lido
+pelo `Handler` via `errors.As` contra
+`interface{ RetryAfter() time.Duration }`, sem nunca importar bastion —
+`cmd/api/boundary_test.go` garante isso estruturalmente, não só por
+convenção.
+
+---
+
+## Validar permissão de escrita no S3 na subida (issue #283, 16.B4)
+
+A subida já checava alcance do bucket (`client.BucketExists`), o que pega
+endpoint errado e bucket inexistente — mas não credencial ou policy sem
+permissão de **escrita**, que só aparecia no primeiro `Put` de um usuário
+real.
+
+**Por que isso importa mais depois da 16.B2.** Com o breaker na frente, um
+`AccessDenied` é indistinguível, no mapeamento de erro que já existia, de
+"o serviço está quebrado". O circuito abre, e cada sonda de half-open
+recebe o mesmo `403` — ele não fecha sozinho, porque nada no caminho
+melhora sozinho. O breaker em si continua sendo a escolha certa (custa
+~34ns por requisição rejeitada, contra o round-trip completo que cada
+requisição pagaria sem ele); o problema real é que "circuito aberto"
+aponta para a dependência quando a culpa é da configuração.
+
+**A correção é na subida, não no breaker** — o mesmo princípio já
+registrado para storage em geral ("Configuração de storage: obrigatória,
+sem default"): falhar rápido na inicialização, onde a mensagem é lida por
+quem acabou de mexer na config, não às 3h como "anexos fora do ar".
+`probeWritePermission` (`internal/attachment/s3_storage.go`) escreve e
+remove um objeto vazio sob `writeProbeKey`, uma chave dedicada e
+nomeada — uma falha ao remover é reportada distinta de uma falha ao
+escrever, para que quem lê o log da subida saiba se pode haver um objeto
+esquecido para limpar à mão.
+
+**O caso aceito em aberto: rotação de credencial em processo já
+rodando.** A checagem de subida não pega uma credencial que expira depois
+que o processo já está de pé. Nesse caso o circuito abrindo é o
+comportamento correto — ele para de martelar uma credencial morta — e a
+sonda de half-open a cada `openTimeout` é uma forma razoável de perguntar
+"já trocaram a credencial?". Registrado aqui para que ninguém tente
+"consertar" isso depois: não há checagem de subida capaz de cobrir uma
+falha que só existe depois da subida.
+
+---
+
+## Counts() no /debug/vars, não no readiness (issue #284, 16.B5)
+
+Com o breaker da 16.B2, `Breaker.Counts()` passa a existir para os dois
+breakers de anexo e responde exatamente o que faltava — estado, falhas
+consecutivas contra o limiar, há quanto tempo o circuito está aberto. A
+tentação é expor isso em `GET /health/ready`. É errado nas duas
+topologias, e este projeto já tomou essa decisão uma vez, para o crier
+("um backend de log inacessível não impede a API de atender ninguém",
+seção crier + SigNoz acima) — aqui vale por um motivo ainda mais forte:
+anexos são dependência opcional cujas rotas já degradam sozinhas sem
+nenhum breaker envolvido.
+
+- **Com uma réplica** (a topologia registrada neste documento), reportar
+  not-ready tira o único pod. Uma falha parcial — anexos fora, tasks e
+  auth funcionando — vira indisponibilidade total.
+- **Com N réplicas contra o mesmo S3**, os breakers abrem mais ou menos
+  juntos, todos reportam not-ready mais ou menos juntos, e o
+  orquestrador não tem para onde mandar tráfego. Mesmo resultado, caminho
+  mais longo.
+
+Circuito aberto é falha **tratada** — tirar o pod de rotação por causa
+dele inverteria a prioridade justamente na dependência que o breaker já
+está degradando com elegância. `GET /health/ready` continua checando só o
+banco, sem nenhuma mudança.
+
+**Onde vai, então: `attachment_s3_breaker` e `attachment_s3_list_breaker`
+em `/debug/vars`** (`cmd/api/attachment_breaker.go`), publicados uma
+única vez por processo com o mesmo padrão `sync.Once` +
+`atomic.Pointer` que `publishCrierExpvarOnce` já usa — necessário pela
+mesma razão: `newServer` roda uma vez por `*testing.T` na suíte deste
+pacote, e `expvar.Publish` entra em pânico numa segunda chamada com o
+mesmo nome. Um breaker ausente (anexos desligados, ou backend em disco)
+reporta `{"state":"disabled"}`, não um erro nem um valor zerado
+ambíguo.
+
+**O detalhe que já custou caro uma vez, aplicado de novo aqui:**
+`Counts.State` é `bastion.State`, um tipo definido sobre `int` — o mesmo
+tipo que `crierAttrValue` (`cmd/api/crier.go`) precisa desviar
+explicitamente para não virar um marcador "unsupported value type" opaco
+no SigNoz (issue #81 do bastion). `attachmentBreakerSnapshot` passa
+`c.State.String()`, nunca o valor bruto, para o JSON de `/debug/vars`; o
+hook `OnStateChange` faz o mesmo antes de logar. `OnCall` complementa a
+transição com o erro que a causou — `StateChangeEvent` do bastion não
+carrega erro, só a transição em si, então o log de cada chamada contada
+como falha (`ev.Counted && ev.Err != nil`) é o que deixa "S3 caiu"
+distinguível de "credencial errada" ao lado da linha de transição, sem
+pedir ao bastion para carregar algo que ele deliberadamente não carrega.
+
+**Não verificado nesta sessão: a aparência real no SigNoz.** O ambiente
+de desenvolvimento não tem um coletor OTLP vivo para confirmar
+visualmente que os campos chegam intactos — a mesma limitação que já
+valia para a seção "crier + SigNoz" acima. O que está verificado é que
+`crierAttrValue`/`attachmentBreakerSnapshot` produzem a string correta
+antes de qualquer coisa sair deste processo.
+
+---
+
+## Medição de esgotamento de pool (issue #285, 16.C1): sinal real, fase C segue
+
+`sql.DBStats` publicado em `/debug/vars` (`db_stats` — `MaxOpenConnections`,
+`OpenConnections`, `InUse`, `Idle`, `WaitCount`, `WaitDuration`), mesmo padrão
+`sync.Once` + `atomic.Pointer` de `publishCrierExpvarOnce`/`attachment_s3_breaker`,
+reportando tudo zerado sem banco configurado.
+
+**A medição, contra PostgreSQL real, não hipotética.** Banco de dados local
+(`docker-compose`) semeado com 10 usuários e 500 tasks cada (5.000 linhas) via
+`cmd/seed`, pool no default de produção (`DBMaxOpenConns=25`). 10 sessões
+autenticadas reais (login completo, com CSRF), 6 goroutines por sessão — 60
+requisições concorrentes, deliberadamente acima das 25 conexões do pool —
+alternando `GET /tasks?limit=50` e `GET /tasks/stats` (os dois candidatos que o
+próprio texto da issue já apontava: `CountAll` roda em toda listagem,
+`CountByStatusAndPriority` faz dois `GROUP BY`). Limitadores de taxa
+deliberadamente elevados para o teste (`RATE_LIMIT_*`/`USER_RATE_LIMIT_*`), para
+isolar o comportamento do pool do comportamento do limitador — que é, ele mesmo,
+uma alavanca de defesa já presente e relevante para a conclusão, não um
+obstáculo a contornar.
+
+**O resultado, e ele não deixa dúvida:**
+
+| Momento | `open_connections`/`in_use` | `wait_count` | `wait_duration` (acumulado) |
+| --- | --- | --- | --- |
+| Ocioso, antes da carga | 1 / 0 | 0 | 0s |
+| +1s de carga | 25 / 25 | 57.500 | 2m35s |
+| +2s de carga | 25 / 25 | 69.540 | 3m10s |
+| +3s de carga | 25 / 25 | 81.415 | 3m45s |
+| +18s de carga (fim) | 25 / 25 | ~240.000 | ~10m54s |
+
+O pool satura (`open_connections == in_use == MaxOpenConnections`) no primeiro
+segundo e nunca sai daí enquanto a carga persiste. `WaitCount` não fica perto de
+zero — a condição que a própria issue nomeou como "a fase C morre aqui" — ele
+salta às dezenas de milhares assim que a concorrência ultrapassa o tamanho do
+pool, com **zero erros e zero 429** no cliente (120 mil requisições completadas
+em 20s, ~6.000 req/s): a fila fica inteiramente invisível para quem chama,
+visível só em `WaitCount`/`WaitDuration` — exatamente o ponto cego que motivou
+esta issue.
+
+**O que a medição não é, dito com a mesma honestidade que a issue pede.** A carga
+foi desenhada para ultrapassar o pool (60 concorrentes contra 25 conexões), não
+amostrada de tráfego real de produção — este serviço não tem histórico de
+produção para amostrar. Mas 60 requisições concorrentes vindas de 10 sessões
+distintas não é um cenário exótico: são poucos usuários reais atualizando uma
+lista de tasks ao mesmo tempo, o tipo de pico que `GET /tasks` e
+`GET /tasks/stats` — chamadas típicas de carregamento de tela — provocam juntas
+com naturalidade.
+
+**A decisão: segue para 16.C2.** O critério que a própria issue definiu
+(`WaitCount` em zero sob carga realista fecha a fase aqui) não se sustenta — o
+esgotamento é real, reproduzível e imediato. O argumento contra registrado na
+issue (com uma réplica, banco fora do ar já é indisponibilidade total,
+`/health/ready` já tira o pod) continua válido para esse cenário específico, mas
+não é o cenário que esta medição testou: aqui o banco está saudável o tempo
+todo, e o gargalo é fila, não queda. Um breaker ali trocaria uma fila que cresce
+sem teto por uma recusa de ~34ns — a mesma troca que a 16.B2 já fez para o S3, e
+que só é segura agora porque a 16.A2 (classificador por lista de permissão) já
+existe: sem ela, uma rajada de UUID malformado abriria o circuito de um banco
+saudável.
+
+---
+
+## Breaker compartilhado no PostgreSQL (issue #286, 16.C2)
+
+Destravada pela 16.C1: `WaitCount` não fica perto de zero sob carga concorrente
+realista, então o breaker segue. E pela 16.A2, sem a qual o classificador seria
+por exclusão — abrindo o circuito de um banco saudável em uma rajada de UUID
+malformado (SQLSTATE 22P02).
+
+**Um breaker só, não três.** `task.Repository`, `user.Repository` e
+`attachment.Repository` ganham cada um o seu próprio decorador
+(`postgres_breaker.go` em cada pacote), mas os três **compartilham a mesma
+instância** de `*bastion.Breaker`, construída uma única vez em
+`cmd/api/db_breaker.go` (`buildDBBreaker`) e passada aos três construtores. A
+razão é o próprio recurso: os três domínios batem no mesmo `*sql.DB`, um único
+pool de 25 conexões — esgotamento de pool é uma falha sobre um recurso, não três
+falhas independentes. Três breakers separados aprenderiam a mesma lição devagar e
+cada um por conta própria; um só reage à primeira evidência, de qualquer um dos
+três domínios, e protege o pool inteiro de uma vez.
+
+**A regra que decide o desenho, e ela é estrutural, não convenção: um `Execute`
+por método da interface, nunca por statement.** As duas transações com cadeado —
+`task.Update` (`BeginTx` → `SELECT ... FOR UPDATE` → `UPDATE` → `Commit`,
+segurando row lock) e `user.CreateSession` (`BeginTx` → `pg_advisory_xact_lock` →
+`INSERT` → `DELETE` → `Commit`, segurando advisory lock) — são o motivo desta
+regra existir: uma recusa do breaker entre `BeginTx` e `Commit` abandonaria a
+transação ao `defer tx.Rollback()`, que precisa exatamente da conexão que o
+breaker acabou de negar, com o cadeado preso até o rollback chegar.
+
+O decorador embrulha na fronteira do `Repository` — `bastion.Execute`/`bastion.Do`
+em volta de `r.next.Update(ctx, task)` inteiro, nunca de uma consulta dentro dele.
+Isso torna a regra **impossível de violar por engano**, não apenas seguida por
+convenção: a transação inteira vive dentro de `next.Update`, que só roda se o
+breaker admitir a chamada. Uma rejeição significa que `next.Update` nunca foi
+chamado — nenhuma transação chegou a existir para abandonar.
+
+**Provado diretamente, não inferido do erro.** `TestBreakerRepository_TrippedCircuit_NeverReachesNext`,
+em `internal/task` e `internal/user`, força o breaker aberto (`Breaker.Trip`) e
+verifica que o *dublê* do repositório nunca foi chamado — não só que o erro
+devolvido é `ErrUnavailable`. Uma asserção só sobre o erro seria satisfeita mesmo
+que `next` tivesse sido chamado por engano; contar a chamada é o que realmente
+prova a regra. As duas transações também têm teste de 50 goroutines concorrentes
+sob `-race` (`TestBreakerRepository_Update_ConcurrentCallsAreRaceFree`,
+`TestBreakerRepository_CreateSession_ConcurrentCallsAreRaceFree`).
+
+**O classificador é `pgerr.IsInfrastructureFailure`, sem mudança** — a mesma
+função de `internal/platform/pgerr`, já com sua própria tabela de casos incluindo
+o 22P02 negativo (issue #278/16.A2). Construído uma vez em `buildDBBreaker`, não
+redefinido em cada pacote. `wrapDBError` já rodou dentro de `postgresRepository`
+antes do classificador ver o erro, embrulhando uma falha de infraestrutura como
+`ErrDependencyUnavailable(erro pg original)` — `IsInfrastructureFailure` ainda
+encontra o `*pgconn.PgError`/`driver.ErrBadConn`/`context.DeadlineExceeded`
+original através desse embrulho, via `errors.As`/`errors.Is`; um sentinela de
+domínio (`ErrNotFound`, `ErrConflict`, ...) nunca contém um e por isso nunca
+conta.
+
+**`ErrUnavailable` novo em `task` e `user`, reaproveitado em `attachment`.**
+`task.ErrUnavailable`/`user.ErrUnavailable` seguem o mesmo formato de
+`attachment.ErrUnavailable` (issue #282) — distinto de `ErrDependencyUnavailable`
+pela mesma razão: aquele sentinela significa "a chamada foi tentada e falhou uma
+vez", este significa "o breaker já sabe, por evidência acumulada, que não vale a
+pena tentar", e só o segundo tem um momento de recuperação conhecido de antemão
+(o `openTimeout` do breaker), daí o `Retry-After`. `attachment`'s decorador deste
+issue **reaproveita o `ErrUnavailable`/`unavailableError` que o breaker do S3 já
+usa** (`s3_breaker.go`) em vez de definir um segundo par — `Handler` não precisa
+saber qual dos dois breakers recusou a chamada, só que algum recusou e por quanto
+tempo esperar. Isso exigiu um pequeno refactor: `unavailableError.retryAfter`
+virou campo explícito em vez de ler a constante do pacote (`s3BreakerOpenTimeout`)
+direto no método `RetryAfter()`, porque agora dois breakers com timeouts
+potencialmente diferentes produzem o mesmo tipo de erro.
+
+**`dbBreakerOpenTimeout` mora em `cmd/api`, não em cada pacote de domínio** — ao
+contrário de `s3BreakerOpenTimeout`, que vive dentro de `internal/attachment`
+porque o breaker do S3 é construído e consumido no mesmo pacote. Aqui o breaker é
+compartilhado entre três pacotes, então nenhum deles é dono do número:
+`NewBreakerRepository` recebe `retryAfter time.Duration` como parâmetro explícito,
+e `cmd/api` passa a mesma constante que usou em `bastion.WithOpenTimeout` — uma
+única fonte de verdade, em vez de três cópias do mesmo `30 * time.Second` que
+poderiam divergir silenciosamente.
+
+**`GET /health/ready` inalterado, de propósito.** `registerReadinessRoute`
+continua recebendo o `*sql.DB` cru e chamando `PingContext` direto — o mesmo
+argumento já registrado para os breakers de anexo (seção "Counts() no
+/debug/vars" acima) vale aqui, com um motivo a mais: o **obstáculo estrutural**
+que a própria issue nomeou. `registerReadinessRoute(root, db, logger)` é o único
+lugar do processo que contorna a abstração de `Repository` — recebe o `*sql.DB`
+diretamente, não um repositório. Como a decisão é manter o readiness fora do
+breaker, essa inconsistência fica, deliberadamente: se alguém "consertar" isso
+passando o readiness por um `Repository` decorado, o pool exhaustion volta a
+converter uma falha parcial em indisponibilidade total, exatamente o resultado
+que a 16.B5 já rejeitou para o S3.
+
+**`postgres_breaker` em `/debug/vars`**, mesmo padrão `sync.Once` +
+`atomic.Pointer` dos demais (`cmd/api/db_breaker.go`), reaproveitando
+`attachmentBreakerSnapshot` para o formato — não pedido explicitamente pela
+issue, adicionado pela mesma razão que motivou a 16.B5 para o S3: um breaker sem
+nenhuma visibilidade operacional não é algo que se liga em produção com
+confiança. Verificado contra PostgreSQL real
+(`TestPostgres_PostgresBreaker_ReportsClosedAndProtectsRealTraffic`): reporta
+`closed` depois de um ciclo completo de registro/login/criação de task através
+dos três repositórios decorados — não só que o breaker existe, mas que o tráfego
+real continua passando por ele.
+
+---
+
+## Registry do MinIO: Docker Hub para Quay.io (issue #288)
+
+O job `Quality Gate` da CI passou a falhar no passo "Start MinIO" —
+`docker: pull access denied for minio/minio, repository does not exist`.
+Investigado durante a #287 (16.A1-A3) e confirmado de novo em #289/#290/#291:
+`curl https://hub.docker.com/v2/repositories/minio/minio/` devolve
+`{"message":"object not found"}` direto da API do Docker Hub, reproduzido fora
+de qualquer contexto de CI (`docker pull` na máquina local falha do mesmo
+jeito). Não é rate limit nem exigência de login — o repositório não está mais
+sendo servido publicamente ali.
+
+**A correção: trocar de registry, não de versão.** O MinIO publica as mesmas
+imagens, com os mesmos nomes de tag, em `quay.io/minio/minio` —
+`quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` existe lá, e o `docker pull`
+devolve exatamente o mesmo digest (`sha256:a1ea29fa28355559ef137d71fc570e50
+8a214ec84ff8083e39bc5428980b015e`) que a imagem antiga do Docker Hub — é a
+mesma imagem, byte a byte, publicada em outro lugar, não uma migração de
+versão disfarçada de troca de registry.
+
+**Dois pontos de referência, os dois trocados juntos**: `docker-compose.yml`'s
+serviço `minio` e o passo "Start MinIO" de `.github/workflows/ci.yml` — o
+segundo roda `docker run` direto (não é um `services:` do GitHub Actions,
+porque a imagem do MinIO precisa do comando `server /data` explícito, que um
+`services:` não permite passar). Nenhum outro lugar do repositório referencia
+a imagem: as menções a `minio/minio` em `README.md`/`CLAUDE.md` são sobre o
+SDK Go (`github.com/minio/minio-go`), um pacote completamente diferente da
+imagem de container.
+
+**Verificado com a imagem antiga removida do cache local**, não só lida a
+respeito: `docker pull quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` do
+zero, `docker compose down && make db-up storage-up` para recriar os
+containers a partir do `docker-compose.yml` já trocado, `docker inspect
+task-api-minio-1` confirmando a imagem em uso, e a suíte de integração
+completa (`make test-integration`) rodando verde contra o container real.
+
+**Um segundo bug, exposto só depois de consertar o primeiro.** Com o registry
+trocado, o job `Quality Gate` passou do passo "Start MinIO" pela primeira vez —
+e quebrou logo no próximo, em
+`TestIntegration_DebugVars_AttachmentBreaker_ReportsClosedWithHealthyS3`
+(escrito na 16.B5): `attachment: bucket "task-api-attachments" does not
+exist`. O teste assumia o bucket que `docker-compose.yml`'s serviço
+`minio-bucket` cria (`mc mb --ignore-existing local/task-api-attachments`) —
+mas o job `Quality Gate` sobe o MinIO com `docker run` direto, sem nenhum passo
+equivalente. Como a CI nunca tinha chegado vivo a esse teste antes (sempre
+travava no MinIO primeiro), o bug ficou invisível desde que foi escrito — um
+bloqueio escondendo o outro.
+
+Corrigido criando o próprio bucket dentro do teste (`s3TestConfig`, em
+`cmd/api/attachment_breaker_integration_test.go`), com um nome único por
+execução e `t.Cleanup` para remover — o mesmo padrão que
+`internal/attachment/s3_storage_test.go`'s `newS3TestBucket` já usa, em vez de
+depender de um bucket externo pré-criado. Reproduzido localmente antes da
+correção — `docker compose down -v` seguido de `docker compose up -d minio`
+sem o serviço `minio-bucket`, replicando exatamente o MinIO vazio que a CI vê
+— e confirmado que o teste corrigido passa contra esse MinIO vazio, não só
+contra o ambiente de desenvolvimento que já tinha o bucket de antes.

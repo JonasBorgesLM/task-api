@@ -43,6 +43,11 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+// testDBCallTimeout is deliberately generous: these tests assert
+// repository behaviour, not the deadline, and a slow CI database must
+// never turn a correct test into a flake.
+const testDBCallTimeout = 30 * time.Second
+
 // testDatabaseURLEnv names the environment variable these tests read to
 // find a PostgreSQL instance. It deliberately does not reuse
 // config.Config's DATABASE_URL name, so a developer's local .env
@@ -90,7 +95,7 @@ func newPostgresTestRepo(t *testing.T) (repo *postgresRepository, db *sql.DB, us
 	// Goes through the exported constructor (rather than a bare struct
 	// literal) so these tests also exercise NewPostgresRepository itself,
 	// not just the type it returns.
-	return NewPostgresRepository(db).(*postgresRepository), db, createTestUser(t, db)
+	return NewPostgresRepository(db, testDBCallTimeout).(*postgresRepository), db, createTestUser(t, db)
 }
 
 // createTestUser inserts a minimal user row directly via SQL — this file
@@ -998,5 +1003,84 @@ func TestPostgres_Schema_RejectsInvalidPriority(t *testing.T) {
 	`, id, userID)
 	if err == nil {
 		t.Fatal("INSERT with an invalid priority: expected a CHECK constraint violation, got nil error")
+	}
+}
+
+// The deadline is the point of DBCallTimeout, so it is asserted against a
+// real driver rather than by reading the code: a callTimeout that has
+// already elapsed must stop the query even though the caller's own context
+// has no deadline at all. Before this existed, the only bound on a query
+// was the client going away — http.Server's WriteTimeout closes the
+// connection but does not cancel the handler's context.
+//
+// Negative control: verified failing (err == nil, the query completing
+// normally) against a repository built with callTimeout 0, which is the
+// behaviour every caller had before this change.
+func TestPostgres_CallTimeout_BoundsAQueryWithoutACallerDeadline(t *testing.T) {
+	_, db, userID := newPostgresTestRepo(t)
+
+	// 1ns is already spent by the time the driver looks at it.
+	repo := NewPostgresRepository(db, time.Nanosecond)
+
+	_, err := repo.FindAll(context.Background(), userID, 10, 0, nil, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FindAll with an exhausted call timeout: error = %v, want a match for context.DeadlineExceeded", err)
+	}
+}
+
+// The zero value must leave the caller's context untouched, so a caller
+// that has already bounded the call — or a test — is not second-guessed.
+func TestPostgres_ZeroCallTimeout_LeavesTheContextAlone(t *testing.T) {
+	_, db, userID := newPostgresTestRepo(t)
+
+	repo := NewPostgresRepository(db, 0)
+
+	if _, err := repo.FindAll(context.Background(), userID, 10, 0, nil, nil); err != nil {
+		t.Fatalf("FindAll with callTimeout 0: error = %v, want nil", err)
+	}
+}
+
+// A real infrastructure failure -- here, DBCallTimeout expiring while a
+// query waits, the same mechanism TestPostgres_CallTimeout_... above
+// already exercises -- must reach the caller classified as
+// ErrDependencyUnavailable, end to end, against a real database: not just
+// as a raw context.DeadlineExceeded a caller would have to know to check
+// for on every possible infrastructure failure shape.
+//
+// Negative control: verified failing (errors.Is false) against a version
+// of the generic error wrap that did not route through wrapDBError.
+func TestPostgres_InfrastructureFailure_ClassifiesAsErrDependencyUnavailable(t *testing.T) {
+	_, db, userID := newPostgresTestRepo(t)
+
+	repo := NewPostgresRepository(db, time.Nanosecond)
+
+	_, err := repo.FindAll(context.Background(), userID, 10, 0, nil, nil)
+	if !errors.Is(err, ErrDependencyUnavailable) {
+		t.Fatalf("FindAll with an exhausted call timeout: error = %v, want a match for ErrDependencyUnavailable", err)
+	}
+	// The original error is still in the chain -- ErrDependencyUnavailable
+	// is an additional classification, not a replacement of what actually
+	// happened.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FindAll with an exhausted call timeout: error = %v, want it to still match context.DeadlineExceeded too", err)
+	}
+}
+
+// The inverse of the test above: an error the database returns for the
+// caller's own bad input (Update against a non-existent task, surfacing
+// as ErrNotFound rather than any database-level error at all here, but
+// exercising the same wrapDBError path every other error in this file
+// passes through) must NOT be classified as ErrDependencyUnavailable.
+// This is the negative case issue #278 is fundamentally about: a client
+// mistake must never look like an outage.
+func TestPostgres_ClientError_DoesNotClassifyAsErrDependencyUnavailable(t *testing.T) {
+	repo, _, userID := newPostgresTestRepo(t)
+
+	_, err := repo.FindByID(context.Background(), "00000000-0000-0000-0000-000000000000", userID)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("FindByID for a missing task: error = %v, want a match for ErrNotFound", err)
+	}
+	if errors.Is(err, ErrDependencyUnavailable) {
+		t.Fatalf("FindByID for a missing task: error = %v, want it NOT to match ErrDependencyUnavailable", err)
 	}
 }

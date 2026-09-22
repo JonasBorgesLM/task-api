@@ -23,6 +23,10 @@
 //	DB_MAX_IDLE_CONNS       Maximum idle connections kept in the database pool (default: 25)
 //	DB_CONN_MAX_LIFETIME    Maximum lifetime of a pooled database connection,
 //	                        as a Go duration string (default: 5m)
+//	DB_CALL_TIMEOUT         Server-side deadline for a single database call,
+//	                        as a Go duration string (default: 5s)
+//	STORAGE_CALL_TIMEOUT    Server-side deadline for a single object-storage
+//	                        round trip, as a Go duration string (default: 30s)
 //	DB_AUTO_MIGRATE         Whether to apply pending PostgreSQL migrations on
 //	                        startup: true or false (default: true)
 //	AUTH_SESSION_TTL        How long a session token issued by POST /auth/login
@@ -80,6 +84,8 @@ const (
 	defaultDBMaxOpenConns  = 25
 	defaultDBMaxIdleConns  = 25
 	defaultDBConnMaxLife   = 5 * time.Minute
+	defaultDBCallTimeout   = 5 * time.Second
+	defaultStorageCallTO   = 30 * time.Second
 	defaultDBAutoMigrate   = true
 	defaultAuthSessionTTL  = 24 * time.Hour
 
@@ -216,6 +222,23 @@ type Config struct {
 	// replaced, bounding how long a connection can survive a database
 	// failover or load balancer change. Unused when DatabaseURL is empty.
 	DBConnMaxLifetime time.Duration
+
+	// DBCallTimeout bounds a single database call, from the server's own
+	// side. Without it the only limit on a query is the caller going away:
+	// HTTP_WRITE_TIMEOUT closes the connection but does not cancel the
+	// handler's context, so a query waiting for a free pooled connection
+	// waits for as long as the client is willing to. Unused when
+	// DatabaseURL is empty. See docs/DECISIONS.md § "Deadline de saída".
+	DBCallTimeout time.Duration
+
+	// StorageCallTimeout bounds a single object-storage round trip. It is
+	// generous relative to DBCallTimeout because one call may carry a whole
+	// attachment (AttachmentMaxBytes), and it deliberately does not apply
+	// to reading a download's bytes — see docs/DECISIONS.md § "Deadline de
+	// saída" for why bounding those would kill a legitimate large download
+	// rather than a stuck one. Unused when no object-storage backend is
+	// configured.
+	StorageCallTimeout time.Duration
 
 	// DBAutoMigrate controls whether the application applies pending
 	// PostgreSQL migrations (see migrate.RunMigrations) on startup. Unused
@@ -449,6 +472,8 @@ func Load() (Config, error) {
 		DBMaxOpenConns:         defaultDBMaxOpenConns,
 		DBMaxIdleConns:         defaultDBMaxIdleConns,
 		DBConnMaxLifetime:      defaultDBConnMaxLife,
+		DBCallTimeout:          defaultDBCallTimeout,
+		StorageCallTimeout:     defaultStorageCallTO,
 		DBAutoMigrate:          defaultDBAutoMigrate,
 		AuthSessionTTL:         defaultAuthSessionTTL,
 		AuthMaxSessionsPerUser: defaultAuthMaxSessionsPerUser,
@@ -499,6 +524,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.DBConnMaxLifetime, err = parseDuration("DB_CONN_MAX_LIFETIME", defaultDBConnMaxLife); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBCallTimeout, err = parseDuration("DB_CALL_TIMEOUT", defaultDBCallTimeout); err != nil {
+		return Config{}, err
+	}
+	if cfg.StorageCallTimeout, err = parseDuration("STORAGE_CALL_TIMEOUT", defaultStorageCallTO); err != nil {
 		return Config{}, err
 	}
 	if cfg.DBAutoMigrate, err = parseBool("DB_AUTO_MIGRATE", defaultDBAutoMigrate); err != nil {
