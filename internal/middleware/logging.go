@@ -16,13 +16,13 @@ import (
 // chain), and — when the request authenticated — the caller's user ID.
 //
 // The log level reflects the outcome — Info for 2xx/3xx, Warn for 4xx,
-// Error for 5xx — with one exception: 429 (Too Many Requests) is logged at
-// Info, because rate-limited requests are the limiter working as intended and
-// are high-volume by design, so logging each at Warn turns a flood of rejected
-// requests into a flood of Warn logs. An "error" field (the HTTP status text)
-// is still added whenever the status indicates a failure, so a log pipeline can
-// identify failed requests by the presence of "error" without parsing the
-// numeric status.
+// Error for 5xx — with two exceptions: 429 (Too Many Requests) and 401
+// (Unauthorized) are logged at Info, because a rate-limited or unauthenticated
+// request is the limiter/auth working as intended and is high-volume by design,
+// so logging each at Warn turns ordinary traffic into a flood of Warn logs. An
+// "error" field (the HTTP status text) is still added whenever the status
+// indicates a failure, so a log pipeline can identify failed requests by the
+// presence of "error" without parsing the numeric status.
 //
 // Request and response bodies are never logged: they may carry task
 // titles/descriptions that a caller wouldn't expect to end up in server
@@ -89,11 +89,13 @@ func Logging(logger *slog.Logger) Middleware {
 			switch {
 			case rec.status >= http.StatusInternalServerError:
 				level = slog.LevelError
-			case rec.status == http.StatusTooManyRequests:
-				// Rate-limited requests are the limiter working as intended and
-				// are high-volume by design; logging each at Warn turns a flood
-				// of rejected requests into a flood of Warn logs (amplification).
-				// Info keeps them visible without drowning genuine warnings.
+			case rec.status == http.StatusTooManyRequests, rec.status == http.StatusUnauthorized:
+				// Rate-limited (429) and unauthenticated (401) requests are the
+				// limiter and the auth challenge working as intended, and are
+				// high-volume by design (a bot probing, an expired token, a
+				// ramp of load). Logging each at Warn turns ordinary traffic
+				// into a flood of Warn logs; Info keeps them visible without
+				// drowning genuine warnings or tripping alerts on normal load.
 				level = slog.LevelInfo
 			case rec.status >= http.StatusBadRequest:
 				level = slog.LevelWarn

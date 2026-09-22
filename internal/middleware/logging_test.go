@@ -139,6 +139,7 @@ func TestLogging_LevelAndErrorField_ByStatusClass(t *testing.T) {
 		{"404 Not Found", http.StatusNotFound, "WARN", true},
 		{"409 Conflict", http.StatusConflict, "WARN", true},
 		{"429 Too Many Requests", http.StatusTooManyRequests, "INFO", true},
+		{"401 Unauthorized", http.StatusUnauthorized, "INFO", true},
 		{"500 Internal Server Error", http.StatusInternalServerError, "ERROR", true},
 	}
 
