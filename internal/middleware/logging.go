@@ -24,6 +24,10 @@ import (
 // indicates a failure, so a log pipeline can identify failed requests by the
 // presence of "error" without parsing the numeric status.
 //
+// QuietPaths lowers a successful response on the given paths to Debug — used for
+// the health/readiness probes an orchestrator hits constantly, so their steady
+// stream of 200s does not flood the log while a failing probe still logs above.
+//
 // Request and response bodies are never logged: they may carry task
 // titles/descriptions that a caller wouldn't expect to end up in server
 // logs, and logging them would add far more risk than diagnostic value.
@@ -62,7 +66,35 @@ func contextWithUserIDForLog(ctx context.Context) (context.Context, *string) {
 	return context.WithValue(ctx, userIDForLogKey, userID), userID
 }
 
-func Logging(logger *slog.Logger) Middleware {
+// LoggingOption configures the Logging middleware.
+type LoggingOption func(*loggingConfig)
+
+type loggingConfig struct {
+	quietPaths map[string]bool
+}
+
+// QuietPaths marks request paths whose successful (non-4xx/5xx) responses are
+// logged at Debug instead of Info. It exists for endpoints an orchestrator
+// probes constantly — the health and readiness checks — so a per-probe Info
+// line does not flood the log in steady state. A failing probe (e.g. a 503 from
+// readiness) keeps its normal level and stays visible. The middleware stays
+// route-agnostic: cmd/api, which owns the routes, supplies the paths.
+func QuietPaths(paths ...string) LoggingOption {
+	return func(c *loggingConfig) {
+		if c.quietPaths == nil {
+			c.quietPaths = make(map[string]bool, len(paths))
+		}
+		for _, p := range paths {
+			c.quietPaths[p] = true
+		}
+	}
+}
+
+func Logging(logger *slog.Logger, opts ...LoggingOption) Middleware {
+	var cfg loggingConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -102,6 +134,12 @@ func Logging(logger *slog.Logger) Middleware {
 			}
 			if rec.status >= http.StatusBadRequest {
 				attrs = append(attrs, "error", http.StatusText(rec.status))
+			}
+			// A successful probe on a quiet path (a health/readiness check) drops
+			// to Debug so an orchestrator hammering it does not flood the log; a
+			// failing probe keeps its level above and stays visible.
+			if rec.status < http.StatusBadRequest && cfg.quietPaths[r.URL.Path] {
+				level = slog.LevelDebug
 			}
 
 			logger.Log(r.Context(), level, "http request", attrs...)

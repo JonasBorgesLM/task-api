@@ -720,7 +720,10 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	rootHandler := middleware.Chain(
 		middleware.RequestID,
 		middleware.RealIP(middleware.AddressKeyFunc(addressKey)),
-		middleware.Logging(logger),
+		// The health/readiness probes are hit constantly by an orchestrator, so
+		// their successful responses log at Debug rather than a per-probe Info
+		// line (a failing readiness 503 still logs above Debug).
+		middleware.Logging(logger, middleware.QuietPaths("/health", "/health/ready")),
 		secureheaders.Middleware(
 			// This API only ever returns JSON, so nothing it serves
 			// legitimately loads a script, stylesheet, image or font.

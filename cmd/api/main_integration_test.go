@@ -2484,7 +2484,10 @@ func TestIntegration_AccessLog_IncludesUserIDForAuthenticatedRequest(t *testing.
 // user_id field at all, not an empty one.
 func TestIntegration_AccessLog_OmitsUserIDForUnauthenticatedRequest(t *testing.T) {
 	var logBuf syncBuffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	// Debug level: GET /health is a quiet path (see main's QuietPaths), so its
+	// successful access-log line is emitted at Debug — this control case only
+	// needs to see that line to assert it carries no user_id.
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	srv := httptest.NewServer(newTestServer(t, testConfig(), logger).Handler)
 	defer srv.Close()

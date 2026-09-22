@@ -234,6 +234,12 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   por natureza (um bot sondando, um token expirado, um cliente sem sessão);
   logá-la em `Warn` inflava o nível em tráfego perfeitamente normal e faria
   alerta de servidor disparar com tráfego comum. Demais 4xx seguem em `Warn`.
+- O `Logging` ganhou `QuietPaths`, e `cmd/api` marca `/health` e `/health/ready`
+  como silenciosas (issue #301): uma resposta **bem-sucedida** nessas rotas passa
+  a `Debug` em vez de uma linha `Info` por sondagem — um orquestrador bate nelas
+  o tempo todo. Uma sonda que **falha** (ex.: `503` de readiness) mantém o nível
+  normal e continua visível. O middleware segue sem conhecer rotas: quem passa os
+  paths é o `cmd/api`, que as conhece.
 
 ### Corrigido
 - `web/`'s lista de tasks (`useTasks`) podia mostrar dados de um filtro
