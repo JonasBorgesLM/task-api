@@ -6,10 +6,16 @@ versionamento seguindo [Semantic Versioning](https://semver.org/lang/pt-BR/).
 Este é o primeiro release versionado do projeto — não há tags anteriores.
 `v1.0.0` marca o ponto em que a API passa a ter contrato estável (`/v1`).
 
-## [1.6.0] — a definir na tag
+## [1.6.1] — 2026-09-22
 
-**Minor, não major:** a rota nova é aditiva, e os itens abaixo em
-"Segurança" são endurecimento — nenhum cliente que já respeitava o que
+> **Nota de versão:** a tag `v1.6.0` foi cortada cedo (em `731beec`, 2026-09-09)
+> e não contém o conteúdo abaixo, que se acumulou nesta seção "não lançada"
+> depois dela. Para não reescrever uma tag já publicada, este conjunto sai como
+> **1.6.1**; não há uma seção `[1.6.0]` separada porque essa versão nunca teve
+> um changelog próprio.
+
+**Minor no espírito, mas patch no número:** as rotas novas são aditivas e os
+itens em "Segurança" são endurecimento — nenhum cliente que já respeitava o que
 `docs/openapi.yaml` documentava é afetado.
 
 ### Adicionado
