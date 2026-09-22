@@ -229,6 +229,11 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   afogando avisos legítimos e podendo disparar alerta em massa sob ataque. O
   campo `error` continua presente, então o pipeline ainda distingue a
   resposta; só o nível muda. Demais 4xx seguem em `Warn`, 5xx em `Error`.
+- No mesmo espírito, `401 Unauthorized` também passa a `Info` (issue #300):
+  requisição não autenticada é o desafio de auth funcionando e é alto-volume
+  por natureza (um bot sondando, um token expirado, um cliente sem sessão);
+  logá-la em `Warn` inflava o nível em tráfego perfeitamente normal e faria
+  alerta de servidor disparar com tráfego comum. Demais 4xx seguem em `Warn`.
 
 ### Corrigido
 - `web/`'s lista de tasks (`useTasks`) podia mostrar dados de um filtro
