@@ -16,10 +16,13 @@ import (
 // chain), and — when the request authenticated — the caller's user ID.
 //
 // The log level reflects the outcome — Info for 2xx/3xx, Warn for 4xx,
-// Error for 5xx — and an "error" field (the HTTP status text) is added
-// whenever the status indicates a failure. That lets a log pipeline
-// identify failed requests by filtering on level or on the presence of
-// "error", without parsing the numeric status.
+// Error for 5xx — with one exception: 429 (Too Many Requests) is logged at
+// Info, because rate-limited requests are the limiter working as intended and
+// are high-volume by design, so logging each at Warn turns a flood of rejected
+// requests into a flood of Warn logs. An "error" field (the HTTP status text)
+// is still added whenever the status indicates a failure, so a log pipeline can
+// identify failed requests by the presence of "error" without parsing the
+// numeric status.
 //
 // Request and response bodies are never logged: they may carry task
 // titles/descriptions that a caller wouldn't expect to end up in server
@@ -86,6 +89,12 @@ func Logging(logger *slog.Logger) Middleware {
 			switch {
 			case rec.status >= http.StatusInternalServerError:
 				level = slog.LevelError
+			case rec.status == http.StatusTooManyRequests:
+				// Rate-limited requests are the limiter working as intended and
+				// are high-volume by design; logging each at Warn turns a flood
+				// of rejected requests into a flood of Warn logs (amplification).
+				// Info keeps them visible without drowning genuine warnings.
+				level = slog.LevelInfo
 			case rec.status >= http.StatusBadRequest:
 				level = slog.LevelWarn
 			}
