@@ -221,6 +221,14 @@ Este é o primeiro release versionado do projeto — não há tags anteriores.
   input de terceiros, e a dependência nunca entra no bundle de produção
   — corrigido mesmo assim via `overrides` em `web/package.json`, mais
   barato que deixar o alerta aberto.
+- O log de requisição registra `429 Too Many Requests` em `Info`, não
+  `Warn` (issue #299). Uma requisição barrada pelo rate limiter é a defesa
+  funcionando e é alto-volume por natureza; logar cada uma em `Warn`
+  transformava uma rajada de rejeições numa rajada de `Warn` — num teste de
+  carga sustentada (Sapper) um único ramp-up gerou ~87 mil linhas `Warn`,
+  afogando avisos legítimos e podendo disparar alerta em massa sob ataque. O
+  campo `error` continua presente, então o pipeline ainda distingue a
+  resposta; só o nível muda. Demais 4xx seguem em `Warn`, 5xx em `Error`.
 
 ### Corrigido
 - `web/`'s lista de tasks (`useTasks`) podia mostrar dados de um filtro
