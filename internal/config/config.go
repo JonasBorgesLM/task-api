@@ -159,6 +159,28 @@ const (
 	// lopsided — the cost of being too generous is disk, the cost of
 	// being too tight is deleting an upload in flight.
 	defaultAttachmentOrphanMinAge = 1 * time.Hour
+
+	// defaultRedisUseTLS is false: local development and this project's own
+	// disposable k8s/ validation cluster both run Redis in-cluster without
+	// TLS. See Config.RedisUseTLS.
+	defaultRedisUseTLS = false
+
+	// defaultRedisCacheTTL is 5 minutes — the L2/overall TTL for
+	// internal/task's cache-aside layer (docs/DECISIONS.md § "Cache-aside
+	// para GET /v1/tasks"). Long enough that a hot page survives well past
+	// the request bursts the baseline (issue cistern#70) measured, short
+	// enough that an entry nothing ever writes through eventually falls out
+	// on its own.
+	defaultRedisCacheTTL = 5 * time.Minute
+
+	// defaultRedisCacheL1TTL is 5 seconds — deliberately short, not tuned
+	// for hit rate: with more than one replica, this is also the
+	// worst-case staleness a lost Bus invalidation event costs
+	// (cistern's own redisstore/README.md: "keep it short (seconds)").
+	// Widening it trades a slightly better hit rate for a longer window
+	// where a stale page can be served after a write that should have
+	// invalidated it.
+	defaultRedisCacheL1TTL = 5 * time.Second
 )
 
 // Config holds all application configuration values. It is independent of
@@ -442,6 +464,50 @@ type Config struct {
 	// Required and validated as an absolute http(s) URL when
 	// LinkShorteningEnabled is true; ignored (and left empty) otherwise.
 	LinkPublicBaseURL string
+
+	// RedisAddr is the "host:port" of the Redis instance backing
+	// internal/task's cache-aside layer (cistern, L1 in-process + L2
+	// redisstore + Bus — docs/DECISIONS.md § "Cache-aside para GET
+	// /v1/tasks"). Empty, the default, disables the cache entirely: cmd/api
+	// wraps task.Repository in a CachedRepository only when this is set,
+	// the same "absence means the feature does not exist" shape
+	// DatabaseURL already uses for PostgreSQL. This Redis is dedicated to
+	// the cache — never the same instance as a future distributed rate
+	// limiter or cairn.Store's redisstore, which cistern's own
+	// documentation rules out sharing with outright (incompatible
+	// maxmemory-policy — see RedisAddr's sibling fields below and that
+	// decision's correction paragraph).
+	RedisAddr string
+
+	// RedisUsername, together with RedisPassword, authenticates to
+	// RedisAddr. Empty, the default, means AUTH with only a password
+	// (against Redis's "default" user) — the simplest setup for a Redis
+	// this project did not provision itself. This project's own
+	// docker-compose.yml and k8s/25-redis.yaml provision a dedicated ACL
+	// user named "cistern", restricted to cistern's own keyspace and
+	// Pub/Sub channel (redisstore/README.md's own documented rule), and
+	// set this to "cistern" to match — a deployment that reuses their
+	// Redis must set the same username that ACL rule was created under.
+	RedisUsername string
+
+	// RedisPassword authenticates to RedisAddr. Never logged — same rule as
+	// AttachmentS3SecretKey above.
+	RedisPassword string
+
+	// RedisUseTLS enables TLS on the connection to RedisAddr. Same name and
+	// same "off by default, on in a real deployment" shape as
+	// AttachmentS3UseSSL, mirroring cistern's own operating guidance:
+	// "TLS outside local development" (redisstore/README.md).
+	RedisUseTLS bool
+
+	// RedisCacheTTL is the cache-aside layer's overall (L2, when configured)
+	// entry TTL. Ignored when RedisAddr is empty.
+	RedisCacheTTL time.Duration
+
+	// RedisCacheL1TTL caps how long an entry lives in the in-process L1
+	// level — see defaultRedisCacheL1TTL for why short is the point, not
+	// an oversight. Ignored when RedisAddr is empty.
+	RedisCacheL1TTL time.Duration
 }
 
 // Load reads configuration from environment variables and applies defaults
@@ -626,6 +692,22 @@ func Load() (Config, error) {
 		if err := validateLinkPublicBaseURL(cfg.LinkPublicBaseURL); err != nil {
 			return Config{}, err
 		}
+	}
+
+	cfg.RedisAddr = strings.TrimSpace(os.Getenv("REDIS_ADDR"))
+	cfg.RedisUsername = strings.TrimSpace(os.Getenv("REDIS_USERNAME"))
+	cfg.RedisPassword = os.Getenv("REDIS_PASSWORD")
+	if cfg.RedisUseTLS, err = parseBool("REDIS_USE_TLS", defaultRedisUseTLS); err != nil {
+		return Config{}, err
+	}
+	if cfg.RedisCacheTTL, err = parseDuration("REDIS_CACHE_TTL", defaultRedisCacheTTL); err != nil {
+		return Config{}, err
+	}
+	if cfg.RedisCacheL1TTL, err = parseDuration("REDIS_CACHE_L1_TTL", defaultRedisCacheL1TTL); err != nil {
+		return Config{}, err
+	}
+	if cfg.RedisCacheL1TTL > cfg.RedisCacheTTL {
+		return Config{}, fmt.Errorf("config: REDIS_CACHE_L1_TTL (%s) must not exceed REDIS_CACHE_TTL (%s)", cfg.RedisCacheL1TTL, cfg.RedisCacheTTL)
 	}
 
 	return cfg, nil

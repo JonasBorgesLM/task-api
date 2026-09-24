@@ -48,6 +48,14 @@ data:
   # Managed object storage over the public internet must set this true.
   ATTACHMENT_S3_USE_SSL: "false"
 
+  # In-cluster DNS: the Service in 25-redis.yaml. Backs GET /v1/tasks's
+  # cache-aside layer (cistern) — see docs/DECISIONS.md § "Cache-aside
+  # para GET /v1/tasks". REDIS_USERNAME names the dedicated ACL user
+  # 25-redis.yaml's Deployment provisions on startup; REDIS_PASSWORD (the
+  # matching credential) lives in the Secret below, not here.
+  REDIS_ADDR: "redis:6379"
+  REDIS_USERNAME: "cistern"
+
   # Sent unconditionally, and inert over the plaintext this process
   # serves — see docs/DECISIONS.md. Set to 0 to omit it entirely.
   HSTS_MAX_AGE: "8760h"
@@ -135,3 +143,10 @@ stringData:
   # so there is no cross-instance-agreement requirement it needs to
   # satisfy beyond that.
   CSRF_SECRET: "task-api-k8s-disposable-cluster-csrf-secret-000000"
+  # Authenticates the api Deployment to 25-redis.yaml's dedicated
+  # "cistern" ACL user — the same throwaway value docker-compose.yml
+  # uses. 25-redis.yaml's own Deployment reads this same key to actually
+  # create that user with it, so the two must always agree; they always
+  # will, since both read it from here rather than each hardcoding their
+  # own copy.
+  REDIS_PASSWORD: "task-api-cistern-dev-secret"

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,9 @@ import (
 	"github.com/JonasBorgesLM/cairn"
 	"github.com/JonasBorgesLM/cairn/memstore"
 	"github.com/JonasBorgesLM/cairn/policy"
+	"github.com/JonasBorgesLM/cistern"
+	"github.com/JonasBorgesLM/cistern/memory"
+	"github.com/JonasBorgesLM/cistern/redisstore"
 	core "github.com/JonasBorgesLM/crier/core"
 
 	"github.com/JonasBorgesLM/moat/csrf"
@@ -28,6 +32,7 @@ import (
 	"github.com/JonasBorgesLM/moat/realip"
 	"github.com/JonasBorgesLM/moat/secret"
 	"github.com/JonasBorgesLM/moat/secureheaders"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/JonasBorgesLM/task-api/internal/attachment"
 	"github.com/JonasBorgesLM/task-api/internal/config"
@@ -300,6 +305,18 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 
 		taskRepo = task.NewBreakerRepository(task.NewPostgresRepository(db, cfg.DBCallTimeout), dbBreaker, dbBreakerOpenTimeout)
 		userRepo = user.NewBreakerRepository(user.NewPostgresRepository(db, cfg.DBCallTimeout), dbBreaker, dbBreakerOpenTimeout)
+	}
+
+	// Wraps taskRepo with the cache-aside layer only when cfg.RedisAddr is
+	// set — in-memory and PostgreSQL-backed repositories alike; the cache
+	// sits in front of whichever one newServer just chose above. See
+	// buildCachedTaskRepository's own doc comment for why a bad REDIS_ADDR
+	// does not fail startup the way a bad DATABASE_URL does. closeCache is
+	// composed into closeAll below, the same way closeBlobs is.
+	taskRepo, closeCache, err := buildCachedTaskRepository(cfg, logger, taskRepo)
+	if err != nil {
+		closeDB()
+		return nil, nil, fmt.Errorf("build cached task repository: %w", err)
 	}
 
 	taskSvc := task.NewService(taskRepo)
@@ -764,13 +781,17 @@ func newServer(ctx context.Context, cfg config.Config, logger *slog.Logger, crie
 	}
 
 	// Each Limiter owns the in-process store it created (see
-	// closeLimiters above), and closeBlobs/closeDB release the other two
-	// resources newServer may have opened. Order does not matter between
-	// them — none depends on another being open — but all three must run
-	// once the HTTP server has stopped serving requests, never before.
+	// closeLimiters above), and closeBlobs/closeCache/closeDB release the
+	// other resources newServer may have opened. Order does not matter
+	// between them — none depends on another being open — but all four
+	// must run once the HTTP server has stopped serving requests, never
+	// before.
 	closeAll := func() error {
 		closeLimiters()
 		if err := closeBlobs(); err != nil {
+			return err
+		}
+		if err := closeCache(); err != nil {
 			return err
 		}
 		// Before closeDB, not after: the drain still has a database to
@@ -844,6 +865,96 @@ func openDatabase(cfg config.Config, logger *slog.Logger) (*sql.DB, error) {
 	}
 
 	return db, nil
+}
+
+// buildCachedTaskRepository wraps next in a task.CachedRepository when
+// cfg.RedisAddr is set, and returns next unchanged (and a no-op close) when
+// it is not — the same "absence means the feature does not exist" shape
+// openDatabase uses for cfg.DatabaseURL. This is the single place that
+// decides whether the cache-aside layer is in the stack at all, so that
+// decision never leaks into task.Service or task.Handler
+// (docs/DECISIONS.md § "Cache-aside para GET /v1/tasks"). The returned
+// close func closes both the *task.CachedRepository (its Bus subscription)
+// and the *redis.Client this function itself opened — the same
+// (thing, closeThing, err) shape buildBlobStore uses, and for the same
+// reason: newServer's caller owns the lifetime of whatever this opens.
+//
+// Deliberately no connectivity check against Redis here, unlike
+// openDatabase's PingContext against DATABASE_URL: PostgreSQL is this
+// service's source of truth and there is nothing useful to do without it,
+// but Redis is a cache cistern is built to fail open around — an
+// unreachable REDIS_ADDR must surface as a slow first request (fail-open
+// reads, logged via OnInvalidationError below on the write side), never as
+// a refusal to start. cistern.New itself still returns an error for a
+// genuine configuration mistake (e.g. an L1 TTL exceeding the overall
+// TTL — already rejected earlier by config.Load, but cistern enforces its
+// own invariant independently), and that one does fail startup.
+func buildCachedTaskRepository(cfg config.Config, logger *slog.Logger, next task.Repository) (task.Repository, func() error, error) {
+	noop := func() error { return nil }
+	if cfg.RedisAddr == "" {
+		return next, noop, nil
+	}
+
+	opts := &redis.Options{
+		Addr:     cfg.RedisAddr,
+		Username: cfg.RedisUsername,
+		Password: cfg.RedisPassword,
+		// Required by redisstore.New/NewBus (ADR-0012 in cistern's own
+		// docs) — without it go-redis ignores a context's deadline on the
+		// socket, silently defeating redisstore's own per-call timeout
+		// (DefaultTimeout, unconfigured here — nothing in this decision
+		// asked for it to be tunable).
+		ContextTimeoutEnabled: true,
+	}
+	if cfg.RedisUseTLS {
+		// Set on the Options struct before the client is built, never
+		// after: *redis.Client.Options() returns the live struct
+		// go-redis uses internally, and its own doc comment warns that
+		// mutating it post-construction is undefined behavior.
+		opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	client := redis.NewClient(opts)
+
+	l1, err := memory.New()
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, fmt.Errorf("build task cache L1: %w", err)
+	}
+	l2, err := redisstore.New(client)
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, fmt.Errorf("build task cache L2: %w", err)
+	}
+	b, err := redisstore.NewBus(client)
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, fmt.Errorf("build task cache bus: %w", err)
+	}
+
+	cached, err := task.NewCachedRepository(next,
+		cistern.WithL1(l1),
+		cistern.WithL2(l2),
+		cistern.WithBus(b),
+		cistern.WithTTL(cfg.RedisCacheTTL),
+		cistern.WithL1TTL(cfg.RedisCacheL1TTL),
+	)
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, fmt.Errorf("build cached task repository: %w", err)
+	}
+	cached.OnInvalidationError = func(err error) {
+		logger.Error("task cache invalidation failed", "error", err)
+	}
+
+	closeCache := func() error {
+		if err := cached.Close(); err != nil {
+			_ = client.Close()
+			return err
+		}
+		return client.Close()
+	}
+
+	return cached, closeCache, nil
 }
 
 const (

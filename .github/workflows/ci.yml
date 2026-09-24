@@ -58,7 +58,15 @@ jobs:
     # integration tests (*_postgres_repository_test.go, built only with
     # -tags=integration — see the "Test (integration)" step below).
     # Without this service and that step, those tests would never actually
-    # run in CI at all.
+    # run in CI at all. redis is the same shape as postgres, not a step
+    # like MinIO below: the cross-replica integration test
+    # (internal/task/cached_repository_redis_test.go) connects as Redis's
+    # unauthenticated default user — the same way docker-compose.yml's own
+    # redis service leaves that user, precisely so a healthcheck and a
+    # plain client can reach it without credentials — so it needs no
+    # --user/--maxmemory-policy startup flags `services:` cannot express;
+    # only the real deployed instance (docker-compose.yml, k8s/25-redis.yaml)
+    # needs those.
     services:
       postgres:
         image: postgres:17-alpine
@@ -73,14 +81,24 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     env:
-      # MinIO is started by a step rather than declared under services:
-      # — see "Start MinIO" below for why it cannot be one.
+      # MinIO is started by a step rather than declared under services: —
+      # see "Start MinIO" below for why it cannot be one.
       TEST_S3_ENDPOINT: localhost:9000
       TEST_S3_ACCESS_KEY: task_api
       TEST_S3_SECRET_KEY: task_api_secret
       TEST_DATABASE_URL: postgres://task_api:task_api@localhost:5432/task_api?sslmode=disable
+      TEST_REDIS_ADDR: localhost:6379
 
     steps:
       - name: Checkout
