@@ -56,6 +56,12 @@ TEST_S3_ENDPOINT   ?= localhost:9000
 TEST_S3_ACCESS_KEY ?= task_api
 TEST_S3_SECRET_KEY ?= task_api_secret
 
+# Redis started alongside the other services (see docker-compose.yml),
+# used by internal/task's cache-aside integration tests
+# (cached_repository_redis_test.go). Same "unset to skip rather than
+# fail" convention as TEST_S3_ENDPOINT above.
+TEST_REDIS_ADDR ?= localhost:6379
+
 ##@ Help
 
 help: ## Show this help
@@ -101,11 +107,12 @@ test-race: ## Run unit tests with the race detector enabled
 # skipped — passing CI without ever executing. Unit tests in the same
 # packages run too, which costs a few seconds and removes a way to be
 # wrong.
-test-integration: ## Run integration tests — PostgreSQL + MinIO (needs `make db-up storage-up` first)
+test-integration: ## Run integration tests — PostgreSQL + MinIO + Redis (needs `make db-up storage-up` first)
 	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" \
 	TEST_S3_ENDPOINT="$(TEST_S3_ENDPOINT)" \
 	TEST_S3_ACCESS_KEY="$(TEST_S3_ACCESS_KEY)" \
 	TEST_S3_SECRET_KEY="$(TEST_S3_SECRET_KEY)" \
+	TEST_REDIS_ADDR="$(TEST_REDIS_ADDR)" \
 	go test -p 1 -tags=integration ./... -v
 
 test-integration-race: ## Run integration tests with the race detector (needs `make db-up storage-up` first)
@@ -113,6 +120,7 @@ test-integration-race: ## Run integration tests with the race detector (needs `m
 	TEST_S3_ENDPOINT="$(TEST_S3_ENDPOINT)" \
 	TEST_S3_ACCESS_KEY="$(TEST_S3_ACCESS_KEY)" \
 	TEST_S3_SECRET_KEY="$(TEST_S3_SECRET_KEY)" \
+	TEST_REDIS_ADDR="$(TEST_REDIS_ADDR)" \
 	go test -p 1 -tags=integration -race ./...
 
 fuzz: ## Fuzz the attachment store's path containment (override: `make fuzz FUZZTIME=5m`)

@@ -3020,3 +3020,154 @@ correção — `docker compose down -v` seguido de `docker compose up -d minio`
 sem o serviço `minio-bucket`, replicando exatamente o MinIO vazio que a CI vê
 — e confirmado que o teste corrigido passa contra esse MinIO vazio, não só
 contra o ambiente de desenvolvimento que já tinha o bucket de antes.
+
+---
+
+## Cache-aside para GET /v1/tasks: cistern com L1+redisstore e Bus entre réplicas
+
+`task.Service` passa a servir `GET /v1/tasks` (`Repository.FindAll`) através de
+uma camada cache-aside com `cistern`, configurada com L1 em processo + L2
+`redisstore` (Redis) e `Bus` para propagar invalidação entre réplicas nas
+escritas que afetam a listagem (`CreateTask`, `UpdateTask`,
+`TransitionStatus`, `DeleteTask`). O hash do `ETag` de `GET /v1/tasks`
+continua vindo de `(id, version)` das linhas efetivamente devolvidas — ver
+§ "ETag de GET /v1/tasks" — não importa se vieram do cache ou do banco; a
+camada de cache não pode se tornar uma segunda fonte para esse hash. Redis
+passa a ser infraestrutura de produção deste projeto a partir desta mudança —
+provisionado junto (`docker-compose.yml`, `k8s/`,
+`docs/RUNBOOK-BACKUP-RESTORE.md`), não como PR separado.
+
+**Por quê:** Baseline sem cache (sapper, T0, issue cistern#70, 300 tasks,
+concorrência 20 sustentada): p50 4,3ms/p99 39,5ms em memória vs p50
+19,5ms/p99 63,6ms (±9,76ms) em Postgres real — a diferença justifica cachear
+`FindAll`. A alternativa mais simples, e a única com precedente neste
+projeto — L1 em processo apenas, no molde do `tokenCache`
+(`internal/user/token_cache.go`: TTL curto e fixo, invalidação imediata na
+escrita, nunca só TTL) — foi considerada e rejeitada: ali a janela de
+staleness é aceitável porque o pior caso é "sessão revogada ainda valida por
+até 2s"; aqui a consistência do cache foi definida como requisito de
+produto, não como otimização dimensionada pela topologia atual. Por isso
+`redisstore`+`Bus` foram escolhidos mesmo com produção rodando 1 réplica hoje
+(`k8s/40-api.yaml`) — a garantia buscada não é "suficiente para o regime
+atual com réplica única", é "correta independente de quantas réplicas
+existirem", o que um TTL curto não entrega.
+
+**Trade-off aceito:** Redis se torna uma dependência operacional nova deste
+projeto — persistência (AOF), backup/restore exercitado, deployment em
+`k8s/`, um ponto a mais de falha e de operação — antes de qualquer um dos
+dois usos já cogitados para ele neste repositório (limitador de taxa
+distribuído, `cairn.redisstore` do encurtador de links — ambos hoje listados
+em `docs/ARCHITECTURE.md`'s Future Improvements, adiados exatamente porque
+"este projeto ainda não carrega" essa infraestrutura) terem puxado o
+gatilho. Esta decisão inverte, para este caso específico, tanto essa
+premissa quanto o precedente que o `cairn` estabeleceu (Redis é sempre uma
+mudança própria e futura, nunca junto com a feature que o motivou — ver §
+"Encurtador de links") — aceito aqui porque o requisito de consistência do
+cache de `FindAll` não é satisfeito por um TTL curto do jeito que o de
+`ValidateToken` foi. Provisionar Redis agora não decide os outros dois usos
+represados: eles continuam sendo decisões próprias, não destravadas
+automaticamente por esta.
+
+**Correção (2026-09-24), depois de ler a documentação real do `cistern`
+(v0.1.0, `github.com/JonasBorgesLM/cistern`, publicada — não lida quando o
+parágrafo acima foi escrito):**
+
+O trecho acima ("a garantia buscada... é 'correta independente de quantas
+réplicas existirem', o que um TTL curto não entrega") superestima o que
+`cistern` de fato entrega. O `Bus` do `cistern` é documentado, em três
+lugares independentes do próprio projeto (`bus/bus.go`, `options.go`'s
+`WithBus`, `redisstore/bus.go`), como **best-effort**: "a lost event costs
+at most one L1 TTL of staleness" — a mesma classe de garantia (staleness
+limitada por um TTL) que o precedente `tokenCache` já oferecia, só que numa
+janela normalmente bem menor (a de um evento perdido, não a do TTL inteiro),
+não uma garantia categoricamente diferente. O próprio exemplo de referência
+que o `cistern` publica para este projeto (`examples/taskapi/taskapi.go`)
+confirma isso na prática: uma falha de invalidação não desfaz nem falha a
+escrita, só é logada — "the owner's lists may be stale until their TTL". Com
+produção rodando 1 réplica hoje, essa distinção nem chega a se aplicar: não
+existe uma segunda réplica para divergir da primeira.
+
+O motivo real para trazer Redis agora, portanto, não é uma consistência que
+o `cistern` de fato não entrega — é pagar a infraestrutura operacional uma
+vez só, agora, em vez de subir com L1-only e refazer como L1+L2 quando o
+número de réplicas realmente sair de 1. Isso também destrava, de fato,
+`docs/ARCHITECTURE.md`'s Future Improvements "Distributed rate limiting" (já
+anotado ali como dependente desta decisão) — ao contrário da consistência
+"categórica", este é um ganho real e imediato, mesmo em réplica única.
+
+**Contrato operacional correto (estava ausente acima):** este Redis segue o
+contrato do `cistern`/`redisstore`, documentado em `redisstore/README.md` —
+**não** o do `cairn` (§ "Backend do `cairn.Store`" acima, que continua
+correto *para o `cairn`*, mas não se aplica aqui): `maxmemory-policy
+allkeys-lru` (não `noeviction` — para um cache, perder uma entrada sob
+pressão de memória deve custar um miss, nunca rejeitar a escrita, que é o
+que `noeviction` faz), ACL dedicada restrita às chaves/canais do `cistern`
+(`cistern:*`), TLS fora de desenvolvimento. A instância nunca é
+compartilhada com o rate limiter do `moat` nem com o `cairn.Store` — o
+próprio `cistern` documenta isso como proibido ("never an instance shared
+with moat's rate limiter or cairn's link store — a logical database is not
+enough", já que `maxmemory-policy` vale para a instância inteira, não por
+banco lógico), não como uma opção em aberto.
+
+---
+
+## MinIO na CI: sem imagem de container nenhuma, `go install` em vez de registry (issue #288, segunda vez)
+
+O passo "Start MinIO" do job `Quality Gate` voltou a falhar —
+`docker: Error response from daemon: unauthorized: access to the requested
+resource is not authorized` puxando
+`quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z`, a imagem que a própria
+§ "Registry do MinIO: Docker Hub para Quay.io" (acima) tinha migrado para lá
+depois do Docker Hub parar de servir `minio/minio` publicamente.
+
+**Não é a mesma correção de novo — desta vez não existe um terceiro registry
+para migrar.** Confirmado, não só lido a respeito: `curl
+https://quay.io/api/v1/repository/minio/minio` devolve `"Requires
+authentication"` para o repositório inteiro (não uma tag específica, nem rate
+limit); `curl https://hub.docker.com/v2/repositories/minio/minio/tags/`
+devolve `"object not found"`, o mesmo erro do #288 original; `docker pull
+minio/minio:latest` e `docker pull quay.io/minio/minio:latest` falham os
+dois, no Docker Hub com "repository does not exist or may require 'docker
+login'". A confirmação definitiva vem do próprio projeto: a nota da release
+`RELEASE.2025-10-15T17-29-55Z` do `minio/minio` no GitHub diz, textualmente,
+"For container environments, please clone the source and build the latest
+container" — a MinIO parou de publicar imagem pronta para qualquer registry
+público. `https://dl.min.io/server/minio/release/linux-amd64/minio` (o
+binário estático que a documentação antiga recomendava) devolve `410 Gone`
+pelo mesmo motivo.
+
+**A correção: `go install`, não um registry de container.** É o próprio
+comando que a nota de release da MinIO recomenda como instalação primária:
+
+```
+go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z
+```
+
+Não depende de nenhum registry de container — só do proxy de módulos Go, que
+já é uma dependência obrigatória para compilar este repositório. `.github/
+workflows/ci.yml`'s passo "Start MinIO" instala o binário (com
+`actions/setup-go`'s cache já ligado, então builds seguintes reaproveitam o
+módulo baixado) e o roda em background com `server <dir temporário>
+--address :9000`, no lugar de `docker run`; o loop de espera contra
+`/minio/health/live` é o mesmo de antes. Versão fixada explicitamente, no
+mesmo padrão de `GOSEC_VERSION`/`STATICCHECK_VERSION` do `Makefile` — nunca
+`@latest`.
+
+**Verificado rodando o passo completo, fora de CI**: `go install` do zero,
+`minio server` respondendo `/minio/health/live` em 4s, o mesmo script que o
+workflow agora roda.
+
+**Escopo desta correção: só a CI.** `docker-compose.yml`'s serviço `minio`
+continua apontando para a mesma imagem morta — funciona hoje só em máquinas
+que já tinham a imagem em cache local de antes desta mudança; um `docker
+compose up` do zero falha do mesmo jeito que a CI falhava. Não corrigido
+aqui: precisaria de um Dockerfile próprio (`go install` dentro de uma imagem
+Go, ou seguir a instrução oficial de clonar e compilar o container da
+MinIO), decisão de shape que fica para quando alguém depender de um
+`docker compose up` limpo — hoje ninguém depende, e trocar o
+`docker-compose.yml` sem precisar é mudança não pedida.
+
+**Trade-off aceito:** o primeiro `go install` de cada cache frio da CI baixa
+e compila a MinIO inteira (~140MB de binário, dezenas de dependências) — mais
+lento que um `docker pull` de imagem pronta seria, se existisse uma. Builds
+seguintes reaproveitam o cache do Go que `actions/setup-go` já mantém.

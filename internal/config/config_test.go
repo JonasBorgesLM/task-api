@@ -869,3 +869,124 @@ func TestLoad_InvalidLinkPublicBaseURL_WrongScheme(t *testing.T) {
 		t.Fatal("Load() expected error for a non-http(s) LINK_PUBLIC_BASE_URL, got nil")
 	}
 }
+
+// --- REDIS_* ---
+
+func TestLoad_RedisAddr_DefaultEmpty(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.RedisAddr != "" {
+		t.Errorf("Load() RedisAddr = %q, want empty (cache disabled by default)", cfg.RedisAddr)
+	}
+}
+
+func TestLoad_RedisUsername_DefaultEmpty(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.RedisUsername != "" {
+		t.Errorf("Load() RedisUsername = %q, want empty (AUTH with password only, against the default user)", cfg.RedisUsername)
+	}
+}
+
+func TestLoad_RedisCacheTTL_DefaultFiveMinutes(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.RedisCacheTTL != defaultRedisCacheTTL {
+		t.Errorf("Load() RedisCacheTTL = %v, want %v", cfg.RedisCacheTTL, defaultRedisCacheTTL)
+	}
+}
+
+func TestLoad_RedisCacheL1TTL_DefaultFiveSeconds(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.RedisCacheL1TTL != defaultRedisCacheL1TTL {
+		t.Errorf("Load() RedisCacheL1TTL = %v, want %v", cfg.RedisCacheL1TTL, defaultRedisCacheL1TTL)
+	}
+}
+
+func TestLoad_RedisUseTLS_DefaultFalse(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.RedisUseTLS != false {
+		t.Errorf("Load() RedisUseTLS = %v, want false", cfg.RedisUseTLS)
+	}
+}
+
+func TestLoad_CustomRedisSettings(t *testing.T) {
+	t.Setenv("REDIS_ADDR", "redis.internal:6379")
+	t.Setenv("REDIS_USERNAME", "cistern")
+	t.Setenv("REDIS_PASSWORD", "s3cret")
+	t.Setenv("REDIS_USE_TLS", "true")
+	t.Setenv("REDIS_CACHE_TTL", "10m")
+	t.Setenv("REDIS_CACHE_L1_TTL", "2s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.RedisAddr != "redis.internal:6379" {
+		t.Errorf("Load() RedisAddr = %q, want %q", cfg.RedisAddr, "redis.internal:6379")
+	}
+	if cfg.RedisUsername != "cistern" {
+		t.Errorf("Load() RedisUsername = %q, want %q", cfg.RedisUsername, "cistern")
+	}
+	if cfg.RedisPassword != "s3cret" {
+		t.Errorf("Load() RedisPassword = %q, want %q", cfg.RedisPassword, "s3cret")
+	}
+	if cfg.RedisUseTLS != true {
+		t.Errorf("Load() RedisUseTLS = %v, want true", cfg.RedisUseTLS)
+	}
+	if cfg.RedisCacheTTL != 10*time.Minute {
+		t.Errorf("Load() RedisCacheTTL = %v, want %v", cfg.RedisCacheTTL, 10*time.Minute)
+	}
+	if cfg.RedisCacheL1TTL != 2*time.Second {
+		t.Errorf("Load() RedisCacheL1TTL = %v, want %v", cfg.RedisCacheL1TTL, 2*time.Second)
+	}
+}
+
+func TestLoad_InvalidRedisCacheTTL_NotADuration(t *testing.T) {
+	t.Setenv("REDIS_CACHE_TTL", "not-a-duration")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for REDIS_CACHE_TTL=not-a-duration, got nil")
+	}
+}
+
+func TestLoad_InvalidRedisCacheL1TTL_NotADuration(t *testing.T) {
+	t.Setenv("REDIS_CACHE_L1_TTL", "not-a-duration")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for REDIS_CACHE_L1_TTL=not-a-duration, got nil")
+	}
+}
+
+func TestLoad_InvalidRedisUseTLS_NotABool(t *testing.T) {
+	t.Setenv("REDIS_USE_TLS", "not-a-bool")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for REDIS_USE_TLS=not-a-bool, got nil")
+	}
+}
+
+// TestLoad_InvalidRedisCacheL1TTL_ExceedsCacheTTL pins the same "L1 TTL
+// must not outlive the overall TTL" constraint cistern.WithL1TTL enforces
+// (RF-08) — Load rejects it at startup instead of cmd/api discovering it
+// only when cistern.New itself refuses to build the cache.
+func TestLoad_InvalidRedisCacheL1TTL_ExceedsCacheTTL(t *testing.T) {
+	t.Setenv("REDIS_CACHE_TTL", "1s")
+	t.Setenv("REDIS_CACHE_L1_TTL", "2s")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error when REDIS_CACHE_L1_TTL exceeds REDIS_CACHE_TTL, got nil")
+	}
+}

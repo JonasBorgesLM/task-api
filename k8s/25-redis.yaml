@@ -1,0 +1,92 @@
+# Redis for the validation cluster, backing GET /v1/tasks's cache-aside
+# layer (cistern, L1 in-process + L2 redisstore + Bus — see
+# docs/DECISIONS.md § "Cache-aside para GET /v1/tasks", including its
+# correction paragraph).
+#
+# Same caveat as PostgreSQL/MinIO: emptyDir storage, disposable by design —
+# but here that is also the *correct* shape for a real deployment, not just
+# a validation-cluster shortcut: this Redis is purely a cache (cistern's
+# own README: "Be a source of truth. Nothing may depend on the cache for
+# correctness."), so losing it is a cold cache, never data loss. There is
+# nothing to migrate to durable storage the way PostgreSQL/MinIO's emptyDir
+# would need for anything real.
+#
+# Dedicated to this cache only. cistern's own documentation forbids sharing
+# a Redis instance with a rate limiter or a link-shortener store —
+# maxmemory-policy applies to the whole instance, not per logical database.
+# If this project ever adds a distributed rate limiter or
+# cairn.redisstore, each needs its own separate Deployment/Service, not
+# this one.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: task-api
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: task-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          # A shell wrapper, not a literal command/args list like
+          # 20-minio.yaml's — the ACL rule needs the real password from
+          # the Secret below (never written as a literal in this file, see
+          # REDIS_PASSWORD's own comment in 30-config.yaml's Secret), and
+          # plain shell env-var expansion ($REDIS_PASSWORD) is easier to
+          # get right than Kubernetes' own $(VAR) command/args
+          # substitution. redis:7-alpine is Alpine-based, so /bin/sh is
+          # always present — unlike this project's own scratch-based API
+          # image, which has none.
+          #
+          # The --user rule itself is exactly what
+          # docker-compose.yml's redis service uses (verified there
+          # against a real container first): a dedicated user restricted
+          # to cistern's own keyspace and Pub/Sub channel
+          # (redisstore/README.md's own documented, tested rule). The
+          # default user is left alone (nopass, full access) purely so
+          # readinessProbe below can PING without credentials; the api
+          # Deployment authenticates as "cistern", never as default.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              exec redis-server \
+                --maxmemory-policy allkeys-lru \
+                --user cistern on ">$REDIS_PASSWORD" resetkeys "~cistern:*" resetchannels "&cistern:*" -@all +get +set +del +mget +incr +pexpire +publish +subscribe
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: task-api-secrets
+                  key: REDIS_PASSWORD
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}

@@ -11,7 +11,9 @@ Postgres e MinIO em `emptyDir` (já avisado em `README.md` e `CLAUDE.md`). Não
 há dado ali que sobreviva ao pod, e portanto nada ali para este runbook
 cobrir — o alvo aqui é qualquer ambiente onde o Postgres e o object storage
 realmente persistem (o próprio `docker-compose.yml` local, ou uma implantação
-real).
+real). O Redis que `GET /v1/tasks`'s cache-aside layer usa também é
+deliberadamente fora de escopo, por um motivo diferente — ver § "Redis
+(cistern) — sem backup, e por quê" abaixo.
 
 ## Por que os dois juntam
 
@@ -153,6 +155,49 @@ mesmo instante — considerar desligar `ATTACHMENT_ORPHAN_MIN_AGE` (setando
 bem alto) temporariamente até confirmar que a base restaurada está
 consistente, antes de deixar o coletor periódico voltar a rodar sem essa
 guarda.
+
+## Redis (cistern) — sem backup, e por quê
+
+`GET /v1/tasks`'s camada de cache-aside (`cistern`, L1+`redisstore`+`Bus` —
+ver `docs/DECISIONS.md` § "Cache-aside para GET /v1/tasks") usa Redis como
+terceiro lugar onde o processo guarda dado, mas deliberadamente **fora do
+escopo deste runbook**: ao contrário do Postgres e do `BlobStore` acima, essa
+instância nunca é fonte de verdade — o próprio `cistern` é explícito sobre
+isso ("Be a source of truth. Nothing may depend on the cache for
+correctness."). Perder essa instância é um cache frio, nunca perda de dado:
+a próxima leitura de `GET /v1/tasks` simplesmente bate no Postgres de novo e
+repovoa o cache — exatamente o comportamento de fail-open que
+`buildCachedTaskRepository` (`cmd/api/main.go`) já assume quando o Redis
+está indisponível.
+
+**Não há passo de backup para esta instância.** Fazer um dump/restore de
+Redis aqui recriaria estado que — por design — nenhuma leitura futura
+precisa que tenha sobrevivido; seria trabalho gasto sem nenhuma garantia a
+mais em troca.
+
+### Recriando a instância do zero
+
+Se a instância Redis precisar ser recriada (troca de nó, reprovisionamento,
+etc.), o procedimento é *provisionamento*, não *restauração* — não há dado
+para trazer de volta, só a configuração:
+
+1. Subir uma instância nova com `maxmemory-policy allkeys-lru` (nunca
+   `noeviction` — esse é o contrato do `cairn.Store`, para dados duráveis,
+   não de um cache; ver a correção em `docs/DECISIONS.md` § "Cache-aside
+   para GET /v1/tasks").
+2. Criar o usuário ACL dedicado `cistern`, restrito ao próprio keyspace e
+   canal Pub/Sub — a regra exata que `redisstore/README.md` documenta como
+   suficiente e testada, já aplicada em `docker-compose.yml`'s serviço
+   `redis` e em `k8s/25-redis.yaml`'s `Deployment` (ambos verificados contra
+   um Redis/cluster real nesta mesma mudança — ver `docs/changes/
+   cache-aside-get-tasks/progress.md`).
+3. Apontar `REDIS_ADDR`/`REDIS_USERNAME`/`REDIS_PASSWORD` para a instância
+   nova — nenhuma outra coordenação necessária. O cache começa vazio e se
+   repovoa sozinho pela primeira leitura de cada página.
+4. **Nunca** compartilhar essa instância com um futuro rate limiter
+   distribuído ou com `cairn.Store`'s `redisstore` — `cistern` proíbe isso
+   explicitamente (`maxmemory-policy` vale para a instância inteira, não por
+   banco lógico). Cada uso precisa da própria instância.
 
 ## Drill executado
 

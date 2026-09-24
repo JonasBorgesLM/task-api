@@ -30,8 +30,8 @@ For AI agents (or new contributors) working in this codebase, see **[CLAUDE.md](
 ## Requirements
 
 - **Go 1.26+**, matching `go.mod`.
-- **No external service needed for the core application or the in-memory store** — the entire unit test suite runs without one. Of the four runtime dependencies, [`pgx/v5`](https://github.com/jackc/pgx) matters only once `DATABASE_URL` is configured, [`minio-go`](https://github.com/minio/minio-go) only once `ATTACHMENT_S3_ENDPOINT` is, [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) only when a password is hashed, and [`moat`](https://github.com/JonasBorgesLM/moat) is in the request path but talks to nothing outside the process.
-- **[Docker](https://www.docker.com/) and Docker Compose** (optional) — to run PostgreSQL locally without installing it directly.
+- **No external service needed for the core application or the in-memory store** — the entire unit test suite runs without one. [`pgx/v5`](https://github.com/jackc/pgx) matters only once `DATABASE_URL` is configured, [`minio-go`](https://github.com/minio/minio-go) only once `ATTACHMENT_S3_ENDPOINT` is, [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) only when a password is hashed, [`github.com/JonasBorgesLM/cistern`](https://github.com/JonasBorgesLM/cistern) (+ `cistern/redisstore`) only once `REDIS_ADDR` is, and [`moat`](https://github.com/JonasBorgesLM/moat) is in the request path but talks to nothing outside the process.
+- **[Docker](https://www.docker.com/) and Docker Compose** (optional) — to run PostgreSQL (and, once `REDIS_ADDR` is set, Redis) locally without installing them directly.
 - **Nothing to install for linting.** `make lint`, `make vulncheck` and `make gosec` invoke [`staticcheck`](https://staticcheck.dev/), [`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) and [`gosec`](https://github.com/securego/gosec) through `go run <pkg>@<version>`, at versions pinned in the `Makefile` (`STATICCHECK_VERSION`, `GOVULNCHECK_VERSION`, `GOSEC_VERSION`). CI calls the same targets, so a local run and the pipeline cannot drift onto different tool versions.
 
 ## Configuration
@@ -81,6 +81,10 @@ cp .env.example .env   # optional — edit for your local setup; real env vars a
 | `CRIER_OTLP_ENDPOINT` | Mirrors every log record to this OTLP/HTTP collector (e.g. SigNoz), alongside — never instead of — the stdout JSON log. Full URL with scheme; use the collector's OTLP/HTTP port (`4318`), not gRPC's `4317`. Unset disables it entirely | *(unset)* |
 | `LINK_SHORTENING_ENABLED` | Mounts the short-link subsystem (`POST/GET /v1/links`, `DELETE /v1/links/{code}`, the public `GET /{code}`). Unset ⇒ none of it exists (404, not "present and rejecting") — see `docs/DECISIONS.md` § "Encurtador de links" | `false` |
 | `LINK_PUBLIC_BASE_URL` | Where short links resolve, e.g. `https://s.example.com` — no trailing slash. Builds the `short_url` a caller gets back, and names this deployment's own domain so it can never be shortened as a destination. Required (an absolute `http(s)` URL) when `LINK_SHORTENING_ENABLED=true`, ignored otherwise | *(unset)* |
+| `REDIS_ADDR` | `host:port` of the Redis backing `GET /v1/tasks`'s cache-aside layer (`cistern`). Unset ⇒ no cache at all, `task.Repository` runs unwrapped — see `docs/DECISIONS.md` § "Cache-aside para GET /v1/tasks". Dedicated to this cache only; never shared with a distributed rate limiter or `cairn.Store` | *(unset)* |
+| `REDIS_USERNAME` / `REDIS_PASSWORD` | Authenticate to `REDIS_ADDR`. Unset username ⇒ AUTH with password only, against the default user. This project's own `docker-compose.yml`/`k8s/25-redis.yaml` provision a dedicated ACL user named `cistern`, restricted to its own keyspace and Pub/Sub channel, and set username to match | *(unset)* / *(unset)* |
+| `REDIS_USE_TLS` | TLS on the connection to `REDIS_ADDR` — same off-by-default-in-dev posture as `ATTACHMENT_S3_USE_SSL` | `false` |
+| `REDIS_CACHE_TTL` / `REDIS_CACHE_L1_TTL` | Overall (L2) and in-process (L1) entry TTLs. L1 is deliberately short: with more than one replica, it is also the worst-case staleness a lost `Bus` invalidation event costs. L1 must not exceed the overall TTL | `5m` / `5s` |
 
 `config.Load()` returns an error (and the process refuses to start) if a timeout/TTL/max-age isn't a positive Go duration, `HTTP_ADDR` isn't a valid `host:port` with a port in 1–65535, `LOG_LEVEL`/`DB_AUTO_MIGRATE` aren't one of their valid values, or a `DB_MAX_*_CONNS` isn't a positive integer. `DATABASE_URL` itself isn't format-checked — the PostgreSQL driver is the authority on what it accepts, so a bad value surfaces at connection time instead.
 
@@ -140,7 +144,7 @@ docker run --rm -p 8080:8080 \
 | | Unit | Integration |
 |---|---|---|
 | Exercises | `Service`/`Handler` (fakes), `memoryRepository`, `config`, `middleware`, a full HTTP stack over the real in-memory repositories — for both `task` and `user` | `postgresRepository` (both domains) against **real PostgreSQL** |
-| External dependency | None | PostgreSQL (`TEST_DATABASE_URL`) and MinIO (`TEST_S3_ENDPOINT`) — each skipped independently if its variable is unset |
+| External dependency | None | PostgreSQL (`TEST_DATABASE_URL`), MinIO (`TEST_S3_ENDPOINT`) and Redis (`TEST_REDIS_ADDR`, for `internal/task`'s cache-aside layer) — each skipped independently if its variable is unset |
 | Isolated by | Default build | `//go:build integration` on every `*/postgres_repository_test.go` — not even compiled by a plain `go test ./...` |
 | Speed | Milliseconds | Needs a live database |
 
@@ -175,7 +179,7 @@ Concurrency-sensitive paths (optimistic-concurrency conflicts) are exercised wit
 
 ## Kubernetes
 
-`k8s/` holds manifests for a **disposable validation cluster** — PostgreSQL and MinIO run in-cluster on `emptyDir`, which is data loss anywhere that matters. A real deployment points `DATABASE_URL` and `ATTACHMENT_S3_ENDPOINT` at managed services and deletes those two files.
+`k8s/` holds manifests for a **disposable validation cluster** — PostgreSQL and MinIO run in-cluster on `emptyDir`, which is data loss anywhere that matters. A real deployment points `DATABASE_URL` and `ATTACHMENT_S3_ENDPOINT` at managed services and deletes those two files. `25-redis.yaml`'s Redis is the one exception where in-cluster `emptyDir` is also the right shape for a real deployment, not just a validation shortcut — it backs `GET /v1/tasks`'s cache-aside layer, and losing it is a cold cache, never data loss.
 
 ```bash
 ./k8s/rollout-test.sh          # create a kind cluster, deploy, prove the rollout, tear down
