@@ -3108,3 +3108,66 @@ próprio `cistern` documenta isso como proibido ("never an instance shared
 with moat's rate limiter or cairn's link store — a logical database is not
 enough", já que `maxmemory-policy` vale para a instância inteira, não por
 banco lógico), não como uma opção em aberto.
+
+---
+
+## MinIO na CI: sem imagem de container nenhuma, `go install` em vez de registry (issue #288, segunda vez)
+
+O passo "Start MinIO" do job `Quality Gate` voltou a falhar —
+`docker: Error response from daemon: unauthorized: access to the requested
+resource is not authorized` puxando
+`quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z`, a imagem que a própria
+§ "Registry do MinIO: Docker Hub para Quay.io" (acima) tinha migrado para lá
+depois do Docker Hub parar de servir `minio/minio` publicamente.
+
+**Não é a mesma correção de novo — desta vez não existe um terceiro registry
+para migrar.** Confirmado, não só lido a respeito: `curl
+https://quay.io/api/v1/repository/minio/minio` devolve `"Requires
+authentication"` para o repositório inteiro (não uma tag específica, nem rate
+limit); `curl https://hub.docker.com/v2/repositories/minio/minio/tags/`
+devolve `"object not found"`, o mesmo erro do #288 original; `docker pull
+minio/minio:latest` e `docker pull quay.io/minio/minio:latest` falham os
+dois, no Docker Hub com "repository does not exist or may require 'docker
+login'". A confirmação definitiva vem do próprio projeto: a nota da release
+`RELEASE.2025-10-15T17-29-55Z` do `minio/minio` no GitHub diz, textualmente,
+"For container environments, please clone the source and build the latest
+container" — a MinIO parou de publicar imagem pronta para qualquer registry
+público. `https://dl.min.io/server/minio/release/linux-amd64/minio` (o
+binário estático que a documentação antiga recomendava) devolve `410 Gone`
+pelo mesmo motivo.
+
+**A correção: `go install`, não um registry de container.** É o próprio
+comando que a nota de release da MinIO recomenda como instalação primária:
+
+```
+go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z
+```
+
+Não depende de nenhum registry de container — só do proxy de módulos Go, que
+já é uma dependência obrigatória para compilar este repositório. `.github/
+workflows/ci.yml`'s passo "Start MinIO" instala o binário (com
+`actions/setup-go`'s cache já ligado, então builds seguintes reaproveitam o
+módulo baixado) e o roda em background com `server <dir temporário>
+--address :9000`, no lugar de `docker run`; o loop de espera contra
+`/minio/health/live` é o mesmo de antes. Versão fixada explicitamente, no
+mesmo padrão de `GOSEC_VERSION`/`STATICCHECK_VERSION` do `Makefile` — nunca
+`@latest`.
+
+**Verificado rodando o passo completo, fora de CI**: `go install` do zero,
+`minio server` respondendo `/minio/health/live` em 4s, o mesmo script que o
+workflow agora roda.
+
+**Escopo desta correção: só a CI.** `docker-compose.yml`'s serviço `minio`
+continua apontando para a mesma imagem morta — funciona hoje só em máquinas
+que já tinham a imagem em cache local de antes desta mudança; um `docker
+compose up` do zero falha do mesmo jeito que a CI falhava. Não corrigido
+aqui: precisaria de um Dockerfile próprio (`go install` dentro de uma imagem
+Go, ou seguir a instrução oficial de clonar e compilar o container da
+MinIO), decisão de shape que fica para quando alguém depender de um
+`docker compose up` limpo — hoje ninguém depende, e trocar o
+`docker-compose.yml` sem precisar é mudança não pedida.
+
+**Trade-off aceito:** o primeiro `go install` de cada cache frio da CI baixa
+e compila a MinIO inteira (~140MB de binário, dezenas de dependências) — mais
+lento que um `docker pull` de imagem pronta seria, se existisse uma. Builds
+seguintes reaproveitam o cache do Go que `actions/setup-go` já mantém.

@@ -118,23 +118,39 @@ jobs:
       # S3-compatible server. Without it those tests skip, which would
       # leave the S3 backend exercised by nobody until production.
       #
-      # A step rather than a `services:` entry, and not by preference: a
-      # service container cannot be given a command, and the minio image
-      # needs `server /data` — without it the container prints its usage
-      # and exits. Bitnami's auto-starting image would fit the services
-      # block, but pinning to the upstream one is worth an explicit step.
+      # No container image at all — not a preference, MinIO stopped
+      # publishing one. #288 already moved this once, Docker Hub to
+      # quay.io, when Docker Hub's minio/minio silently stopped being
+      # served; this time quay.io's whole minio/minio repository now
+      # requires authentication (`curl` against its own API: "Requires
+      # authentication") and Docker Hub returns "object not found" again
+      # — confirmed by pulling both directly, not just reading about it.
+      # MinIO's own latest release notes say so outright: "For container
+      # environments, please clone the source and build the latest
+      # container" — no registry publishes one for you to pull anymore.
+      # `go install` is what those same release notes give as the
+      # primary command, and it needs no container registry: this
+      # module's Go toolchain and proxy (already required to build this
+      # repository) are the only dependency. Pinned to an exact release,
+      # the same way GOSEC_VERSION/STATICCHECK_VERSION are pinned in the
+      # Makefile — bump it on a stated trigger, never silently.
       #
-      # The wait loop is here for the same reason: `services:` would have
-      # gated on a healthcheck, and a step has to do that itself. It
-      # polls the endpoint MinIO itself considers "live" rather than
-      # sleeping a fixed amount, so a slow runner waits longer instead of
-      # producing a flake.
+      # A step rather than a `services:` entry: `services:` starts a
+      # container and cannot run an arbitrary binary in the background
+      # the way this needs.
+      #
+      # The wait loop polls the endpoint MinIO itself considers "live"
+      # rather than sleeping a fixed amount, so a slow runner waits
+      # longer instead of producing a flake.
       - name: Start MinIO
-        # quay.io, not Docker Hub — see docker-compose.yml's minio
-        # service and docs/DECISIONS.md § "Registry do MinIO: Docker Hub
-        # para Quay.io" (issue #288). Same tag, same image.
+        env:
+          MINIO_VERSION: RELEASE.2025-10-15T17-29-55Z
         run: |
-          docker run -d --name minio             -p 9000:9000             -e MINIO_ROOT_USER=task_api             -e MINIO_ROOT_PASSWORD=task_api_secret             quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          go install "github.com/minio/minio@${MINIO_VERSION}"
+          minio_data="$(mktemp -d)"
+          MINIO_ROOT_USER=task_api MINIO_ROOT_PASSWORD=task_api_secret \
+            "$(go env GOPATH)/bin/minio" server "$minio_data" --address :9000 \
+            > "$RUNNER_TEMP/minio.log" 2>&1 &
           for i in $(seq 1 60); do
             if curl -sf http://localhost:9000/minio/health/live >/dev/null; then
               echo "MinIO ready after ${i}s"
@@ -143,7 +159,7 @@ jobs:
             sleep 1
           done
           echo "MinIO did not become ready in 60s"
-          docker logs minio
+          cat "$RUNNER_TEMP/minio.log"
           exit 1
 
       - name: Download and verify dependencies
