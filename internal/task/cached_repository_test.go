@@ -294,6 +294,38 @@ func TestCachedRepository_FindAll_L2Unreachable_FallsBackToNext(t *testing.T) {
 	}
 }
 
+// TestCachedRepository_FindAll_PreservesVersion pins the correctness this
+// decorator's own doc comment on OnInvalidationError, and docs/DECISIONS.md
+// § "Cache-aside para GET /v1/tasks"'s ETag paragraph, depend on: Task's
+// Version field is `json:"-"` (never part of the public wire format — see
+// task.go's own comment on it), so cistern's default JSON codec silently
+// drops it on every encode. GetOrLoad round-trips its own value through the
+// codec even on the call that first populates the cache (not just on a
+// later hit), so this corrupts Version on every FindAll response once the
+// cache is in the stack, not only on cache hits.
+//
+// The handler computes GET /v1/tasks's ETag from exactly (id, Version) of
+// the rows FindAll returns — see internal task.go's pageETag and
+// docs/DECISIONS.md § "ETag de GET /v1/tasks" — so a Version silently
+// zeroed here makes two responses for the same task IDs share one ETag even
+// after a real write changed one of those rows' Version, and a client
+// polling with If-None-Match gets an incorrect 304 for content that
+// actually changed.
+func TestCachedRepository_FindAll_PreservesVersion(t *testing.T) {
+	want := newFakeTask(StatusPending)
+	want.Version = 42
+	next := &countingRepository{findAllResult: []Task{want}}
+	repo := newTestCachedRepository(t, next, time.Minute)
+
+	tasks, err := repo.FindAll(context.Background(), testUserID, 10, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("FindAll() unexpected error: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Version != 42 {
+		t.Fatalf("FindAll()[0].Version = %+v, want Version 42 (next returned it; the cache must not lose it)", tasks)
+	}
+}
+
 // --- Invalidation on write ---
 
 // fakeBus is a bus.Bus double whose Publish return value and call count are

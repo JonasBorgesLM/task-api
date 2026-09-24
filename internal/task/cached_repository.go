@@ -51,11 +51,17 @@ func (r *CachedRepository) Close() error {
 // NewCachedRepository wraps next with a cistern cache-aside layer over
 // FindAll. opts configures the cache's levels and TTLs (cmd/api supplies
 // WithL1/WithL2/WithBus/WithTTL/WithL1TTL from config.Config); the namespace,
-// key and tags are this decorator's own and are not configurable, the same
-// division cistern's own reference decorator
-// (github.com/JonasBorgesLM/cistern/examples/taskapi) uses.
+// key, tags and codec are this decorator's own and are not configurable, the
+// same division cistern's own reference decorator
+// (github.com/JonasBorgesLM/cistern/examples/taskapi) uses. The codec is
+// gobCodec (cache_codec.go), not cistern's default codec.JSON: Task.Version
+// and Task.UserID are both `json:"-"`, which codec.JSON would silently drop
+// on every response once caching is in the stack — see gobCodec's own doc
+// comment. Both cistern.WithCodec and cistern.WithTags are appended after
+// opts, so neither can be shadowed by an option a caller passes in.
 func NewCachedRepository(next Repository, opts ...cistern.Option) (*CachedRepository, error) {
-	cache, err := cistern.New[cacheKey, []Task]("tasks", cacheKeyString, append(opts, cistern.WithTags(cacheKeyTag))...)
+	cache, err := cistern.New[cacheKey, []Task]("tasks", cacheKeyString,
+		append(opts, cistern.WithTags(cacheKeyTag), cistern.WithCodec(gobCodec{}))...)
 	if err != nil {
 		return nil, err
 	}
