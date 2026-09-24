@@ -6,7 +6,7 @@ versionamento seguindo [Semantic Versioning](https://semver.org/lang/pt-BR/).
 Este é o primeiro release versionado do projeto — não há tags anteriores.
 `v1.0.0` marca o ponto em que a API passa a ter contrato estável (`/v1`).
 
-## [1.7.0] — a definir na tag
+## [1.7.0] — 2026-09-24
 
 **Minor, não patch:** nova capacidade (cache-aside), opt-in, sem mudança de
 contrato — nenhum cliente que já respeitava `docs/openapi.yaml` é afetado.
