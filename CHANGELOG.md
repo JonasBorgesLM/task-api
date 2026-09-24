@@ -6,6 +6,23 @@ versionamento seguindo [Semantic Versioning](https://semver.org/lang/pt-BR/).
 Este é o primeiro release versionado do projeto — não há tags anteriores.
 `v1.0.0` marca o ponto em que a API passa a ter contrato estável (`/v1`).
 
+## [1.7.0] — a definir na tag
+
+**Minor, não patch:** nova capacidade (cache-aside), opt-in, sem mudança de
+contrato — nenhum cliente que já respeitava `docs/openapi.yaml` é afetado.
+
+### Adicionado
+- Cache-aside para `GET /v1/tasks` (`cistern`, L1 em processo + L2 Redis +
+  `Bus` de invalidação entre réplicas — issue cistern#70,
+  `docs/DECISIONS.md` § "Cache-aside para GET /v1/tasks"). Opt-in via
+  `REDIS_ADDR`: sem essa variável, `task.Repository` continua rodando sem
+  decorator nenhum, exatamente como antes. `ETag`/`X-Total-Count` de
+  `GET /v1/tasks` continuam vindo das linhas/contagem reais, sem nenhuma
+  mudança observável no contrato. `docker-compose.yml` e
+  `k8s/25-redis.yaml` passam a incluir um serviço Redis dedicado a este
+  cache (`maxmemory-policy allkeys-lru`, usuário ACL restrito) — nunca
+  compartilhado com outros usos futuros de Redis neste projeto.
+
 ## [1.6.1] — 2026-09-22
 
 > **Nota de versão:** a tag `v1.6.0` foi cortada cedo (em `731beec`, 2026-09-09)

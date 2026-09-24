@@ -73,6 +73,56 @@ services:
       timeout: 2s
       retries: 15
 
+  # Backs GET /v1/tasks's cache-aside layer (cistern, L1 in-process + L2
+  # redisstore + Bus — see docs/DECISIONS.md § "Cache-aside para GET
+  # /v1/tasks", including its correction paragraph). Dedicated to this
+  # cache only: cistern's own documentation forbids sharing a Redis
+  # instance with a rate limiter or a link-shortener store, since
+  # maxmemory-policy applies to the whole instance, not per logical
+  # database — see that decision's correction paragraph for the exact
+  # citation. If this project ever adds a distributed rate limiter or
+  # cairn.redisstore, each needs its own separate instance, not this one.
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --maxmemory-policy
+      - allkeys-lru
+      # A dedicated ACL user restricted to cistern's own keyspace and
+      # Pub/Sub channel — the exact rule redisstore/README.md documents
+      # as sufficient and tested. The default user is left alone
+      # (nopass, full access) purely so the healthcheck below can PING
+      # without credentials; the api service authenticates as "cistern",
+      # never as default.
+      - --user
+      - cistern
+      - "on"
+      - ">task-api-cistern-dev-secret"
+      - resetkeys
+      - "~cistern:*"
+      - resetchannels
+      - "&cistern:*"
+      - -@all
+      - +get
+      - +set
+      - +del
+      - +mget
+      - +incr
+      - +pexpire
+      - +publish
+      - +subscribe
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    # No volume: this Redis is purely a cache (cistern's own README:
+    # "Be a source of truth. Nothing may depend on the cache for
+    # correctness.") — losing it on `docker compose down` is a cold
+    # cache, never data loss, so there is nothing worth persisting.
+
   # Creates the bucket once MinIO is up, then exits. A bucket is not
   # created on demand by the application (see attachment.NewS3BlobStore
   # for why), so something has to make it, and doing it here keeps
@@ -146,6 +196,15 @@ services:
       ATTACHMENT_S3_ACCESS_KEY: task_api
       ATTACHMENT_S3_SECRET_KEY: task_api_secret
       ATTACHMENT_S3_USE_SSL: "false"
+      # "redis" resolves via Docker's embedded DNS to the redis service
+      # above, the same way "postgres" does for DATABASE_URL. Authenticates
+      # as the dedicated "cistern" ACL user redis's command: sets up —
+      # never the unauthenticated default user, which exists only for the
+      # healthcheck. Throwaway value, same spirit as ATTACHMENT_S3_SECRET_KEY
+      # above; never reuse it anywhere real.
+      REDIS_ADDR: redis:6379
+      REDIS_USERNAME: cistern
+      REDIS_PASSWORD: task-api-cistern-dev-secret
       # Signs the CSRF token for cookie-authenticated writes (see
       # config.Config.CSRFSecret and docs/DECISIONS.md § "Autenticação:
       # modo duplo"). Required — csrf.New refuses to build without at
@@ -178,6 +237,14 @@ services:
       # check against mc still creating the bucket.
       minio-bucket:
         condition: service_completed_successfully
+      # service_started, not service_healthy like postgres above: api
+      # must not refuse to start just because Redis isn't ready yet —
+      # cistern's own fail-open design means a slow or unhealthy cache
+      # degrades the first few requests, never blocks startup (see
+      # buildCachedTaskRepository's doc comment in cmd/api/main.go).
+      # This entry only keeps `docker compose up`'s start order sensible.
+      redis:
+        condition: service_started
     # Restart on crash, but stay down after an explicit `docker compose
     # stop` / `down`. The API exits non-zero when it cannot reach
     # PostgreSQL at startup (see openDatabase's Ping), so without this a
