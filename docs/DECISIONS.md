@@ -3171,3 +3171,38 @@ MinIO), decisão de shape que fica para quando alguém depender de um
 e compila a MinIO inteira (~140MB de binário, dezenas de dependências) — mais
 lento que um `docker pull` de imagem pronta seria, se existisse uma. Builds
 seguintes reaproveitam o cache do Go que `actions/setup-go` já mantém.
+
+## Go 1.26.9, não 1.27.2, para a GO-2026-6617 (issue #312)
+
+A GO-2026-6617 / CVE-2026-97032 (crash de servidor HTTP/2 no `net/http`,
+publicada em 2026-10-08) afeta a stdlib **< 1.26.9** e **1.27.0–1.27.1**.
+`go.mod` e as duas imagens (`Dockerfile`, `web/Dockerfile`) passam de 1.26.6
+para **1.26.9**. Como a CI lê a versão do `go.mod` (`go-version-file`), o
+build, os testes e as imagens rodam exatamente nela.
+
+**A opção não tomada: 1.27.2.** É a única versão que exclui as duas linhas
+vulneráveis — um piso de 1.26.9 ainda é satisfeito por 1.27.0/1.27.1, que não
+têm correção, e foi por isso que o `usher` subiu para 1.27.2 (usher#139).
+Aqui ela custaria o gate de lint inteiro: nenhuma release do `staticcheck`
+(v0.8.1 é a última) nem o `master` do go-tools leem o export data do Go 1.27
+("export data version 5 is greater than maximum supported version 4"), e o
+`gosec` v2.28.0 também não. Em 1.26.9, os quatro gates — `staticcheck` (com e
+sem `-tags=integration`), `gosec`, `govulncheck` e `go test -race` — passam
+sem mudança, com o código de saída conferido.
+
+**Resíduo aceito:** alguém compilando localmente com Go 1.27.0 ou 1.27.1
+satisfaz o piso e gera um binário vulnerável. Os artefatos que este repositório
+de fato produz (imagens e CI) não. Reabrir quando o `staticcheck` suportar Go
+1.27: aí o piso vai para 1.27.2.
+
+**Exposição:** baixa. Nenhum dos binários serve TLS nem h2c (o `tls.Config`
+em `cmd/api/main.go` é de cliente), e o `net/http` só fala HTTP/2 sobre TLS
+por padrão.
+
+**Visto de passagem, para quando o gosec subir:** o `gosec` do `master`
+(`d2b649e`) aponta G703 (path traversal por taint) em `cmd/web/main.go`, no
+`os.Stat(fsPath)` do `spaHandler`. É falso positivo: o caminho passa por
+`path.Clean` sobre um path enraizado e por `pathEscapesDir`, como o comentário
+da função e `TestSPAHandler_PathTraversal_AttemptStillResolvesInsideDist` já
+documentam. Vai precisar de um `#nosec G703` com essa justificativa quando a
+versão do gosec for atualizada.
