@@ -6,6 +6,22 @@ versionamento seguindo [Semantic Versioning](https://semver.org/lang/pt-BR/).
 Este é o primeiro release versionado do projeto — não há tags anteriores.
 `v1.0.0` marca o ponto em que a API passa a ter contrato estável (`/v1`).
 
+## [1.7.1] — 2026-10-12
+
+**Patch de segurança:** só o toolchain muda; nenhum código, nenhum contrato.
+
+### Segurança
+- Go **1.26.6 → 1.26.9** (`go.mod`, `Dockerfile`, `web/Dockerfile`) para a
+  GO-2026-6617 / CVE-2026-97032, um crash de servidor HTTP/2 no `net/http`
+  (issue #312, PR #313). Exposição baixa — nenhum binário serve TLS nem h2c —,
+  mas todo binário compilado antes carregava a stdlib vulnerável. Por que 1.26.9
+  e não 1.27.2, e o resíduo aceito: `docs/DECISIONS.md` § "Go 1.26.9, não
+  1.27.2, para a GO-2026-6617".
+
+### Corrigido
+- `docs/openapi.yaml`'s `info.version` voltou a acompanhar a tag: estava em
+  `1.6.0` desde então, apesar da regra no `CLAUDE.md`.
+
 ## [1.7.0] — 2026-09-24
 
 **Minor, não patch:** nova capacidade (cache-aside), opt-in, sem mudança de
