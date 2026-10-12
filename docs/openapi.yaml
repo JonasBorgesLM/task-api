@@ -79,7 +79,7 @@ info:
   # 2026-08-29, months before v1.1.0 even existed) because nothing
   # required bumping it. Bump it as part of every release from now on
   # — see CLAUDE.md's "Keep documentation in sync".
-  version: "1.6.0"
+  version: "1.7.1"
   license:
     name: MIT
     url: https://github.com/JonasBorgesLM/task-api/blob/main/LICENSE
