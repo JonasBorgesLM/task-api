@@ -1,6 +1,6 @@
 module github.com/JonasBorgesLM/task-api
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/JonasBorgesLM/bastion v0.2.1

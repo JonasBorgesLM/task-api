@@ -47,7 +47,7 @@ RUN npm run build
 ## server either serves the files in /dist or it does not, and that is
 ## already visible from what index.html itself renders.
 ## ---------------------------------------------------------------------
-FROM golang:1.26.6-alpine AS go-builder
+FROM golang:1.26.9-alpine AS go-builder
 
 WORKDIR /src
 
