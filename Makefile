@@ -18,9 +18,12 @@
 # Atualizar é deliberado: suba o número aqui, rode `make check`, e o
 # commit registra a troca. O CI chama estes mesmos alvos, então não há um
 # segundo lugar para desalinhar.
-STATICCHECK_VERSION ?= v0.8.1
+STATICCHECK_VERSION ?= v0.8.2
 GOVULNCHECK_VERSION ?= v1.7.0
-GOSEC_VERSION        ?= v2.28.0
+# O gosec está fixado num commit do master, não numa tag: a v2.29.0, última
+# release, não lê o export data do Go 1.27 (#316). É o mesmo pin do usher e
+# do sapper; volta para uma tag quando uma ler (usher#146, sapper#56).
+GOSEC_VERSION        ?= d2b649ec01825c20bd101ec584e559adb287e578
 
 # Connection string used by the local PostgreSQL instance started via
 # `make db-up` / `make docker-up` (see docker-compose.yml). Override on
