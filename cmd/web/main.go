@@ -337,6 +337,12 @@ func spaHandler(distDir string, indexHTML []byte) http.Handler {
 			return
 		}
 
+		// #nosec G703 -- fsPath is path.Clean of a rooted request path
+		// joined under cleanDistDir, then checked by pathEscapesDir above
+		// (see this handler's opening comment and
+		// TestSPAHandler_PathTraversal_AttemptStillResolvesInsideDist).
+		// gosec's taint analysis sees the request path reach os.Stat and
+		// nothing of the containment in between.
 		if info, err := os.Stat(fsPath); err == nil && !info.IsDir() {
 			// Vite hashes every filename under assets/ (index-BusBMSGH.js),
 			// so a given URL's content never changes — safe to cache

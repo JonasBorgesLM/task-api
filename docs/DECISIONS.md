@@ -3206,3 +3206,33 @@ por padrão.
 da função e `TestSPAHandler_PathTraversal_AttemptStillResolvesInsideDist` já
 documentam. Vai precisar de um `#nosec G703` com essa justificativa quando a
 versão do gosec for atualizada.
+
+## Piso Go 1.27.2: o resíduo da GO-2026-6617 encerrado (issue #316)
+
+A entrada acima aceitou o piso 1.26.9 com um resíduo: um build local com Go
+1.27.0 ou 1.27.1 satisfaz o piso e gera um binário vulnerável. O gatilho para
+reabrir chegou com o `staticcheck` 2026.2.2 (v0.8.2, 2026-10-12), que "now
+supports the updated export data format used by Go 1.27.2". `go.mod` e as duas
+imagens passam para **1.27.2**, a única versão que exclui as duas linhas
+vulneráveis, que é o mesmo piso do `usher` (usher#139).
+
+**Ferramentas:** `STATICCHECK_VERSION` vai para v0.8.2. O `gosec` não tem
+release que leia o export data do Go 1.27: a v2.29.0, a última, também não
+lê. Então `GOSEC_VERSION` fica fixado no commit `d2b649e` do master, o mesmo
+pin do `usher` e do `sapper`, e volta para uma tag quando uma ler (usher#146,
+sapper#56).
+
+**O G703 previsto acima apareceu, e foi anotado.** O gosec novo aponta o
+`os.Stat(fsPath)` do `spaHandler` (`cmd/web/main.go`). É um falso positivo
+pelo motivo já registrado, e o `#nosec G703` fica ao lado da chamada com essa
+justificativa.
+
+Todos os gates foram conferidos **pelo código de saída**, em Go 1.27.2:
+- `go build` e `go vet`, com e sem `-tags=integration`;
+- `make lint`, que roda o staticcheck nas duas variantes;
+- `make gosec` e `make vulncheck`;
+- `make tidy-check`;
+- `go test -race ./...`.
+
+Sem resíduo: os artefatos e qualquer build local que respeite o `go.mod`
+estão em 1.27.2.
